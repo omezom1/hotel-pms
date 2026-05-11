@@ -1,0 +1,93 @@
+@import 'react-date-range/dist/styles.css';
+@import 'react-date-range/dist/theme/default.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* ===== PRINT STYLES ===== */
+@media print {
+  /* ซ่อน sidebar และ reset margin */
+  aside {
+    display: none !important;
+  }
+  main {
+    margin-left: 0 !important;
+  }
+
+  /* ซ่อน elements ที่ไม่ต้องการพิมพ์ */
+  .no-print {
+    display: none !important;
+  }
+
+  /* หน้าพิมพ์ */
+  body {
+    background: white !important;
+    font-size: 12px;
+    color: #000;
+  }
+
+  /* ตาราง */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  th, td {
+    border: 1px solid #e2e8f0;
+    padding: 6px 8px !important;
+  }
+  thead {
+    background-color: #f8fafc !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* ไม่ตัดหน้ากลางตาราง */
+  tr {
+    page-break-inside: avoid;
+  }
+
+  /* กราฟ — ให้พิมพ์ได้ */
+  svg {
+    max-width: 100%;
+  }
+
+  /* Card สีพื้นหลัง */
+  .print-color {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* เส้นขอบ card */
+  .bg-white {
+    border: 1px solid #e2e8f0;
+  }
+
+  /* ตั้งค่าหน้ากระดาษ */
+  @page {
+    size: A4;
+    margin: 15mm 12mm;
+  }
+
+  /* page break */
+  .print-break {
+    page-break-before: always;
+  }
+}
