@@ -11,7 +11,8 @@ import { toast } from 'sonner'
 import Link from 'next/link'
 import dynamic from 'next/dynamic'
 import { th } from 'date-fns/locale'
-const DateRange = dynamic(() => import('react-date-range').then((m) => m.DateRange), { ssr: false })
+// @ts-ignore
+const DateRange = dynamic(() => import('react-date-range').then((m: any) => m.DateRange), { ssr: false })
 
 const statusColors: Record<BookingStatus, string> = {
   confirmed: 'text-blue-700 bg-blue-100',
