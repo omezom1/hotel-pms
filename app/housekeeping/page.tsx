@@ -32,6 +32,7 @@ export default function HousekeepingPage() {
     const room = rooms.find((r) => r.id === form.roomId)
     const hk = staff.find((s) => s.id === form.staffId)
     if (!room || !hk) return
+    if (room.status === 'occupied' && !confirm(`ห้อง ${room.number} มีผู้เข้าพักอยู่\nยืนยันมอบหมายงานทำความสะอาดให้ ${hk.name}?`)) return
     addHousekeepingTask({
       roomId: form.roomId, roomNumber: room.number,
       assignedTo: hk.name, staffId: form.staffId,
@@ -124,8 +125,15 @@ export default function HousekeepingPage() {
                 <select value={form.roomId} onChange={(e) => setForm({ ...form, roomId: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                   <option value="">เลือกห้อง</option>
-                  {rooms.map((r) => <option key={r.id} value={r.id}>ห้อง {r.number} ({getRoomStatusLabel(r.status)})</option>)}
+                  {[...rooms].sort((a, b) => (a.status === 'occupied' ? 1 : 0) - (b.status === 'occupied' ? 1 : 0)).map((r) => (
+                    <option key={r.id} value={r.id}>
+                      ห้อง {r.number} ({getRoomStatusLabel(r.status)}){r.status === 'occupied' ? ' ⚠️' : ''}
+                    </option>
+                  ))}
                 </select>
+                {form.roomId && rooms.find((r) => r.id === form.roomId)?.status === 'occupied' && (
+                  <p className="text-xs text-amber-600 mt-1.5">⚠️ ห้องนี้มีผู้เข้าพักอยู่ — ระบบจะถามยืนยันอีกครั้งก่อนมอบหมาย</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">มอบหมายให้ *</label>

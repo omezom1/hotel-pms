@@ -67,6 +67,10 @@ export default function BookingDetailPage() {
 
   function handleRecordPayment() {
     if (payForm.amount <= 0 || !booking || !user) return
+    if (payForm.amount > outstanding) {
+      toast.error(`จำนวนเกินยอดค้างชำระ (${formatCurrency(outstanding)})`)
+      return
+    }
     const result = recordPayment(booking.id, payForm.amount, payForm.method, user.staff.id)
     if (!result.ok) {
       toast.error(result.error ?? 'รับชำระไม่สำเร็จ')
@@ -194,6 +198,7 @@ export default function BookingDetailPage() {
                   )}
                   {(booking.status === 'confirmed' || booking.status === 'pending') && (
                     <button onClick={() => {
+                      if (!confirm(`ยืนยันยกเลิกการจอง ${booking.id} ของ ${guest?.name ?? '-'}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`)) return
                       cancelBooking(booking.id)
                       logAudit({ category: 'booking', action: 'cancel', summary: `ยกเลิกการจอง ${guest?.name ?? '-'} ห้อง ${room?.number ?? '-'}`, entityId: booking.id })
                       toast.success('ยกเลิกการจองแล้ว')
@@ -304,7 +309,15 @@ export default function BookingDetailPage() {
                           {addOnStatusLabels[ao.status]}
                         </span>
                         {ao.status === 'requested' && (
-                          <button onClick={() => { cancelAddOn(ao.id); toast.info('ยกเลิก Add-on แล้ว') }} title="ยกเลิก" className="p-1 rounded hover:bg-red-50 text-slate-400 hover:text-red-500 shrink-0">
+                          <button
+                            onClick={() => {
+                              if (!confirm(`ยกเลิก add-on "${item?.name ?? 'รายการนี้'}"?\nรายได้ ${formatCurrency(ao.totalPrice)} จะหายไปจากบิล`)) return
+                              cancelAddOn(ao.id)
+                              toast.info('ยกเลิก Add-on แล้ว')
+                            }}
+                            title="ยกเลิก"
+                            className="p-1 rounded hover:bg-red-50 text-slate-400 hover:text-red-500 shrink-0"
+                          >
                             <Ban size={14} />
                           </button>
                         )}

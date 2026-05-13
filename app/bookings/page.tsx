@@ -177,8 +177,14 @@ export default function BookingsPage() {
                           </Link>
                           {(b.status === 'confirmed' || b.status === 'pending') && (
                             <button
-                              onClick={() => { cancelBooking(b.id); logAudit({ category: 'booking', action: 'cancel', summary: `ยกเลิกการจอง ${b.id}`, entityId: b.id }); toast.success('ยกเลิกการจองแล้ว') }}
+                              onClick={() => {
+                                if (!confirm(`ยืนยันยกเลิกการจอง ${b.id} ของ ${guest?.name ?? 'walk-in'}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`)) return
+                                cancelBooking(b.id)
+                                logAudit({ category: 'booking', action: 'cancel', summary: `ยกเลิกการจอง ${b.id}`, entityId: b.id })
+                                toast.success('ยกเลิกการจองแล้ว')
+                              }}
                               className="p-1.5 rounded hover:bg-red-50 text-slate-400 hover:text-red-600 transition-colors"
+                              title="ยกเลิกการจอง"
                             >
                               <Ban size={15} />
                             </button>

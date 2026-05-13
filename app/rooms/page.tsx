@@ -149,12 +149,22 @@ export default function RoomsPage() {
                         </td>
                         <td className="no-print px-4 py-3">
                           <select
-                            value={room.status}
-                            onChange={(e) => updateRoomStatus(room.id, e.target.value as RoomStatus)}
-                            className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none bg-white"
+                            value={room.status === 'occupied' ? '' : room.status}
+                            disabled={room.status === 'occupied'}
+                            onChange={(e) => {
+                              const next = e.target.value as RoomStatus
+                              if (
+                                next === 'available' &&
+                                room.status === 'cleaning' &&
+                                !confirm(`ยืนยันว่าห้อง ${room.number} ทำความสะอาดเสร็จและพร้อมรับแขกแล้วใช่หรือไม่?`)
+                              ) return
+                              updateRoomStatus(room.id, next)
+                            }}
+                            className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none bg-white disabled:bg-slate-100 disabled:text-slate-400"
+                            title={room.status === 'occupied' ? 'ห้องมีผู้พักอยู่ — เปลี่ยนสถานะอัตโนมัติเมื่อเช็คเอาต์' : ''}
                           >
+                            {room.status === 'occupied' && <option value="">มีผู้เข้าพัก (อัตโนมัติ)</option>}
                             <option value="available">ว่าง</option>
-                            <option value="occupied">มีผู้เข้าพัก</option>
                             <option value="cleaning">ทำความสะอาด</option>
                             <option value="maintenance">ปิดปรับปรุง</option>
                           </select>
@@ -239,7 +249,11 @@ export default function RoomsPage() {
                                 จัดการแล้ว
                               </button>
                               <button
-                                onClick={() => { cancelAddOn(ao.id); toast.info('ยกเลิก Add-on แล้ว') }}
+                                onClick={() => {
+                                  if (!confirm(`ยกเลิก add-on "${item?.name ?? 'รายการนี้'}"?\nรายได้ ${formatCurrency(ao.totalPrice)} จะหายไปจากบิล`)) return
+                                  cancelAddOn(ao.id)
+                                  toast.info('ยกเลิก Add-on แล้ว')
+                                }}
                                 className="px-3 py-1.5 text-xs bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-lg font-medium transition-colors"
                               >
                                 ยกเลิก
