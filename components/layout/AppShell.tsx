@@ -60,7 +60,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <>
       <Sidebar />
-      <main className="ml-60 min-h-screen">{children}</main>
+      <main className="ml-16 lg:ml-60 min-h-screen">{children}</main>
       <GlobalSearch />
     </>
   )
