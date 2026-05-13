@@ -13,7 +13,7 @@ export default function GuestsPage() {
   const filtered = guests.filter((g) =>
     !search ||
     g.name.toLowerCase().includes(search.toLowerCase()) ||
-    g.email.toLowerCase().includes(search.toLowerCase()) ||
+    g.email?.toLowerCase().includes(search.toLowerCase()) ||
     g.phone.includes(search)
   )
 
