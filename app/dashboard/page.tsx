@@ -227,14 +227,27 @@ export default function DashboardPage() {
                       <div><span className="text-slate-400">ราคา/คืน: </span>{formatCurrency(selectedRoomData.pricePerNight)}</div>
                       <div><span className="text-slate-400">รองรับ: </span>{selectedRoomData.maxGuests} ท่าน · ชั้น {selectedRoomData.floor}</div>
                       {viewDate === today && (
-                        <div className="pt-2 flex gap-2 flex-wrap">
-                          {(['available', 'occupied', 'cleaning', 'maintenance'] as RoomStatus[]).map((s) => (
-                            <button key={s} onClick={() => updateRoomStatus(selectedRoomData.id, s)}
-                              className={`text-xs px-3 py-1.5 rounded-full border transition-colors font-medium ${selectedRoomData.status === s ? 'bg-slate-800 text-white border-slate-800' : 'border-slate-300 text-slate-600 hover:border-slate-500'}`}>
-                              {getRoomStatusLabel(s)}
-                            </button>
-                          ))}
-                        </div>
+                        <>
+                          <div className="pt-2 flex gap-2 flex-wrap">
+                            {(['available', 'cleaning', 'maintenance'] as RoomStatus[]).map((s) => (
+                              <button
+                                key={s}
+                                onClick={() => {
+                                  if (
+                                    s === 'available' &&
+                                    selectedRoomData.status === 'cleaning' &&
+                                    !confirm('ยืนยันว่าห้องทำความสะอาดเสร็จและพร้อมรับแขกแล้วใช่หรือไม่?')
+                                  ) return
+                                  updateRoomStatus(selectedRoomData.id, s)
+                                }}
+                                className={`text-xs px-3 py-1.5 min-h-[36px] rounded-full border transition-colors font-medium ${selectedRoomData.status === s ? 'bg-slate-800 text-white border-slate-800' : 'border-slate-300 text-slate-600 hover:border-slate-500'}`}
+                              >
+                                {getRoomStatusLabel(s)}
+                              </button>
+                            ))}
+                          </div>
+                          <p className="text-[11px] text-slate-400 pt-1.5">สถานะ "มีผู้เข้าพัก" จะเปลี่ยนอัตโนมัติเมื่อเช็คอินจาก /front-desk</p>
+                        </>
                       )}
                     </div>
                   )}
