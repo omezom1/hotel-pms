@@ -373,8 +373,20 @@ export default function InventoryPage() {
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">
                   {stockDialog.mode === 'adjust' ? 'สต็อกใหม่' : 'จำนวน'}
                 </label>
-                <input type="number" min={0} value={stockQty} onChange={(e) => setStockQty(+e.target.value)}
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                <input
+                  type="number"
+                  min={0}
+                  max={stockDialog.mode === 'use' ? stockDialog.item.currentStock : undefined}
+                  value={stockQty}
+                  onChange={(e) => {
+                    const v = Math.max(0, +e.target.value)
+                    setStockQty(stockDialog.mode === 'use' ? Math.min(stockDialog.item.currentStock, v) : v)
+                  }}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                {stockDialog.mode === 'use' && (
+                  <p className="text-xs text-slate-400 mt-1.5">ใช้ได้สูงสุด {stockDialog.item.currentStock} {unitLabels[stockDialog.item.unit]}</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>

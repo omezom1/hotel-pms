@@ -9,7 +9,7 @@ import { BedDouble, UserPlus, CheckCircle2, Clock, AlertTriangle, LogIn, X } fro
 import { toast } from 'sonner'
 
 export default function FrontDeskPage() {
-  const { rooms, guests, bookings, updateBookingStatus, createBooking, addGuest, logAudit } = useHotelStore()
+  const { rooms, guests, bookings, bookingAddOns, updateBookingStatus, createBooking, addGuest, recordPayment, logAudit } = useHotelStore()
   const { user } = useAuthStore()
 
   const [walkInRoomId, setWalkInRoomId] = useState<string | null>(null)
@@ -19,6 +19,18 @@ export default function FrontDeskPage() {
   })
   const [newGuestMode, setNewGuestMode] = useState(false)
   const [newGuest, setNewGuest] = useState({ name: '', phone: '', nationality: 'ไทย' })
+  const [payDialog, setPayDialog] = useState<{ bookingId: string; outstanding: number } | null>(null)
+  const [payAmount, setPayAmount] = useState(0)
+  const [payMethod, setPayMethod] = useState<PaymentMethod>('cash')
+
+  function outstandingOf(bookingId: string) {
+    const b = bookings.find((x) => x.id === bookingId)
+    if (!b) return 0
+    const addOnTotal = bookingAddOns
+      .filter((a) => a.bookingId === bookingId && a.status !== 'cancelled')
+      .reduce((s, a) => s + a.totalPrice, 0)
+    return b.totalAmount + addOnTotal - b.paidAmount
+  }
 
   const today = todayLocal()
 
@@ -54,11 +66,34 @@ export default function FrontDeskPage() {
     const b = bookings.find((x) => x.id === bookingId)
     const g = guests.find((x) => x.id === b?.guestId)
     const r = rooms.find((x) => x.id === b?.roomId)
+    const outstanding = outstandingOf(bookingId)
+    if (outstanding > 0) {
+      if (!confirm(`แขกยังค้างชำระ ${formatCurrency(outstanding)}\nยืนยันเช็คเอาต์โดยไม่เก็บเงิน?`)) return
+    }
     updateBookingStatus(bookingId, 'checked_out')
     logAudit({ category: 'booking', action: 'check_out', summary: `เช็คเอาต์ ${g?.name ?? '-'} ห้อง ${r?.number ?? '-'}`, entityId: bookingId })
     toast.success(`เช็คเอาต์สำเร็จ${g ? ` — ${g.name}` : ''}`, {
       description: 'สร้างใบแจ้งหนี้ + งานทำความสะอาดอัตโนมัติแล้ว',
     })
+  }
+
+  function handleQuickPay() {
+    if (!payDialog || !user) return
+    if (payAmount <= 0) return
+    if (payAmount > payDialog.outstanding) {
+      toast.error(`จำนวนเกินยอดค้างชำระ (${formatCurrency(payDialog.outstanding)})`)
+      return
+    }
+    const result = recordPayment(payDialog.bookingId, payAmount, payMethod, user.staff.id)
+    if (!result.ok) {
+      toast.error(result.error ?? 'รับชำระไม่สำเร็จ')
+      return
+    }
+    logAudit({ category: 'payment', action: 'record', summary: `รับชำระ ${payAmount.toLocaleString()} บาท (${payMethod})`, entityId: payDialog.bookingId })
+    toast.success(`บันทึกการชำระ ${formatCurrency(payAmount)}`)
+    setPayDialog(null)
+    setPayAmount(0)
+    setPayMethod('cash')
   }
 
   function handleWalkIn() {
@@ -113,15 +148,13 @@ export default function FrontDeskPage() {
     toast.success(`Walk-in สำเร็จ ห้อง ${room.number}`)
   }
 
-  const selectedRoom = rooms.find((r) => r.id === walkInRoomId)
-
   return (
     <div className="flex flex-col h-screen">
       <Header title="เคาน์เตอร์หน้าบ้าน" subtitle="จัดการเช็คอิน · เช็คเอาต์ · Walk-in" />
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
 
         {/* KPI */}
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
             { label: 'รอเช็คอิน', value: checkInsRemaining, sub: `เช็คอินไปแล้ว ${checkInsDoneToday}`, color: 'text-blue-600', bg: 'bg-blue-50 border-blue-100' },
             { label: 'รอเช็คเอาต์', value: checkOutsRemaining, sub: `เช็คเอาต์ไปแล้ว ${checkOutsDoneToday}`, color: 'text-amber-600', bg: 'bg-amber-50 border-amber-100' },
@@ -137,10 +170,10 @@ export default function FrontDeskPage() {
         </div>
 
         {/* Two-column layout */}
-        <div className="grid grid-cols-5 gap-5">
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
 
           {/* Left: queues */}
-          <div className="col-span-3 space-y-4">
+          <div className="lg:col-span-3 space-y-4">
 
             {/* Check-in queue */}
             <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
@@ -212,17 +245,23 @@ export default function FrontDeskPage() {
                     const guest = guests.find((g) => g.id === booking.guestId)
                     const room = rooms.find((r) => r.id === booking.roomId)
                     const isDueToday = booking.checkOut.split('T')[0] <= today
+                    const outstanding = outstandingOf(booking.id)
                     return (
                       <div
                         key={booking.id}
-                        className={`flex items-center gap-4 px-5 py-3.5 hover:bg-slate-50 transition-colors ${isDueToday ? 'border-l-4 border-red-400' : 'border-l-4 border-transparent'}`}
+                        className={`flex items-center gap-3 px-5 py-3.5 hover:bg-slate-50 transition-colors ${isDueToday ? 'border-l-4 border-red-400' : 'border-l-4 border-transparent'}`}
                       >
                         <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-0.5">
+                          <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                             <span className="font-semibold text-slate-800">{guest?.name ?? '–'}</span>
                             {isDueToday && (
                               <span className="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-medium">
                                 เช็คเอาต์วันนี้
+                              </span>
+                            )}
+                            {outstanding > 0 && (
+                              <span className="text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">
+                                ค้าง {formatCurrency(outstanding)}
                               </span>
                             )}
                           </div>
@@ -233,9 +272,17 @@ export default function FrontDeskPage() {
                             <span>ออก {formatDate(booking.checkOut)}</span>
                           </div>
                         </div>
+                        {outstanding > 0 && (
+                          <button
+                            onClick={() => { setPayDialog({ bookingId: booking.id, outstanding }); setPayAmount(outstanding); setPayMethod('cash') }}
+                            className="shrink-0 px-3 py-2 min-h-[40px] bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-xs font-medium transition-colors"
+                          >
+                            รับชำระ
+                          </button>
+                        )}
                         <button
                           onClick={() => handleCheckOut(booking.id)}
-                          className="shrink-0 px-3 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-xs font-medium transition-colors"
+                          className="shrink-0 px-3 py-2 min-h-[40px] bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-xs font-medium transition-colors"
                         >
                           เช็คเอาต์
                         </button>
@@ -248,7 +295,7 @@ export default function FrontDeskPage() {
           </div>
 
           {/* Right: available rooms */}
-          <div className="col-span-2">
+          <div className="lg:col-span-2">
             <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden sticky top-0">
               <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
                 <BedDouble size={17} className="text-slate-400" />
@@ -261,22 +308,119 @@ export default function FrontDeskPage() {
                 <div className="py-12 text-center text-slate-400 text-sm">ไม่มีห้องว่าง</div>
               ) : (
                 <div className="divide-y divide-slate-50 max-h-[calc(100vh-280px)] overflow-y-auto">
-                  {availableRooms.map((room) => (
-                    <div key={room.id} className="flex items-center gap-3 px-5 py-3.5 hover:bg-slate-50 transition-colors">
-                      <div className="flex-1 min-w-0">
-                        <div className="font-semibold text-slate-800">ห้อง {room.number}</div>
-                        <div className="text-xs text-slate-500">
-                          {getRoomTypeLabel(room.type)} · ชั้น {room.floor} · {formatCurrency(room.pricePerNight)}/คืน
+                  {availableRooms.map((room) => {
+                    const expanded = walkInRoomId === room.id
+                    return (
+                      <div key={room.id} className={expanded ? 'bg-amber-50/40' : ''}>
+                        <div className="flex items-center gap-3 px-5 py-3.5 hover:bg-slate-50 transition-colors">
+                          <div className="flex-1 min-w-0">
+                            <div className="font-semibold text-slate-800">ห้อง {room.number}</div>
+                            <div className="text-xs text-slate-500">
+                              {getRoomTypeLabel(room.type)} · ชั้น {room.floor} · {formatCurrency(room.pricePerNight)}/คืน
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              if (expanded) {
+                                setWalkInRoomId(null)
+                              } else {
+                                setWalkInRoomId(room.id)
+                                setForm({ guestId: '', nights: 1, adults: 1, children: 0, paymentMethod: 'cash' })
+                                setNewGuestMode(true)
+                                setNewGuest({ name: '', phone: '', nationality: 'ไทย' })
+                              }
+                            }}
+                            className="shrink-0 flex items-center gap-1.5 px-3 py-2 min-h-[40px] bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-medium transition-colors"
+                          >
+                            {expanded ? <><X size={14} /> ปิด</> : <><UserPlus size={14} /> Walk-in</>}
+                          </button>
                         </div>
+                        {expanded && (
+                          <div className="px-5 pb-4 space-y-3 border-t border-amber-100">
+                            <div className="flex items-center justify-between pt-3">
+                              <div className="text-xs text-slate-500">
+                                {newGuestMode ? 'ลูกค้าใหม่' : 'ลูกค้าเดิม'}
+                              </div>
+                              <button type="button" onClick={() => setNewGuestMode(!newGuestMode)}
+                                className="text-xs text-amber-600 hover:text-amber-700 font-medium">
+                                {newGuestMode ? 'เลือกจากรายการเดิม →' : '← เพิ่มลูกค้าใหม่'}
+                              </button>
+                            </div>
+                            {newGuestMode ? (
+                              <div className="grid grid-cols-2 gap-2">
+                                <input
+                                  value={newGuest.name}
+                                  onChange={(e) => setNewGuest({ ...newGuest, name: e.target.value })}
+                                  placeholder="ชื่อ-นามสกุล *"
+                                  className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                                  autoFocus
+                                />
+                                <input
+                                  value={newGuest.phone}
+                                  onChange={(e) => setNewGuest({ ...newGuest, phone: e.target.value })}
+                                  placeholder="เบอร์โทร"
+                                  className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                                />
+                              </div>
+                            ) : (
+                              <select
+                                value={form.guestId}
+                                onChange={(e) => setForm({ ...form, guestId: e.target.value })}
+                                className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                              >
+                                <option value="">เลือกลูกค้า</option>
+                                {guests.map((g) => (
+                                  <option key={g.id} value={g.id}>{g.name} — {g.phone}</option>
+                                ))}
+                              </select>
+                            )}
+                            <div className="grid grid-cols-3 gap-2">
+                              <div>
+                                <label className="block text-[11px] text-slate-500 mb-0.5">คืน</label>
+                                <input type="number" min={1} max={30} value={form.nights}
+                                  onChange={(e) => setForm({ ...form, nights: Math.max(1, +e.target.value) })}
+                                  className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[11px] text-slate-500 mb-0.5">ผู้ใหญ่</label>
+                                <input type="number" min={1} max={10} value={form.adults}
+                                  onChange={(e) => setForm({ ...form, adults: Math.max(1, +e.target.value) })}
+                                  className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[11px] text-slate-500 mb-0.5">ชำระ</label>
+                                <select
+                                  value={form.paymentMethod}
+                                  onChange={(e) => setForm({ ...form, paymentMethod: e.target.value as PaymentMethod })}
+                                  className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
+                                >
+                                  <option value="cash">เงินสด</option>
+                                  <option value="credit_card">บัตร</option>
+                                  <option value="qr_code">QR</option>
+                                  <option value="bank_transfer">โอน</option>
+                                </select>
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-between bg-amber-100 rounded-lg px-3 py-2">
+                              <span className="text-xs text-amber-700">รวม {form.nights} คืน</span>
+                              <span className="font-bold text-amber-800">
+                                {formatCurrency(calcBookingTotal(room.type, new Date().toISOString(), new Date(Date.now() + form.nights * 86400000).toISOString(), room.pricePerNight))}
+                              </span>
+                            </div>
+                            <button
+                              onClick={handleWalkIn}
+                              disabled={newGuestMode ? !newGuest.name : !form.guestId}
+                              className="w-full px-4 py-2.5 min-h-[44px] bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors"
+                            >
+                              ยืนยัน Walk-in
+                            </button>
+                          </div>
+                        )}
                       </div>
-                      <button
-                        onClick={() => setWalkInRoomId(room.id)}
-                        className="shrink-0 flex items-center gap-1.5 px-3 py-2 min-h-[40px] bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-medium transition-colors"
-                      >
-                        <UserPlus size={14} /> Walk-in
-                      </button>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -284,91 +428,31 @@ export default function FrontDeskPage() {
         </div>
       </div>
 
-      {/* Walk-in modal */}
-      {walkInRoomId && (
+      {/* Quick payment dialog */}
+      {payDialog && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
-              <div>
-                <h2 className="font-semibold text-slate-800">Walk-in เข้าพัก</h2>
-                <p className="text-sm text-slate-500 mt-0.5">
-                  ห้อง {selectedRoom?.number} · {getRoomTypeLabel(selectedRoom?.type ?? '')} · {formatCurrency(selectedRoom?.pricePerNight ?? 0)}/คืน
-                </p>
-              </div>
-              <button onClick={() => setWalkInRoomId(null)} className="p-2 rounded-lg hover:bg-slate-100">
-                <X size={18} />
-              </button>
+              <h2 className="font-semibold text-slate-800">บันทึกรับชำระเงิน</h2>
+              <button onClick={() => setPayDialog(null)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="block text-sm font-medium text-slate-700">ลูกค้า *</label>
-                  <button type="button" onClick={() => setNewGuestMode(!newGuestMode)}
-                    className="text-xs text-amber-600 hover:text-amber-700 font-medium">
-                    {newGuestMode ? '← เลือกจากรายการ' : '+ เพิ่มลูกค้าใหม่'}
-                  </button>
-                </div>
-                {newGuestMode ? (
-                  <div className="space-y-2">
-                    <input
-                      value={newGuest.name}
-                      onChange={(e) => setNewGuest({ ...newGuest, name: e.target.value })}
-                      placeholder="ชื่อ-นามสกุล *"
-                      className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
-                    />
-                    <div className="grid grid-cols-2 gap-2">
-                      <input
-                        value={newGuest.phone}
-                        onChange={(e) => setNewGuest({ ...newGuest, phone: e.target.value })}
-                        placeholder="โทรศัพท์"
-                        className="px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
-                      />
-                      <input
-                        value={newGuest.nationality}
-                        onChange={(e) => setNewGuest({ ...newGuest, nationality: e.target.value })}
-                        placeholder="สัญชาติ"
-                        className="px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <select
-                    value={form.guestId}
-                    onChange={(e) => setForm({ ...form, guestId: e.target.value })}
-                    className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
-                  >
-                    <option value="">เลือกลูกค้า</option>
-                    {guests.map((g) => (
-                      <option key={g.id} value={g.id}>{g.name} — {g.phone}</option>
-                    ))}
-                  </select>
-                )}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนคืน</label>
-                  <input
-                    type="number" min={1} max={30} value={form.nights}
-                    onChange={(e) => setForm({ ...form, nights: Math.max(1, +e.target.value) })}
-                    className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ผู้ใหญ่</label>
-                  <input
-                    type="number" min={1} max={10} value={form.adults}
-                    onChange={(e) => setForm({ ...form, adults: Math.max(1, +e.target.value) })}
-                    className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none"
-                  />
-                </div>
+              <div className="bg-slate-50 rounded-lg px-4 py-3 text-sm flex justify-between">
+                <span className="text-slate-500">ยอดค้างชำระ</span>
+                <span className="font-bold text-red-600">{formatCurrency(payDialog.outstanding)}</span>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทางชำระเงิน</label>
-                <select
-                  value={form.paymentMethod}
-                  onChange={(e) => setForm({ ...form, paymentMethod: e.target.value as PaymentMethod })}
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none"
-                >
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนที่รับ (บาท)</label>
+                <input
+                  type="number" min={1} max={payDialog.outstanding} value={payAmount}
+                  onChange={(e) => setPayAmount(Math.min(payDialog.outstanding, Math.max(0, +e.target.value)))}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทาง</label>
+                <select value={payMethod} onChange={(e) => setPayMethod(e.target.value as PaymentMethod)}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                   <option value="cash">เงินสด</option>
                   <option value="credit_card">บัตรเครดิต</option>
                   <option value="debit_card">บัตรเดบิต</option>
@@ -376,26 +460,12 @@ export default function FrontDeskPage() {
                   <option value="bank_transfer">โอนเงิน</option>
                 </select>
               </div>
-              <div className="bg-amber-50 rounded-lg px-4 py-3 border border-amber-200 flex justify-between items-center">
-                <span className="text-sm text-amber-700">รวม {form.nights} คืน</span>
-                <span className="font-bold text-amber-800 text-lg">
-                  {formatCurrency(selectedRoom ? calcBookingTotal(selectedRoom.type, new Date().toISOString(), new Date(Date.now() + form.nights * 86400000).toISOString(), selectedRoom.pricePerNight) : 0)}
-                </span>
-              </div>
             </div>
             <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100">
-              <button
-                onClick={() => setWalkInRoomId(null)}
-                className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50"
-              >
-                ยกเลิก
-              </button>
-              <button
-                onClick={handleWalkIn}
-                disabled={newGuestMode ? !newGuest.name : !form.guestId}
-                className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors"
-              >
-                ยืนยันเช็คอิน
+              <button onClick={() => setPayDialog(null)} className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>
+              <button onClick={handleQuickPay} disabled={payAmount <= 0}
+                className="px-5 py-2.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors">
+                บันทึก
               </button>
             </div>
           </div>

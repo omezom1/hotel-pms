@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
+import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
 import { formatDateTime, getPriorityLabel, getRoomStatusLabel } from '@/lib/utils'
 import type { HousekeepingStatus } from '@/types'
@@ -22,16 +23,23 @@ const columns: { key: HousekeepingStatus; label: string; icon: React.ReactNode }
 
 export default function HousekeepingPage() {
   const { housekeepingTasks, rooms, staff, addHousekeepingTask, updateTaskStatus, logAudit } = useHotelStore()
+  const { user } = useAuthStore()
   const [showModal, setShowModal] = useState(false)
   const [form, setForm] = useState({ roomId: '', staffId: '', priority: 'normal', notes: '', scheduledAt: '' })
+  const [showAllTasks, setShowAllTasks] = useState(false)
 
   const housekeepers = staff.filter((s) => s.role === 'housekeeper')
+  const isHousekeeper = user?.staff.role === 'housekeeper'
+  const visibleTasks = (isHousekeeper && !showAllTasks)
+    ? housekeepingTasks.filter((t) => t.staffId === user?.staff.id)
+    : housekeepingTasks
 
   function handleAdd() {
     if (!form.roomId || !form.staffId) return
     const room = rooms.find((r) => r.id === form.roomId)
     const hk = staff.find((s) => s.id === form.staffId)
     if (!room || !hk) return
+    if (room.status === 'occupied' && !confirm(`ห้อง ${room.number} มีผู้เข้าพักอยู่\nยืนยันมอบหมายงานทำความสะอาดให้ ${hk.name}?`)) return
     addHousekeepingTask({
       roomId: form.roomId, roomNumber: room.number,
       assignedTo: hk.name, staffId: form.staffId,
@@ -49,7 +57,24 @@ export default function HousekeepingPage() {
       <Header title="แม่บ้าน" subtitle="จัดการงานทำความสะอาดห้องพัก" />
       <div className="flex-1 overflow-y-auto p-6">
 
-        <div className="flex justify-end mb-5">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+          {isHousekeeper ? (
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-slate-500">แสดง:</span>
+              <button
+                onClick={() => setShowAllTasks(false)}
+                className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${!showAllTasks ? 'bg-amber-500 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+              >
+                เฉพาะของฉัน
+              </button>
+              <button
+                onClick={() => setShowAllTasks(true)}
+                className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${showAllTasks ? 'bg-amber-500 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+              >
+                ทั้งหมด
+              </button>
+            </div>
+          ) : <div />}
           <button
             onClick={() => setShowModal(true)}
             className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium transition-colors"
@@ -58,9 +83,9 @@ export default function HousekeepingPage() {
           </button>
         </div>
 
-        <div className="grid grid-cols-3 gap-5">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
           {columns.map(({ key, label, icon }) => {
-            const tasks = housekeepingTasks.filter((t) => t.status === key)
+            const tasks = visibleTasks.filter((t) => t.status === key)
             return (
               <div key={key} className="bg-slate-100 rounded-xl p-4">
                 <div className="flex items-center gap-2 mb-4">
@@ -84,16 +109,16 @@ export default function HousekeepingPage() {
                           task.startedAt ? `เริ่ม: ${formatDateTime(task.startedAt)}` :
                             `นัด: ${formatDateTime(task.scheduledAt)}`}
                       </div>
-                      <div className="no-print flex gap-1.5">
+                      <div className="no-print flex gap-2">
                         {key === 'pending' && (
                           <button onClick={() => { updateTaskStatus(task.id, 'in_progress'); logAudit({ category: 'housekeeping', action: 'start', summary: `เริ่มทำความสะอาดห้อง ${task.roomNumber}`, entityId: task.id }); toast.info(`เริ่มทำห้อง ${task.roomNumber}`) }}
-                            className="text-xs px-2.5 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 rounded-lg hover:bg-amber-100 transition-colors font-medium">
+                            className="text-sm px-4 py-2.5 min-h-[44px] bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors font-medium w-full">
                             เริ่มทำ
                           </button>
                         )}
                         {key === 'in_progress' && (
                           <button onClick={() => { updateTaskStatus(task.id, 'completed'); logAudit({ category: 'housekeeping', action: 'complete', summary: `ทำความสะอาดห้อง ${task.roomNumber} เสร็จ`, entityId: task.id }); toast.success(`ห้อง ${task.roomNumber} พร้อมใช้งานแล้ว`) }}
-                            className="text-xs px-2.5 py-1.5 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors font-medium">
+                            className="text-sm px-4 py-2.5 min-h-[44px] bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg transition-colors font-medium w-full">
                             ✓ เสร็จแล้ว
                           </button>
                         )}
@@ -124,8 +149,15 @@ export default function HousekeepingPage() {
                 <select value={form.roomId} onChange={(e) => setForm({ ...form, roomId: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                   <option value="">เลือกห้อง</option>
-                  {rooms.map((r) => <option key={r.id} value={r.id}>ห้อง {r.number} ({getRoomStatusLabel(r.status)})</option>)}
+                  {[...rooms].sort((a, b) => (a.status === 'occupied' ? 1 : 0) - (b.status === 'occupied' ? 1 : 0)).map((r) => (
+                    <option key={r.id} value={r.id}>
+                      ห้อง {r.number} ({getRoomStatusLabel(r.status)}){r.status === 'occupied' ? ' ⚠️' : ''}
+                    </option>
+                  ))}
                 </select>
+                {form.roomId && rooms.find((r) => r.id === form.roomId)?.status === 'occupied' && (
+                  <p className="text-xs text-amber-600 mt-1.5">⚠️ ห้องนี้มีผู้เข้าพักอยู่ — ระบบจะถามยืนยันอีกครั้งก่อนมอบหมาย</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">มอบหมายให้ *</label>

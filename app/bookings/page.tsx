@@ -40,6 +40,7 @@ export default function BookingsPage() {
     const room = rooms.find((r) => r.id === b.roomId)
     const matchSearch = !search ||
       guest?.name.toLowerCase().includes(search.toLowerCase()) ||
+      guest?.phone.includes(search) ||
       room?.number.includes(search) || b.id.includes(search)
     const matchStatus = filterStatus === 'all' || b.status === filterStatus
     return matchSearch && matchStatus
@@ -97,7 +98,7 @@ export default function BookingsPage() {
             <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               value={search} onChange={(e) => setSearch(e.target.value)}
-              placeholder="ค้นหาชื่อแขก, หมายเลขห้อง..."
+              placeholder="ค้นหาชื่อแขก, เบอร์โทร, หมายเลขห้อง..."
               className="w-full pl-9 pr-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
             />
           </div>
@@ -177,8 +178,14 @@ export default function BookingsPage() {
                           </Link>
                           {(b.status === 'confirmed' || b.status === 'pending') && (
                             <button
-                              onClick={() => { cancelBooking(b.id); logAudit({ category: 'booking', action: 'cancel', summary: `ยกเลิกการจอง ${b.id}`, entityId: b.id }); toast.success('ยกเลิกการจองแล้ว') }}
+                              onClick={() => {
+                                if (!confirm(`ยืนยันยกเลิกการจอง ${b.id} ของ ${guest?.name ?? 'walk-in'}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`)) return
+                                cancelBooking(b.id)
+                                logAudit({ category: 'booking', action: 'cancel', summary: `ยกเลิกการจอง ${b.id}`, entityId: b.id })
+                                toast.success('ยกเลิกการจองแล้ว')
+                              }}
                               className="p-1.5 rounded hover:bg-red-50 text-slate-400 hover:text-red-600 transition-colors"
+                              title="ยกเลิกการจอง"
                             >
                               <Ban size={15} />
                             </button>
@@ -238,26 +245,58 @@ export default function BookingsPage() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">วันเช็คอิน – เช็คเอาต์ *</label>
-                <div className="border border-slate-200 rounded-lg overflow-hidden">
-                  <DateRange
-                    ranges={dateRange}
-                    onChange={(item) => {
-                      const sel = item.selection
-                      setDateRange([{ startDate: sel.startDate ?? new Date(), endDate: sel.endDate ?? new Date(), key: 'selection' }])
-                      setForm({
-                        ...form,
-                        checkIn: sel.startDate ? sel.startDate.toISOString() : '',
-                        checkOut: sel.endDate ? sel.endDate.toISOString() : '',
-                      })
-                    }}
-                    months={2}
-                    direction="horizontal"
-                    locale={th}
-                    minDate={new Date()}
-                    showMonthAndYearPickers={false}
-                    rangeColors={['#f59e0b']}
-                    className="w-full"
-                  />
+                <div className="border border-slate-200 rounded-lg overflow-auto">
+                  <div className="hidden md:block">
+                    <DateRange
+                      ranges={dateRange}
+                      onChange={(item) => {
+                        const sel = item.selection
+                        setDateRange([{ startDate: sel.startDate ?? new Date(), endDate: sel.endDate ?? new Date(), key: 'selection' }])
+                        setForm({
+                          ...form,
+                          checkIn: sel.startDate ? sel.startDate.toISOString() : '',
+                          checkOut: sel.endDate ? sel.endDate.toISOString() : '',
+                        })
+                      }}
+                      months={2}
+                      direction="horizontal"
+                      locale={th}
+                      minDate={new Date()}
+                      showMonthAndYearPickers={false}
+                      rangeColors={['#f59e0b']}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="md:hidden grid grid-cols-2 gap-2 p-3">
+                    <div>
+                      <label className="block text-xs text-slate-500 mb-1">เช็คอิน</label>
+                      <input
+                        type="date"
+                        value={form.checkIn ? form.checkIn.split('T')[0] : ''}
+                        min={new Date().toISOString().split('T')[0]}
+                        onChange={(e) => {
+                          const d = new Date(e.target.value)
+                          setDateRange([{ startDate: d, endDate: dateRange[0].endDate, key: 'selection' }])
+                          setForm({ ...form, checkIn: e.target.value ? d.toISOString() : '' })
+                        }}
+                        className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-slate-500 mb-1">เช็คเอาต์</label>
+                      <input
+                        type="date"
+                        value={form.checkOut ? form.checkOut.split('T')[0] : ''}
+                        min={form.checkIn ? form.checkIn.split('T')[0] : new Date().toISOString().split('T')[0]}
+                        onChange={(e) => {
+                          const d = new Date(e.target.value)
+                          setDateRange([{ startDate: dateRange[0].startDate, endDate: d, key: 'selection' }])
+                          setForm({ ...form, checkOut: e.target.value ? d.toISOString() : '' })
+                        }}
+                        className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+                  </div>
                 </div>
                 {form.checkIn && form.checkOut && (
                   <p className="text-xs text-slate-500 mt-1.5">
