@@ -52,12 +52,6 @@ export default function DashboardPage() {
 
   const selectedRoomData = rooms.find((r) => r.id === selectedRoom)
 
-  const statusCycle: RoomStatus[] = ['available', 'occupied', 'cleaning', 'maintenance']
-  function cycleStatus(current: RoomStatus): RoomStatus {
-    const idx = statusCycle.indexOf(current)
-    return statusCycle[(idx + 1) % statusCycle.length]
-  }
-
   function getBookingOnDate(roomId: string, date: string) {
     return bookings.find((b) =>
       b.roomId === roomId &&
@@ -170,14 +164,14 @@ export default function DashboardPage() {
               <span className="ml-auto font-medium text-slate-700">ว่าง {dateAvailable} · จอง {dateBooked} · ปิด {rooms.filter(r => r.status === 'maintenance').length}</span>
             </div>
 
-            <p className="no-print text-xs text-slate-400 mb-3">คลิกเพื่อดูรายละเอียด · ดับเบิลคลิกเพื่อเปลี่ยนสถานะ (เฉพาะวันนี้)</p>
+            <p className="no-print text-xs text-slate-400 mb-3">คลิกห้องเพื่อดูรายละเอียดและเปลี่ยนสถานะ</p>
             <div className="grid grid-cols-4 gap-2">
               {rooms.map((room) => (
                 <button
                   key={room.id}
                   onClick={() => setSelectedRoom(selectedRoom === room.id ? null : room.id)}
-                  onDoubleClick={() => viewDate === today && updateRoomStatus(room.id, cycleStatus(room.status))}
-                  className={`${getRoomColorForDate(room)} text-white rounded-lg p-3 text-left transition-all ${selectedRoom === room.id ? 'ring-2 ring-offset-2 ring-slate-800 scale-105' : ''}`}
+                  title={`ห้อง ${room.number} — ${getRoomStatusLabel(room.status)}`}
+                  className={`${getRoomColorForDate(room)} text-white rounded-lg px-3 py-3 min-h-[56px] text-left transition-all ${selectedRoom === room.id ? 'ring-2 ring-offset-2 ring-slate-800 scale-105' : ''}`}
                 >
                   <div className="font-bold text-sm">{room.number}</div>
                   <div className="text-[10px] opacity-80">{getRoomTypeLabel(room.type)}</div>

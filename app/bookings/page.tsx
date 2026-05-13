@@ -126,8 +126,20 @@ export default function BookingsPage() {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 border-b border-slate-100">
                 <tr>
-                  {['รหัสการจอง', 'ชื่อแขก', 'ห้อง', 'เช็คอิน', 'เช็คเอาต์', 'คืน', 'ราคารวม', 'ช่องทาง', 'สถานะการชำระ', 'สถานะ', ''].map((h) => (
-                    <th key={h} className="text-left px-4 py-3 font-medium text-slate-500 whitespace-nowrap">{h}</th>
+                  {[
+                    { label: 'รหัสการจอง', cls: 'hidden xl:table-cell' },
+                    { label: 'ชื่อแขก', cls: '' },
+                    { label: 'ห้อง', cls: '' },
+                    { label: 'เช็คอิน', cls: '' },
+                    { label: 'เช็คเอาต์', cls: '' },
+                    { label: 'คืน', cls: 'hidden md:table-cell' },
+                    { label: 'ราคารวม', cls: '' },
+                    { label: 'ช่องทาง', cls: 'hidden xl:table-cell' },
+                    { label: 'สถานะการชำระ', cls: 'hidden lg:table-cell' },
+                    { label: 'สถานะ', cls: '' },
+                    { label: '', cls: '' },
+                  ].map(({ label, cls }) => (
+                    <th key={label || 'actions'} className={`text-left px-4 py-3 font-medium text-slate-500 whitespace-nowrap ${cls}`}>{label}</th>
                   ))}
                 </tr>
               </thead>
@@ -137,15 +149,15 @@ export default function BookingsPage() {
                   const room = rooms.find((r) => r.id === b.roomId)
                   return (
                     <tr key={b.id} className="hover:bg-slate-50 transition-colors">
-                      <td className="px-4 py-3 font-mono text-xs text-slate-500">{b.id}</td>
+                      <td className="hidden xl:table-cell px-4 py-3 font-mono text-xs text-slate-500">{b.id}</td>
                       <td className="px-4 py-3 font-medium text-slate-800">{guest?.name ?? '-'}</td>
                       <td className="px-4 py-3">ห้อง {room?.number ?? '-'}</td>
                       <td className="px-4 py-3 text-slate-600">{formatDate(b.checkIn)}</td>
                       <td className="px-4 py-3 text-slate-600">{formatDate(b.checkOut)}</td>
-                      <td className="px-4 py-3 text-center">{b.nights}</td>
+                      <td className="hidden md:table-cell px-4 py-3 text-center">{b.nights}</td>
                       <td className="px-4 py-3 font-semibold">{formatCurrency(b.totalAmount)}</td>
-                      <td className="px-4 py-3 text-slate-500">{getBookingSourceLabel(b.source)}</td>
-                      <td className="px-4 py-3">
+                      <td className="hidden xl:table-cell px-4 py-3 text-slate-500">{getBookingSourceLabel(b.source)}</td>
+                      <td className="hidden lg:table-cell px-4 py-3">
                         {b.paidAmount >= b.totalAmount
                           ? <span className="text-xs px-2.5 py-1 rounded-full font-medium text-emerald-700 bg-emerald-100">ชำระแล้ว</span>
                           : b.paidAmount > 0

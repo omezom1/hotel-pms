@@ -271,9 +271,9 @@ export default function FrontDeskPage() {
                       </div>
                       <button
                         onClick={() => setWalkInRoomId(room.id)}
-                        className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-medium transition-colors"
+                        className="shrink-0 flex items-center gap-1.5 px-3 py-2 min-h-[40px] bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-medium transition-colors"
                       >
-                        <UserPlus size={12} /> Walk-in
+                        <UserPlus size={14} /> Walk-in
                       </button>
                     </div>
                   ))}
