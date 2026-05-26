@@ -53,6 +53,7 @@ interface HotelStore {
   // Maintenance actions
   addMaintenanceLog: (log: Omit<MaintenanceLog, 'id'>) => void
   updateMaintenanceStatus: (logId: string, status: MaintenanceStatus) => void
+  removeMaintenanceLog: (logId: string) => void
 
   // Inventory actions
   addInventoryItem: (item: Omit<InventoryItem, 'id'>) => void
@@ -555,6 +556,27 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       if (status === 'resolved' && log) {
         const hasOtherOpen = updatedLogs.some(
           (l) => l.id !== logId && l.roomId === log.roomId && l.status !== 'resolved'
+        )
+        if (!hasOtherOpen) {
+          updatedRooms = state.rooms.map((r) =>
+            r.id === log.roomId && r.status === 'maintenance'
+              ? { ...r, status: 'available' as RoomStatus }
+              : r
+          )
+        }
+      }
+      return { maintenanceLogs: updatedLogs, rooms: updatedRooms }
+    }),
+
+  removeMaintenanceLog: (logId) =>
+    set((state) => {
+      const log = state.maintenanceLogs.find((l) => l.id === logId)
+      const updatedLogs = state.maintenanceLogs.filter((l) => l.id !== logId)
+      // ถ้าห้องอยู่ในสถานะ maintenance และไม่มี log ค้างอื่น → คืนห้องเป็น available
+      let updatedRooms = state.rooms
+      if (log) {
+        const hasOtherOpen = updatedLogs.some(
+          (l) => l.roomId === log.roomId && l.status !== 'resolved'
         )
         if (!hasOtherOpen) {
           updatedRooms = state.rooms.map((r) =>
