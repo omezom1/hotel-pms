@@ -1,8 +1,9 @@
 'use client'
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
+import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
-import { formatDateTime, getPriorityLabel } from '@/lib/utils'
+import { formatDateTime, getPriorityLabel, getRoomStatusLabel } from '@/lib/utils'
 import type { MaintenanceStatus } from '@/types'
 import { Plus, X, CheckCircle2, Clock, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
@@ -20,27 +21,49 @@ const priorityColors: Record<string, string> = {
 }
 
 export default function MaintenancePage() {
-  const { maintenanceLogs, rooms, addMaintenanceLog, updateMaintenanceStatus, logAudit } = useHotelStore()
+  const { maintenanceLogs, rooms, addMaintenanceLog, updateMaintenanceStatus, removeMaintenanceLog, logAudit } = useHotelStore()
+  const { user } = useAuthStore()
   const [filter, setFilter] = useState<MaintenanceStatus | 'all'>('all')
   const [showModal, setShowModal] = useState(false)
-  const [form, setForm] = useState({ roomId: '', issue: '', description: '', priority: 'normal', reportedBy: 'พนักงานต้อนรับ' })
+  const [showAllTasks, setShowAllTasks] = useState(false)
+  const [form, setForm] = useState({ roomId: '', issue: '', description: '', priority: 'normal', reportedBy: '' })
 
-  const filtered = maintenanceLogs.filter((l) => filter === 'all' || l.status === filter)
+  const isMaintenance = user?.staff.role === 'maintenance'
+
+  // Fix B: maintenance staff เห็นเฉพาะงานที่ได้รับมอบหมาย (ดูจาก assignedTo)
+  const visibleLogs = (isMaintenance && !showAllTasks)
+    ? maintenanceLogs.filter((l) => l.assignedTo === user?.staff.name)
+    : maintenanceLogs
+
+  const filtered = visibleLogs.filter((l) => filter === 'all' || l.status === filter)
 
   function handleAdd() {
     if (!form.roomId || !form.issue) return
     const room = rooms.find((r) => r.id === form.roomId)
     if (!room) return
+    // Fix C: warn if room is occupied before reporting maintenance
+    if (room.status === 'occupied') {
+      if (!confirm(`ห้อง ${room.number} มีผู้เข้าพักอยู่\nการแจ้งซ่อมจะปิดห้องอัตโนมัติ ยืนยันหรือไม่?`)) return
+    }
+    const reportedBy = form.reportedBy || user?.staff.name || 'พนักงาน'
     addMaintenanceLog({
       roomId: form.roomId, roomNumber: room.number,
       issue: form.issue, description: form.description,
       status: 'open', priority: form.priority as 'low' | 'normal' | 'high' | 'urgent',
-      reportedBy: form.reportedBy, reportedAt: new Date().toISOString(),
+      reportedBy, reportedAt: new Date().toISOString(),
     })
     logAudit({ category: 'maintenance', action: 'report', summary: `แจ้งซ่อมห้อง ${room.number}: ${form.issue}` })
     toast.success(`แจ้งซ่อมห้อง ${room.number} แล้ว`, { description: 'ห้องถูกปิดใช้งานโดยอัตโนมัติ' })
     setShowModal(false)
-    setForm({ roomId: '', issue: '', description: '', priority: 'normal', reportedBy: 'พนักงานต้อนรับ' })
+    setForm({ roomId: '', issue: '', description: '', priority: 'normal', reportedBy: '' })
+  }
+
+  // Fix D: cancel open maintenance report
+  function handleCancel(log: typeof maintenanceLogs[0]) {
+    if (!confirm(`ยกเลิกการแจ้งซ่อม "${log.issue}" ห้อง ${log.roomNumber}?\n(ห้องจะถูกคืนสถานะเป็น "ว่าง" อัตโนมัติ)`)) return
+    removeMaintenanceLog(log.id)
+    logAudit({ category: 'maintenance', action: 'cancel', summary: `ยกเลิกแจ้งซ่อมห้อง ${log.roomNumber}: ${log.issue}`, entityId: log.id })
+    toast.success(`ยกเลิกแจ้งซ่อมห้อง ${log.roomNumber} แล้ว`)
   }
 
   const stats = {
@@ -72,8 +95,8 @@ export default function MaintenancePage() {
         </div>
 
         {/* Controls */}
-        <div className="no-print flex items-center justify-between">
-          <div className="flex gap-2">
+        <div className="no-print flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-2">
             {(['all', 'open', 'in_progress', 'resolved'] as const).map((s) => (
               <button
                 key={s}
@@ -83,6 +106,24 @@ export default function MaintenancePage() {
                 {s === 'all' ? 'ทั้งหมด' : statusLabels[s]}
               </button>
             ))}
+            {/* Fix B: toggle แสดงเฉพาะงานตัวเอง */}
+            {isMaintenance && (
+              <div className="flex items-center gap-1 ml-2 border-l border-slate-200 pl-3">
+                <span className="text-sm text-slate-500">แสดง:</span>
+                <button
+                  onClick={() => setShowAllTasks(false)}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${!showAllTasks ? 'bg-amber-500 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-400'}`}
+                >
+                  เฉพาะของฉัน
+                </button>
+                <button
+                  onClick={() => setShowAllTasks(true)}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${showAllTasks ? 'bg-amber-500 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-400'}`}
+                >
+                  ทั้งหมด
+                </button>
+              </div>
+            )}
           </div>
           <button
             onClick={() => setShowModal(true)}
@@ -118,19 +159,42 @@ export default function MaintenancePage() {
                         {statusLabels[log.status]}
                       </span>
                     </td>
+                    {/* Fix A: ปุ่ม min-h-[44px] + Fix D: ปุ่มยกเลิกสำหรับ open */}
                     <td className="no-print px-4 py-3">
-                      {log.status === 'open' && (
-                        <button onClick={() => { updateMaintenanceStatus(log.id, 'in_progress'); logAudit({ category: 'maintenance', action: 'start', summary: `รับงานซ่อมห้อง ${log.roomNumber}`, entityId: log.id }); toast.info(`เริ่มซ่อมห้อง ${log.roomNumber}`) }}
-                          className="text-xs px-2.5 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 rounded hover:bg-amber-100 transition-colors">
-                          รับงาน
-                        </button>
-                      )}
-                      {log.status === 'in_progress' && (
-                        <button onClick={() => { updateMaintenanceStatus(log.id, 'resolved'); logAudit({ category: 'maintenance', action: 'resolve', summary: `ซ่อมห้อง ${log.roomNumber} เสร็จ`, entityId: log.id }); toast.success(`ซ่อมห้อง ${log.roomNumber} เสร็จแล้ว`, { description: 'คืนสถานะห้องเป็น "ว่าง" อัตโนมัติ' }) }}
-                          className="text-xs px-2.5 py-1.5 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded hover:bg-emerald-100 transition-colors">
-                          แก้ไขแล้ว
-                        </button>
-                      )}
+                      <div className="flex gap-2">
+                        {log.status === 'open' && (
+                          <>
+                            <button
+                              onClick={() => {
+                                updateMaintenanceStatus(log.id, 'in_progress')
+                                logAudit({ category: 'maintenance', action: 'start', summary: `รับงานซ่อมห้อง ${log.roomNumber}`, entityId: log.id })
+                                toast.info(`เริ่มซ่อมห้อง ${log.roomNumber}`)
+                              }}
+                              className="text-sm px-4 py-2.5 min-h-[44px] bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors font-medium whitespace-nowrap"
+                            >
+                              รับงาน
+                            </button>
+                            <button
+                              onClick={() => handleCancel(log)}
+                              className="text-sm px-3 py-2.5 min-h-[44px] border border-slate-200 text-slate-500 hover:bg-red-50 hover:border-red-300 hover:text-red-600 rounded-lg transition-colors whitespace-nowrap"
+                            >
+                              ยกเลิก
+                            </button>
+                          </>
+                        )}
+                        {log.status === 'in_progress' && (
+                          <button
+                            onClick={() => {
+                              updateMaintenanceStatus(log.id, 'resolved')
+                              logAudit({ category: 'maintenance', action: 'resolve', summary: `ซ่อมห้อง ${log.roomNumber} เสร็จ`, entityId: log.id })
+                              toast.success(`ซ่อมห้อง ${log.roomNumber} เสร็จแล้ว`, { description: 'คืนสถานะห้องเป็น "ว่าง" อัตโนมัติ' })
+                            }}
+                            className="text-sm px-4 py-2.5 min-h-[44px] bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg transition-colors font-medium whitespace-nowrap"
+                          >
+                            ✓ แก้ไขแล้ว
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -152,34 +216,66 @@ export default function MaintenancePage() {
               <button onClick={() => setShowModal(false)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
+              {/* Fix C: dropdown แสดงสถานะห้อง + warning occupied */}
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">ห้อง *</label>
-                <select value={form.roomId} onChange={(e) => setForm({ ...form, roomId: e.target.value })}
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
+                <select
+                  value={form.roomId}
+                  onChange={(e) => setForm({ ...form, roomId: e.target.value })}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
                   <option value="">เลือกห้อง</option>
-                  {rooms.map((r) => <option key={r.id} value={r.id}>ห้อง {r.number}</option>)}
+                  {[...rooms]
+                    .sort((a, b) => (a.status === 'occupied' ? 1 : 0) - (b.status === 'occupied' ? 1 : 0))
+                    .map((r) => (
+                      <option key={r.id} value={r.id}>
+                        ห้อง {r.number} ({getRoomStatusLabel(r.status)}){r.status === 'occupied' ? ' ⚠️' : ''}
+                      </option>
+                    ))}
                 </select>
+                {form.roomId && rooms.find((r) => r.id === form.roomId)?.status === 'occupied' && (
+                  <p className="text-xs text-amber-600 mt-1.5">⚠️ ห้องนี้มีผู้เข้าพักอยู่ — ระบบจะถามยืนยันก่อนปิดห้อง</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">ปัญหา *</label>
-                <input value={form.issue} onChange={(e) => setForm({ ...form, issue: e.target.value })}
+                <input
+                  value={form.issue}
+                  onChange={(e) => setForm({ ...form, issue: e.target.value })}
                   placeholder="เช่น เครื่องปรับอากาศขัดข้อง"
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">รายละเอียด</label>
-                <textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })}
-                  rows={2} className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none resize-none" />
+                <textarea
+                  value={form.description}
+                  onChange={(e) => setForm({ ...form, description: e.target.value })}
+                  rows={2}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none resize-none"
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">ความสำคัญ</label>
-                <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
+                <select
+                  value={form.priority}
+                  onChange={(e) => setForm({ ...form, priority: e.target.value })}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none"
+                >
                   <option value="low">ต่ำ</option>
                   <option value="normal">ปกติ</option>
                   <option value="high">สูง</option>
                   <option value="urgent">เร่งด่วน</option>
                 </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">ผู้แจ้ง</label>
+                <input
+                  value={form.reportedBy}
+                  onChange={(e) => setForm({ ...form, reportedBy: e.target.value })}
+                  placeholder={user?.staff.name ?? 'ชื่อผู้แจ้ง'}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none"
+                />
               </div>
             </div>
             <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100">
