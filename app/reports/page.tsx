@@ -48,8 +48,8 @@ export default function ReportsPage() {
     }
   }).filter((d) => d.จำนวนการจอง > 0)
 
-  const sourceData = ['direct', 'agoda', 'booking_com', 'expedia', 'walk_in'].map((src) => ({
-    name: { direct: 'จองตรง', agoda: 'Agoda', booking_com: 'Booking.com', expedia: 'Expedia', walk_in: 'Walk-in' }[src]!,
+  const sourceData = ['direct', 'walk_in'].map((src) => ({
+    name: { direct: 'จองตรง', walk_in: 'Walk-in' }[src]!,
     value: bookings.filter((b) => b.source === src && b.status !== 'cancelled').length,
   })).filter((d) => d.value > 0)
 

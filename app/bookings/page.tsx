@@ -320,9 +320,6 @@ export default function BookingsPage() {
                   <select value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value as BookingSource })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                     <option value="direct">จองตรง</option>
-                    <option value="agoda">Agoda</option>
-                    <option value="booking_com">Booking.com</option>
-                    <option value="expedia">Expedia</option>
                     <option value="walk_in">Walk-in</option>
                   </select>
                 </div>

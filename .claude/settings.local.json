@@ -7,7 +7,8 @@
       "mcp__Claude_Preview__preview_start",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(curl -s \"https://api.github.com/repos/omezom1/hotel-pms/pulls?head=omezom1:claude/nice-ellis-1916db&state=all\")"
     ]
   }
 }

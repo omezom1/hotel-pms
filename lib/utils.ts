@@ -112,12 +112,9 @@ export function getBookingStatusLabel(status: string): string {
 export function getBookingSourceLabel(source: string): string {
   const labels: Record<string, string> = {
     direct: 'จองตรง',
-    agoda: 'Agoda',
-    booking_com: 'Booking.com',
-    expedia: 'Expedia',
     walk_in: 'Walk-in',
   }
-  return labels[source] ?? source
+  return labels[source] ?? 'จองตรง'
 }
 
 export function getStaffRoleLabel(role: string): string {

@@ -2,7 +2,7 @@ export type RoomStatus = 'available' | 'occupied' | 'cleaning' | 'maintenance'
 export type RoomType = 'standard' | 'deluxe' | 'suite' | 'family' | 'penthouse'
 export type RoomWing = 'front' | 'back'
 export type BookingStatus = 'confirmed' | 'checked_in' | 'checked_out' | 'cancelled' | 'pending'
-export type BookingSource = 'direct' | 'agoda' | 'booking_com' | 'expedia' | 'walk_in'
+export type BookingSource = 'direct' | 'walk_in'
 export type StaffRole = 'admin' | 'receptionist' | 'accountant' | 'housekeeper' | 'maintenance'
 export type HousekeepingStatus = 'pending' | 'in_progress' | 'completed'
 export type MaintenanceStatus = 'open' | 'in_progress' | 'resolved'
@@ -166,17 +166,6 @@ export interface StaffPermissions {
   canManageCorporate: boolean
 }
 
-export interface OTAChannel {
-  id: string
-  name: string
-  logo: string
-  isConnected: boolean
-  lastSync: string
-  inventoryMapped: number
-  totalRooms: number
-  pendingBookings: number
-  commission: number
-}
 
 export interface User {
   id: string

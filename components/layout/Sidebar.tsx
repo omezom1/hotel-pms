@@ -4,7 +4,7 @@ import { usePathname, useRouter } from 'next/navigation'
 import type { LucideIcon } from 'lucide-react'
 import {
   LayoutDashboard, CalendarDays, Users, DollarSign,
-  Wrench, UserCog, Globe, BarChart3, BedDouble, Hotel, LogOut, Package, ConciergeBell, CalendarRange, ClipboardList, RotateCcw, History
+  Wrench, UserCog, BarChart3, BedDouble, Hotel, LogOut, Package, ConciergeBell, CalendarRange, ClipboardList, RotateCcw, History
 } from 'lucide-react'
 import { cn, getStaffRoleLabel } from '@/lib/utils'
 import { useAuthStore } from '@/lib/auth-store'
@@ -30,7 +30,7 @@ const navItems: NavItem[] = [
   { href: '/maintenance',  label: 'ซ่อมบำรุง',               icon: Wrench,          permission: 'canManageMaintenance' },
   { href: '/inventory',    label: 'คลังสินค้า',              icon: Package,         permission: 'canManageInventory' },
   { href: '/staff',        label: 'พนักงาน',                 icon: UserCog,         permission: 'canManageStaff' },
-  { href: '/channels',     label: 'ช่องทางขาย (OTA)',        icon: Globe,           permission: 'canManageBookings' },
+
   { href: '/reports',      label: 'รายงาน & วิเคราะห์',     icon: BarChart3,       permission: 'canViewReports' },
   { href: '/daily-report', label: 'รายงานประจำวัน',         icon: ClipboardList,   permission: 'canViewReports' },
   { href: '/audit-log',    label: 'บันทึกการใช้งาน',         icon: History,         permission: 'canManageStaff' },

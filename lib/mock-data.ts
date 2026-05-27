@@ -1,6 +1,6 @@
 import type {
   Room, Guest, Booking, Invoice, HousekeepingTask,
-  MaintenanceLog, Staff, OTAChannel, User,
+  MaintenanceLog, Staff, User,
   InventoryItem, InventoryTransaction, CorporateAccount, CorporateTransaction,
   AddOnItem, BookingAddOn
 } from '@/types'
@@ -108,16 +108,16 @@ export const mockGuests: Guest[] = [
 export const mockBookings: Booking[] = [
   // ปัจจุบัน — เช็คอินอยู่
   { id: 'b001', roomId: 'rA1',  guestId: 'g001', checkIn: '2026-05-08', checkOut: '2026-05-12', nights: 4, status: 'checked_in', source: 'direct',      totalAmount: 4800,  paidAmount: 4800,  adults: 2, children: 0, specialRequests: 'หมอนเพิ่ม',        createdAt: '2026-05-01', paymentMethod: 'credit_card' },
-  { id: 'b002', roomId: 'rA11', guestId: 'g002', checkIn: '2026-05-09', checkOut: '2026-05-11', nights: 2, status: 'checked_in', source: 'agoda',       totalAmount: 3600,  paidAmount: 3600,  adults: 2, children: 0, specialRequests: '',                 createdAt: '2026-05-03', paymentMethod: 'qr_code' },
-  { id: 'b003', roomId: 'rA3',  guestId: 'g003', checkIn: '2026-05-07', checkOut: '2026-05-14', nights: 7, status: 'checked_in', source: 'booking_com', totalAmount: 8400,  paidAmount: 8400,  adults: 1, children: 0, specialRequests: 'น้ำแร่ในห้อง',     createdAt: '2026-04-20', paymentMethod: 'credit_card' },
+  { id: 'b002', roomId: 'rA11', guestId: 'g002', checkIn: '2026-05-09', checkOut: '2026-05-11', nights: 2, status: 'checked_in', source: 'direct',       totalAmount: 3600,  paidAmount: 3600,  adults: 2, children: 0, specialRequests: '',                 createdAt: '2026-05-03', paymentMethod: 'qr_code' },
+  { id: 'b003', roomId: 'rA3',  guestId: 'g003', checkIn: '2026-05-07', checkOut: '2026-05-14', nights: 7, status: 'checked_in', source: 'direct', totalAmount: 8400,  paidAmount: 8400,  adults: 1, children: 0, specialRequests: 'น้ำแร่ในห้อง',     createdAt: '2026-04-20', paymentMethod: 'credit_card' },
   { id: 'b004', roomId: 'rA19', guestId: 'g004', checkIn: '2026-05-10', checkOut: '2026-05-13', nights: 3, status: 'confirmed',  source: 'direct',      totalAmount: 13500, paidAmount: 5000,  adults: 2, children: 0, specialRequests: 'ผลไม้ต้อนรับ แชมเปญ', createdAt: '2026-05-05', paymentMethod: 'bank_transfer' },
   // อนาคต — confirmed
-  { id: 'b005', roomId: 'rA2',  guestId: 'g005', checkIn: '2026-05-12', checkOut: '2026-05-15', nights: 3, status: 'confirmed',  source: 'expedia',     totalAmount: 3600,  paidAmount: 3600,  adults: 2, children: 0, specialRequests: '',                 createdAt: '2026-05-06', paymentMethod: 'credit_card' },
+  { id: 'b005', roomId: 'rA2',  guestId: 'g005', checkIn: '2026-05-12', checkOut: '2026-05-15', nights: 3, status: 'confirmed',  source: 'direct',     totalAmount: 3600,  paidAmount: 3600,  adults: 2, children: 0, specialRequests: '',                 createdAt: '2026-05-06', paymentMethod: 'credit_card' },
   { id: 'b006', roomId: 'rB19', guestId: 'g006', checkIn: '2026-05-15', checkOut: '2026-05-18', nights: 3, status: 'confirmed',  source: 'direct',      totalAmount: 8400,  paidAmount: 2800,  adults: 2, children: 2, specialRequests: 'เตียงเสริมสำหรับเด็ก', createdAt: '2026-05-07', paymentMethod: 'credit_card' },
   // อดีต
   { id: 'b007', roomId: 'rA7',  guestId: 'g001', checkIn: '2026-04-20', checkOut: '2026-04-23', nights: 3, status: 'checked_out', source: 'direct',      totalAmount: 5700,  paidAmount: 5700,  adults: 2, children: 0, specialRequests: '',                 createdAt: '2026-04-10', paymentMethod: 'credit_card' },
-  { id: 'b008', roomId: 'rB5',  guestId: 'g003', checkIn: '2026-04-25', checkOut: '2026-05-01', nights: 6, status: 'checked_out', source: 'booking_com', totalAmount: 7200,  paidAmount: 7200,  adults: 1, children: 0, specialRequests: '',                 createdAt: '2026-04-15', paymentMethod: 'credit_card' },
-  { id: 'b009', roomId: 'rA9',  guestId: 'g002', checkIn: '2026-05-01', checkOut: '2026-05-04', nights: 3, status: 'cancelled',   source: 'agoda',       totalAmount: 5400,  paidAmount: 0,     adults: 2, children: 0, specialRequests: '',                 createdAt: '2026-04-28', paymentMethod: 'qr_code' },
+  { id: 'b008', roomId: 'rB5',  guestId: 'g003', checkIn: '2026-04-25', checkOut: '2026-05-01', nights: 6, status: 'checked_out', source: 'direct', totalAmount: 7200,  paidAmount: 7200,  adults: 1, children: 0, specialRequests: '',                 createdAt: '2026-04-15', paymentMethod: 'credit_card' },
+  { id: 'b009', roomId: 'rA9',  guestId: 'g002', checkIn: '2026-05-01', checkOut: '2026-05-04', nights: 3, status: 'cancelled',   source: 'direct',       totalAmount: 5400,  paidAmount: 0,     adults: 2, children: 0, specialRequests: '',                 createdAt: '2026-04-28', paymentMethod: 'qr_code' },
 ]
 
 export const mockInvoices: Invoice[] = [
@@ -210,12 +210,6 @@ export const mockUsers: User[] = [
   { id: 'u006', username: 'somsak',       password: 'somsak123', staffId: 's006' },
 ]
 
-export const mockOTAChannels: OTAChannel[] = [
-  { id: 'ota001', name: 'Agoda',       logo: '🟠', isConnected: true,  lastSync: '2026-05-10T06:00:00', inventoryMapped: 35, totalRooms: 40, pendingBookings: 2, commission: 15 },
-  { id: 'ota002', name: 'Booking.com', logo: '🔵', isConnected: true,  lastSync: '2026-05-10T05:45:00', inventoryMapped: 30, totalRooms: 40, pendingBookings: 1, commission: 17 },
-  { id: 'ota003', name: 'Expedia',     logo: '🟡', isConnected: true,  lastSync: '2026-05-10T06:15:00', inventoryMapped: 25, totalRooms: 40, pendingBookings: 0, commission: 18 },
-  { id: 'ota004', name: 'Airbnb',      logo: '🔴', isConnected: false, lastSync: '2026-04-01T00:00:00', inventoryMapped: 0,  totalRooms: 40, pendingBookings: 0, commission: 3 },
-]
 
 
 export const mockInventoryItems: InventoryItem[] = [

@@ -75,12 +75,6 @@ export default function FinancePage() {
     { name: 'บัตรเดบิต', value: bookings.filter((b) => b.paymentMethod === 'debit_card' && b.status !== 'cancelled').length },
   ].filter((d) => d.value > 0)
 
-  const activeBookings = bookings.filter((b) => b.status !== 'cancelled')
-  const commissions = [
-    { channel: 'Agoda', rate: 15, bookings: activeBookings.filter((b) => b.source === 'agoda').length, amount: activeBookings.filter((b) => b.source === 'agoda').reduce((s, b) => s + b.totalAmount * 0.15, 0) },
-    { channel: 'Booking.com', rate: 17, bookings: activeBookings.filter((b) => b.source === 'booking_com').length, amount: activeBookings.filter((b) => b.source === 'booking_com').reduce((s, b) => s + b.totalAmount * 0.17, 0) },
-    { channel: 'Expedia', rate: 18, bookings: activeBookings.filter((b) => b.source === 'expedia').length, amount: activeBookings.filter((b) => b.source === 'expedia').reduce((s, b) => s + b.totalAmount * 0.18, 0) },
-  ]
 
   return (
     <div className="flex flex-col h-screen">
@@ -143,30 +137,6 @@ export default function FinancePage() {
               </ResponsiveContainer>
             </div>
 
-            <div className="xl:col-span-2 bg-white rounded-xl shadow-sm border border-slate-100 p-5">
-              <h2 className="font-semibold text-slate-800 mb-4">ค่าคอมมิชชัน OTA</h2>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="bg-slate-50">
-                    <tr>
-                      {['ช่องทาง', 'อัตราคอมมิชชัน', 'จำนวนการจอง', 'ค่าคอมมิชชันรวม'].map((h) => (
-                        <th key={h} className="text-left px-4 py-2.5 font-medium text-slate-500">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-50">
-                    {commissions.map((c) => (
-                      <tr key={c.channel} className="hover:bg-slate-50">
-                        <td className="px-4 py-3 font-medium">{c.channel}</td>
-                        <td className="px-4 py-3">{c.rate}%</td>
-                        <td className="px-4 py-3">{c.bookings} ครั้ง</td>
-                        <td className="px-4 py-3 font-semibold text-red-600">{formatCurrency(c.amount)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
           </div>
         )}
 
