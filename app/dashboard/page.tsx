@@ -226,7 +226,7 @@ export default function DashboardPage() {
                     <div className="text-sm text-slate-500 space-y-1">
                       <div><span className="text-slate-400">ราคา/คืน: </span>{formatCurrency(selectedRoomData.pricePerNight)}</div>
                       <div><span className="text-slate-400">รองรับ: </span>{selectedRoomData.maxGuests} ท่าน · ชั้น {selectedRoomData.floor}</div>
-                      {viewDate === today && (
+                      {viewDate === today && selectedRoomData.status !== 'occupied' && (
                         <>
                           <div className="pt-2 flex gap-2 flex-wrap">
                             {(['available', 'cleaning', 'maintenance'] as RoomStatus[]).map((s) => (
@@ -248,6 +248,9 @@ export default function DashboardPage() {
                           </div>
                           <p className="text-[11px] text-slate-400 pt-1.5">สถานะ "มีผู้เข้าพัก" จะเปลี่ยนอัตโนมัติเมื่อเช็คอินจาก /front-desk</p>
                         </>
+                      )}
+                      {viewDate === today && selectedRoomData.status === 'occupied' && (
+                        <p className="text-[11px] text-amber-600 pt-1.5 font-medium">🔒 ห้องนี้มีผู้เข้าพักอยู่ — เปลี่ยนสถานะได้เฉพาะผ่านการเช็คเอาต์ที่ /front-desk</p>
                       )}
                     </div>
                   )}
