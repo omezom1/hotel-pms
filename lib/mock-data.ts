@@ -1,69 +1,101 @@
 import type {
   Room, Guest, Booking, Invoice, HousekeepingTask,
-  MaintenanceLog, Staff, OTAChannel, User,
+  MaintenanceLog, Staff, User,
   InventoryItem, InventoryTransaction, CorporateAccount, CorporateTransaction,
-  AddOnItem, BookingAddOn
+  AddOnItem, BookingAddOn, Expense
 } from '@/types'
 
-// ========== ROOMS: 40 ห้อง (A1-A20 ด้านหน้า, B1-B20 ด้านหลัง) ==========
-// Wing A (ด้านหน้า) - วิวสวย, ราคาพรีเมียม
-// Wing B (ด้านหลัง) - ราคาประหยัด
+// ===== ทำให้วันที่ mock เลื่อนตาม "วันนี้" จริง — เดโมมีกิจกรรมวันนี้เสมอ ไม่ว่าเปิดวันไหน =====
+// mock ทั้งหมดยึด 2026-05-29 เป็น "วันนี้"; เราเลื่อนทุกวันที่ด้วย offset = (วันนี้จริง − anchor)
+// โดยคงความสัมพันธ์เดิมไว้ทั้งหมด (booking 7 คืนก็ยัง 7 คืน แค่ขยับให้คร่อมวันนี้)
+const MOCK_ANCHOR = '2026-05-29'
+const MOCK_SHIFT_DAYS = (() => {
+  const anchor = new Date(`${MOCK_ANCHOR}T00:00:00`)
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  return Math.round((today.getTime() - anchor.getTime()) / 86400000)
+})()
 
-const baseAmenities = ['WiFi', 'TV', 'เครื่องปรับอากาศ']
-const stdAmenities = baseAmenities
-const dlxAmenities = baseAmenities
-const suiteAmenities = baseAmenities
-const penthouseAmenities = baseAmenities
-const familyAmenities = baseAmenities
+function shiftIso(s: string): string {
+  // เลื่อนเฉพาะ string ที่ขึ้นต้นด้วย YYYY-MM-DD (คง suffix เวลา/โซนเดิม)
+  const m = /^(\d{4})-(\d{2})-(\d{2})(.*)$/.exec(s)
+  if (!m) return s
+  const d = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00`)
+  d.setDate(d.getDate() + MOCK_SHIFT_DAYS)
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}${m[4]}`
+}
+
+// เดินลึกทุก field แล้วเลื่อนเฉพาะ string ที่เป็นวันที่ ISO
+export function shiftMockDates<T>(value: T): T {
+  if (typeof value === 'string') return shiftIso(value) as unknown as T
+  if (Array.isArray(value)) return value.map((v) => shiftMockDates(v)) as unknown as T
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(value as Record<string, unknown>)) {
+      out[k] = shiftMockDates((value as Record<string, unknown>)[k])
+    }
+    return out as unknown as T
+  }
+  return value
+}
+
+// ========== ROOMS: 39 ห้อง (A1-A20 อาคาร A, B1-B20 อาคาร B) — A5 ห้องเจ้าของ ==========
+// เตียงเดี่ยว (single) 500/คืน — 25 ห้อง
+// เตียงคู่   (double) 500/คืน — 12 ห้อง: A1-A3, A11-A15, B2-B5
+// 3 เตียง   (triple) 700/คืน —  2 ห้อง: A4, B1
+
+const amenities = ['WiFi', 'TV', 'เครื่องปรับอากาศ']
 
 export const mockRooms: Room[] = [
-  // ===== Wing A (ด้านหน้า) — 20 ห้อง =====
+  // ===== อาคาร A — 20 ห้อง =====
   // ชั้น 1: A1-A10
-  { id: 'rA1',  number: 'A1',  type: 'standard', floor: 1, wing: 'front', status: 'occupied',    pricePerNight: 1200, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหน้า ชั้น 1', currentGuestId: 'g001', currentBookingId: 'b001' },
-  { id: 'rA2',  number: 'A2',  type: 'standard', floor: 1, wing: 'front', status: 'available',   pricePerNight: 1200, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหน้า ชั้น 1' },
-  { id: 'rA3',  number: 'A3',  type: 'standard', floor: 1, wing: 'front', status: 'occupied',    pricePerNight: 1200, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหน้า ชั้น 1', currentGuestId: 'g003', currentBookingId: 'b003' },
-  { id: 'rA4',  number: 'A4',  type: 'standard', floor: 1, wing: 'front', status: 'cleaning',    pricePerNight: 1200, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหน้า ชั้น 1' },
-  { id: 'rA5',  number: 'A5',  type: 'deluxe',   floor: 1, wing: 'front', status: 'maintenance', pricePerNight: 1800, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหน้า ชั้น 1' },
-  { id: 'rA6',  number: 'A6',  type: 'deluxe',   floor: 1, wing: 'front', status: 'available',   pricePerNight: 1800, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหน้า ชั้น 1' },
-  { id: 'rA7',  number: 'A7',  type: 'deluxe',   floor: 1, wing: 'front', status: 'available',   pricePerNight: 1800, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหน้า ชั้น 1' },
-  { id: 'rA8',  number: 'A8',  type: 'deluxe',   floor: 1, wing: 'front', status: 'available',   pricePerNight: 1800, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหน้า ชั้น 1' },
-  { id: 'rA9',  number: 'A9',  type: 'deluxe',   floor: 1, wing: 'front', status: 'available',   pricePerNight: 1800, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหน้า ชั้น 1' },
-  { id: 'rA10', number: 'A10', type: 'deluxe',   floor: 1, wing: 'front', status: 'available',   pricePerNight: 1800, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหน้า ชั้น 1' },
+  { id: 'rA1',  number: 'A1',  type: 'double', floor: 1, wing: 'front', status: 'occupied',    pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร A ชั้น 1', currentGuestId: 'g001', currentBookingId: 'b001' },
+  { id: 'rA2',  number: 'A2',  type: 'double', floor: 1, wing: 'front', status: 'cleaning',    pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร A ชั้น 1' },
+  { id: 'rA3',  number: 'A3',  type: 'double', floor: 1, wing: 'front', status: 'occupied',    pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร A ชั้น 1', currentGuestId: 'g003', currentBookingId: 'b003' },
+  { id: 'rA4',  number: 'A4',  type: 'triple', floor: 1, wing: 'front', status: 'cleaning',    pricePerNight: 700, maxGuests: 3, amenities, description: '3 เตียง อาคาร A ชั้น 1' },
+  { id: 'rA5',  number: 'เฮียดิเรก',  type: 'single', floor: 1, wing: 'front', status: 'maintenance', pricePerNight: 500, maxGuests: 1, amenities, description: 'ห้องของพ่อ (เฮียดิเรก) — ปิดใช้งาน' },
+  { id: 'rA6',  number: 'A6',  type: 'single', floor: 1, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร A ชั้น 1' },
+  { id: 'rA7',  number: 'A7',  type: 'single', floor: 1, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร A ชั้น 1' },
+  { id: 'rA8',  number: 'A8',  type: 'single', floor: 1, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร A ชั้น 1' },
+  { id: 'rA9',  number: 'A9',  type: 'single', floor: 1, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร A ชั้น 1' },
+  { id: 'rA10', number: 'A10', type: 'single', floor: 1, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร A ชั้น 1' },
   // ชั้น 2: A11-A20
-  { id: 'rA11', number: 'A11', type: 'deluxe',   floor: 2, wing: 'front', status: 'occupied',    pricePerNight: 1800, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหน้า ชั้น 2', currentGuestId: 'g002', currentBookingId: 'b002' },
-  { id: 'rA12', number: 'A12', type: 'deluxe',   floor: 2, wing: 'front', status: 'available',   pricePerNight: 1800, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหน้า ชั้น 2' },
-  { id: 'rA13', number: 'A13', type: 'deluxe',   floor: 2, wing: 'front', status: 'available',   pricePerNight: 1800, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหน้า ชั้น 2' },
-  { id: 'rA14', number: 'A14', type: 'deluxe',   floor: 2, wing: 'front', status: 'available',   pricePerNight: 1800, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหน้า ชั้น 2' },
-  { id: 'rA15', number: 'A15', type: 'suite',    floor: 2, wing: 'front', status: 'maintenance', pricePerNight: 4500, maxGuests: 2, amenities: suiteAmenities, description: 'Suite ด้านหน้า วิวทะเล' },
-  { id: 'rA16', number: 'A16', type: 'suite',    floor: 2, wing: 'front', status: 'available',   pricePerNight: 4500, maxGuests: 2, amenities: suiteAmenities, description: 'Suite ด้านหน้า วิวทะเล' },
-  { id: 'rA17', number: 'A17', type: 'suite',    floor: 2, wing: 'front', status: 'available',   pricePerNight: 4500, maxGuests: 2, amenities: suiteAmenities, description: 'Suite ด้านหน้า วิวทะเล' },
-  { id: 'rA18', number: 'A18', type: 'suite',    floor: 2, wing: 'front', status: 'available',   pricePerNight: 4500, maxGuests: 2, amenities: suiteAmenities, description: 'Suite ด้านหน้า วิวทะเล' },
-  { id: 'rA19', number: 'A19', type: 'suite',    floor: 2, wing: 'front', status: 'occupied',    pricePerNight: 4500, maxGuests: 2, amenities: suiteAmenities, description: 'Suite ด้านหน้า วิวทะเล', currentGuestId: 'g004', currentBookingId: 'b004' },
-  { id: 'rA20', number: 'A20', type: 'penthouse',floor: 2, wing: 'front', status: 'available',   pricePerNight: 8000, maxGuests: 4, amenities: penthouseAmenities, description: 'Penthouse ด้านหน้า ชั้นบนสุด วิว 360 องศา' },
+  { id: 'rA11', number: 'A11', type: 'double', floor: 2, wing: 'front', status: 'occupied',    pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร A ชั้น 2', currentGuestId: 'g002', currentBookingId: 'b002' },
+  { id: 'rA12', number: 'A12', type: 'double', floor: 2, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร A ชั้น 2' },
+  { id: 'rA13', number: 'A13', type: 'double', floor: 2, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร A ชั้น 2' },
+  { id: 'rA14', number: 'A14', type: 'double', floor: 2, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร A ชั้น 2' },
+  { id: 'rA15', number: 'A15', type: 'double', floor: 2, wing: 'front', status: 'maintenance', pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร A ชั้น 2' },
+  { id: 'rA16', number: 'A16', type: 'single', floor: 2, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร A ชั้น 2' },
+  { id: 'rA17', number: 'A17', type: 'single', floor: 2, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร A ชั้น 2' },
+  { id: 'rA18', number: 'A18', type: 'single', floor: 2, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร A ชั้น 2' },
+  { id: 'rA19', number: 'A19', type: 'single', floor: 2, wing: 'front', status: 'occupied',    pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร A ชั้น 2', currentGuestId: 'g004', currentBookingId: 'b004' },
+  { id: 'rA20', number: 'A20', type: 'single', floor: 2, wing: 'front', status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร A ชั้น 2' },
 
-  // ===== Wing B (ด้านหลัง) — 20 ห้อง =====
+  // ===== อาคาร B — 20 ห้อง =====
   // ชั้น 1: B1-B10
-  { id: 'rB1',  number: 'B1',  type: 'standard', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 1000, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 1' },
-  { id: 'rB2',  number: 'B2',  type: 'standard', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 1000, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 1' },
-  { id: 'rB3',  number: 'B3',  type: 'standard', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 1000, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 1' },
-  { id: 'rB4',  number: 'B4',  type: 'standard', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 1000, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 1' },
-  { id: 'rB5',  number: 'B5',  type: 'standard', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 1000, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 1' },
-  { id: 'rB6',  number: 'B6',  type: 'standard', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 1000, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 1' },
-  { id: 'rB7',  number: 'B7',  type: 'standard', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 1000, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 1' },
-  { id: 'rB8',  number: 'B8',  type: 'standard', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 1000, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 1' },
-  { id: 'rB9',  number: 'B9',  type: 'standard', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 1000, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 1' },
-  { id: 'rB10', number: 'B10', type: 'standard', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 1000, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 1' },
+  { id: 'rB1',  number: 'B1',  type: 'triple', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 700, maxGuests: 3, amenities, description: '3 เตียง อาคาร B ชั้น 1' },
+  { id: 'rB2',  number: 'B2',  type: 'double', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร B ชั้น 1' },
+  { id: 'rB3',  number: 'B3',  type: 'double', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร B ชั้น 1' },
+  { id: 'rB4',  number: 'B4',  type: 'double', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร B ชั้น 1' },
+  { id: 'rB5',  number: 'B5',  type: 'double', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 2, amenities, description: 'เตียงคู่ อาคาร B ชั้น 1' },
+  { id: 'rB6',  number: 'B6',  type: 'single', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 1' },
+  { id: 'rB7',  number: 'B7',  type: 'single', floor: 1, wing: 'back',  status: 'occupied',    pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 1', currentBookingId: 'b010' },
+  { id: 'rB8',  number: 'B8',  type: 'single', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 1' },
+  { id: 'rB9',  number: 'B9',  type: 'single', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 1' },
+  { id: 'rB10', number: 'B10', type: 'single', floor: 1, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 1' },
   // ชั้น 2: B11-B20
-  { id: 'rB11', number: 'B11', type: 'standard', floor: 2, wing: 'back',  status: 'cleaning',    pricePerNight: 1100, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 2' },
-  { id: 'rB12', number: 'B12', type: 'standard', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 1100, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 2' },
-  { id: 'rB13', number: 'B13', type: 'standard', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 1100, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 2' },
-  { id: 'rB14', number: 'B14', type: 'standard', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 1100, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 2' },
-  { id: 'rB15', number: 'B15', type: 'standard', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 1100, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 2' },
-  { id: 'rB16', number: 'B16', type: 'standard', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 1100, maxGuests: 2, amenities: stdAmenities, description: 'ห้อง Standard ด้านหลัง ชั้น 2' },
-  { id: 'rB17', number: 'B17', type: 'deluxe',   floor: 2, wing: 'back',  status: 'available',   pricePerNight: 1500, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหลัง ชั้น 2' },
-  { id: 'rB18', number: 'B18', type: 'deluxe',   floor: 2, wing: 'back',  status: 'available',   pricePerNight: 1500, maxGuests: 2, amenities: dlxAmenities, description: 'ห้อง Deluxe ด้านหลัง ชั้น 2' },
-  { id: 'rB19', number: 'B19', type: 'family',   floor: 2, wing: 'back',  status: 'available',   pricePerNight: 2800, maxGuests: 4, amenities: familyAmenities, description: 'ห้อง Family ด้านหลัง สำหรับครอบครัว' },
-  { id: 'rB20', number: 'B20', type: 'family',   floor: 2, wing: 'back',  status: 'available',   pricePerNight: 2800, maxGuests: 4, amenities: familyAmenities, description: 'ห้อง Family ด้านหลัง สำหรับครอบครัว' },
+  { id: 'rB11', number: 'B11', type: 'single', floor: 2, wing: 'back',  status: 'cleaning',    pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 2' },
+  { id: 'rB12', number: 'B12', type: 'single', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 2' },
+  { id: 'rB13', number: 'B13', type: 'single', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 2' },
+  { id: 'rB14', number: 'B14', type: 'single', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 2' },
+  { id: 'rB15', number: 'B15', type: 'single', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 2' },
+  { id: 'rB16', number: 'B16', type: 'single', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 2' },
+  { id: 'rB17', number: 'B17', type: 'single', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 2' },
+  { id: 'rB18', number: 'B18', type: 'single', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 2' },
+  { id: 'rB19', number: 'B19', type: 'single', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 2' },
+  { id: 'rB20', number: 'B20', type: 'single', floor: 2, wing: 'back',  status: 'available',   pricePerNight: 500, maxGuests: 1, amenities, description: 'เตียงเดี่ยว อาคาร B ชั้น 2' },
 ]
 
 export const mockGuests: Guest[] = [
@@ -71,31 +103,31 @@ export const mockGuests: Guest[] = [
     id: 'g001', name: 'สมชาย ใจดี', email: 'somchai@email.com', phone: '0812345678',
     nationality: 'ไทย', idNumber: '1234567890123',
     preferences: { pillow: 'high', floor: 'high', foodAllergies: ['กุ้ง'], specialRequests: ['หมอนเพิ่ม 1 ใบ'], smokingRoom: false, bedType: 'double' },
-    totalStays: 12, totalSpend: 68400, joinedAt: '2022-03-15'
+    totalStays: 12, totalSpend: 5000, joinedAt: '2022-03-15'
   },
   {
     id: 'g002', name: 'สุดา วงษ์สวัสดิ์', email: 'suda@email.com', phone: '0823456789',
     nationality: 'ไทย', idNumber: '2345678901234',
     preferences: { pillow: 'soft', floor: 'low', foodAllergies: [], specialRequests: [], smokingRoom: false, bedType: 'twin' },
-    totalStays: 4, totalSpend: 18600, joinedAt: '2023-06-20'
+    totalStays: 1, totalSpend: 1500, joinedAt: '2023-06-20'
   },
   {
     id: 'g003', name: 'John Smith', email: 'john@email.com', phone: '0834567890',
     nationality: 'อังกฤษ', idNumber: 'AB123456',
     preferences: { pillow: 'firm', floor: 'high', foodAllergies: ['นม', 'แป้งสาลี'], specialRequests: ['น้ำแร่ในห้อง', 'หนังสือพิมพ์ภาษาอังกฤษ'], smokingRoom: false, bedType: 'double' },
-    totalStays: 28, totalSpend: 185000, joinedAt: '2021-01-10'
+    totalStays: 2, totalSpend: 5500, joinedAt: '2021-01-10'
   },
   {
     id: 'g004', name: 'วิชัย มั่งมี', email: 'wichai@email.com', phone: '0845678901',
     nationality: 'ไทย', idNumber: '3456789012345',
     preferences: { pillow: 'high', floor: 'high', foodAllergies: [], specialRequests: ['ผลไม้ต้อนรับ', 'แชมเปญ'], smokingRoom: false, bedType: 'double' },
-    totalStays: 35, totalSpend: 420000, joinedAt: '2020-08-05'
+    totalStays: 1, totalSpend: 2000, joinedAt: '2020-08-05'
   },
   {
     id: 'g005', name: 'Yuki Tanaka', email: 'yuki@email.com', phone: '0856789012',
     nationality: 'ญี่ปุ่น', idNumber: 'JPN987654',
     preferences: { pillow: null, floor: null, foodAllergies: ['อาหารทะเล'], specialRequests: [], smokingRoom: false, bedType: 'double' },
-    totalStays: 2, totalSpend: 7200, joinedAt: '2024-02-14'
+    totalStays: 1, totalSpend: 2000, joinedAt: '2024-02-14'
   },
   {
     id: 'g006', name: 'มาลี ประดับ', email: 'malee@email.com', phone: '0867890123',
@@ -106,64 +138,69 @@ export const mockGuests: Guest[] = [
 ]
 
 export const mockBookings: Booking[] = [
-  // ปัจจุบัน — เช็คอินอยู่
-  { id: 'b001', roomId: 'rA1',  guestId: 'g001', checkIn: '2026-05-08', checkOut: '2026-05-12', nights: 4, status: 'checked_in', source: 'direct',      totalAmount: 4800,  paidAmount: 4800,  adults: 2, children: 0, specialRequests: 'หมอนเพิ่ม',        createdAt: '2026-05-01', paymentMethod: 'credit_card' },
-  { id: 'b002', roomId: 'rA11', guestId: 'g002', checkIn: '2026-05-09', checkOut: '2026-05-11', nights: 2, status: 'checked_in', source: 'agoda',       totalAmount: 3600,  paidAmount: 3600,  adults: 2, children: 0, specialRequests: '',                 createdAt: '2026-05-03', paymentMethod: 'qr_code' },
-  { id: 'b003', roomId: 'rA3',  guestId: 'g003', checkIn: '2026-05-07', checkOut: '2026-05-14', nights: 7, status: 'checked_in', source: 'booking_com', totalAmount: 8400,  paidAmount: 8400,  adults: 1, children: 0, specialRequests: 'น้ำแร่ในห้อง',     createdAt: '2026-04-20', paymentMethod: 'credit_card' },
-  { id: 'b004', roomId: 'rA19', guestId: 'g004', checkIn: '2026-05-10', checkOut: '2026-05-13', nights: 3, status: 'confirmed',  source: 'direct',      totalAmount: 13500, paidAmount: 5000,  adults: 2, children: 0, specialRequests: 'ผลไม้ต้อนรับ แชมเปญ', createdAt: '2026-05-05', paymentMethod: 'bank_transfer' },
-  // อนาคต — confirmed
-  { id: 'b005', roomId: 'rA2',  guestId: 'g005', checkIn: '2026-05-12', checkOut: '2026-05-15', nights: 3, status: 'confirmed',  source: 'expedia',     totalAmount: 3600,  paidAmount: 3600,  adults: 2, children: 0, specialRequests: '',                 createdAt: '2026-05-06', paymentMethod: 'credit_card' },
-  { id: 'b006', roomId: 'rB19', guestId: 'g006', checkIn: '2026-05-15', checkOut: '2026-05-18', nights: 3, status: 'confirmed',  source: 'direct',      totalAmount: 8400,  paidAmount: 2800,  adults: 2, children: 2, specialRequests: 'เตียงเสริมสำหรับเด็ก', createdAt: '2026-05-07', paymentMethod: 'credit_card' },
-  // อดีต
-  { id: 'b007', roomId: 'rA7',  guestId: 'g001', checkIn: '2026-04-20', checkOut: '2026-04-23', nights: 3, status: 'checked_out', source: 'direct',      totalAmount: 5700,  paidAmount: 5700,  adults: 2, children: 0, specialRequests: '',                 createdAt: '2026-04-10', paymentMethod: 'credit_card' },
-  { id: 'b008', roomId: 'rB5',  guestId: 'g003', checkIn: '2026-04-25', checkOut: '2026-05-01', nights: 6, status: 'checked_out', source: 'booking_com', totalAmount: 7200,  paidAmount: 7200,  adults: 1, children: 0, specialRequests: '',                 createdAt: '2026-04-15', paymentMethod: 'credit_card' },
-  { id: 'b009', roomId: 'rA9',  guestId: 'g002', checkIn: '2026-05-01', checkOut: '2026-05-04', nights: 3, status: 'cancelled',   source: 'agoda',       totalAmount: 5400,  paidAmount: 0,     adults: 2, children: 0, specialRequests: '',                 createdAt: '2026-04-28', paymentMethod: 'qr_code' },
+  // ===== เข้าพักอยู่ปัจจุบัน (checkIn <= วันนี้ < checkOut) =====
+  { id: 'b001', roomId: 'rA1',  guestId: 'g001', checkIn: '2026-05-27', checkOut: '2026-06-03', nights: 7, status: 'checked_in',  source: 'direct',   totalAmount: 3500, paidAmount: 3500, adults: 2, children: 0, specialRequests: 'หมอนเพิ่ม',         createdAt: '2026-05-20T10:00:00', paymentMethod: 'credit_card',   payments: [{ id: 'pay001', amount: 3500, method: 'credit_card',   date: '2026-05-27T14:00:00', staffId: 's002' }] },
+  { id: 'b002', roomId: 'rA11', guestId: 'g002', checkIn: '2026-05-28', checkOut: '2026-05-31', nights: 3, status: 'checked_in',  source: 'direct',   totalAmount: 1500, paidAmount: 1500, adults: 2, children: 0, specialRequests: '',                  createdAt: '2026-05-22T09:00:00', paymentMethod: 'qr_code',       payments: [{ id: 'pay002', amount: 1500, method: 'qr_code',       date: '2026-05-28T15:00:00', staffId: 's002' }] },
+  { id: 'b003', roomId: 'rA3',  guestId: 'g003', checkIn: '2026-05-26', checkOut: '2026-06-01', nights: 6, status: 'checked_in',  source: 'direct',   totalAmount: 3000, paidAmount: 3000, adults: 1, children: 0, specialRequests: 'น้ำแร่ในห้อง',      createdAt: '2026-05-15T11:00:00', paymentMethod: 'credit_card',   payments: [{ id: 'pay003', amount: 3000, method: 'credit_card',   date: '2026-05-26T13:00:00', staffId: 's002' }] },
+  // ===== เช็คอินวันนี้ 29 พ.ค. =====
+  { id: 'b004', roomId: 'rA19', guestId: 'g004', checkIn: '2026-05-29', checkOut: '2026-06-02', nights: 4, status: 'checked_in',  source: 'direct',   totalAmount: 2000, paidAmount: 2000, adults: 2, children: 0, specialRequests: 'ผลไม้ต้อนรับ',     createdAt: '2026-05-20T14:00:00', paymentMethod: 'bank_transfer', payments: [{ id: 'pay004', amount: 2000, method: 'bank_transfer', date: '2026-05-29T10:30:00', staffId: 's002' }] },
+  // ===== เช็คเอาต์วันนี้ 29 พ.ค. =====
+  { id: 'b005', roomId: 'rA2',  guestId: 'g005', checkIn: '2026-05-25', checkOut: '2026-05-29', nights: 4, status: 'checked_out', source: 'direct',   totalAmount: 2000, paidAmount: 2000, adults: 2, children: 0, specialRequests: '',                  createdAt: '2026-05-18T10:00:00', paymentMethod: 'credit_card',   payments: [{ id: 'pay005', amount: 2000, method: 'credit_card',   date: '2026-05-25T14:00:00', staffId: 's002' }] },
+  // ===== Walk-in วันนี้ 29 พ.ค. =====
+  { id: 'b010', roomId: 'rB7',  guestSnapshot: { name: 'สมชาย ผ่านมา', phone: '0812345678', idNumber: '1234567890123' }, checkIn: '2026-05-29', checkOut: '2026-05-30', nights: 1, status: 'checked_in', source: 'walk_in', totalAmount: 500, paidAmount: 500, adults: 1, children: 0, specialRequests: '', createdAt: '2026-05-29T14:00:00', paymentMethod: 'cash', payments: [{ id: 'pay010', amount: 500, method: 'cash', date: '2026-05-29T14:05:00', staffId: 's002' }] },
+  // ===== อนาคต — confirmed =====
+  { id: 'b006', roomId: 'rB4',  guestId: 'g006', checkIn: '2026-06-05', checkOut: '2026-06-08', nights: 3, status: 'confirmed',  source: 'direct',   totalAmount: 1500, paidAmount: 500,  adults: 2, children: 2, specialRequests: 'เตียงเสริมสำหรับเด็ก', createdAt: '2026-05-20T09:00:00', paymentMethod: 'credit_card' },
+  // ===== อดีต — checked_out =====
+  { id: 'b007', roomId: 'rA7',  guestId: 'g001', checkIn: '2026-04-20', checkOut: '2026-04-23', nights: 3, status: 'checked_out', source: 'direct',   totalAmount: 1500, paidAmount: 1500, adults: 2, children: 0, specialRequests: '',                  createdAt: '2026-04-10T09:00:00', paymentMethod: 'credit_card',   isCorporate: true, corporateAccountId: 'corp001', payments: [{ id: 'pay007', amount: 1500, method: 'credit_card',   date: '2026-04-23T12:00:00', staffId: 's002' }] },
+  { id: 'b008', roomId: 'rB6',  guestId: 'g003', checkIn: '2026-05-15', checkOut: '2026-05-20', nights: 5, status: 'checked_out', source: 'direct',   totalAmount: 2500, paidAmount: 2500, adults: 1, children: 0, specialRequests: '',                  createdAt: '2026-05-10T10:00:00', paymentMethod: 'credit_card',   payments: [{ id: 'pay008', amount: 2500, method: 'credit_card',   date: '2026-05-20T11:00:00', staffId: 's002' }] },
+  // ===== ยกเลิก =====
+  { id: 'b009', roomId: 'rA9',  guestId: 'g002', checkIn: '2026-06-10', checkOut: '2026-06-13', nights: 3, status: 'cancelled',  source: 'direct',   totalAmount: 1500, paidAmount: 0,    adults: 2, children: 0, specialRequests: '',                  createdAt: '2026-05-25T15:00:00', paymentMethod: 'qr_code' },
 ]
 
 export const mockInvoices: Invoice[] = [
   {
-    id: 'inv001', bookingId: 'b001', guestId: 'g001', amount: 4363.64, tax: 436.36, total: 4800,
-    status: 'paid', issuedAt: '2026-05-08', paidAt: '2026-05-08', paymentMethod: 'credit_card',
+    id: 'inv001', bookingId: 'b005', guestId: 'g005', amount: 2000, tax: 0, total: 2000,
+    status: 'paid', issuedAt: '2026-05-29T11:30:00', paidAt: '2026-05-29T11:30:00', paymentMethod: 'credit_card',
     items: [
-      { description: 'ค่าห้องพัก Standard 4 คืน (A1)', quantity: 4, unitPrice: 1090.91, total: 4363.64 },
+      { description: 'ค่าห้องพัก เตียงคู่ 4 คืน (A2)', quantity: 4, unitPrice: 500, total: 2000 },
     ]
   },
   {
-    id: 'inv002', bookingId: 'b002', guestId: 'g002', amount: 3272.73, tax: 327.27, total: 3600,
-    status: 'paid', issuedAt: '2026-05-09', paidAt: '2026-05-09', paymentMethod: 'qr_code',
+    id: 'inv002', bookingId: 'b007', guestId: 'g001', amount: 1500, tax: 0, total: 1500,
+    status: 'paid', issuedAt: '2026-04-23T12:00:00', paidAt: '2026-04-23T12:00:00', paymentMethod: 'credit_card',
     items: [
-      { description: 'ค่าห้องพัก Deluxe 2 คืน (A11)', quantity: 2, unitPrice: 1636.36, total: 3272.73 },
+      { description: 'ค่าห้องพัก เตียงเดี่ยว 3 คืน (A7)', quantity: 3, unitPrice: 500, total: 1500 },
     ]
   },
   {
-    id: 'inv003', bookingId: 'b004', guestId: 'g004', amount: 12272.73, tax: 1227.27, total: 13500,
-    status: 'draft', issuedAt: '2026-05-10', paymentMethod: 'bank_transfer',
+    id: 'inv003', bookingId: 'b008', guestId: 'g003', amount: 2500, tax: 0, total: 2500,
+    status: 'paid', issuedAt: '2026-05-20T11:00:00', paidAt: '2026-05-20T11:00:00', paymentMethod: 'credit_card',
     items: [
-      { description: 'ค่าห้องพัก Suite 3 คืน (A19)', quantity: 3, unitPrice: 4090.91, total: 12272.73 },
+      { description: 'ค่าห้องพัก เตียงเดี่ยว 5 คืน (B6)', quantity: 5, unitPrice: 500, total: 2500 },
     ]
   },
   {
-    id: 'inv004', bookingId: 'b007', guestId: 'g001', amount: 5181.82, tax: 518.18, total: 5700,
-    status: 'paid', issuedAt: '2026-04-20', paidAt: '2026-04-23', paymentMethod: 'credit_card',
+    id: 'inv004', bookingId: 'b010', amount: 500, tax: 0, total: 500,
+    status: 'paid', issuedAt: '2026-05-29T14:10:00', paidAt: '2026-05-29T14:10:00', paymentMethod: 'cash',
     items: [
-      { description: 'ค่าห้องพัก Deluxe 3 คืน (A7)', quantity: 3, unitPrice: 1727.27, total: 5181.82 },
+      { description: 'ค่าห้องพัก เตียงเดี่ยว 1 คืน (B7)', quantity: 1, unitPrice: 500, total: 500 },
     ]
   },
 ]
 
 export const mockHousekeepingTasks: HousekeepingTask[] = [
-  { id: 'hk001', roomId: 'rA4',  roomNumber: 'A4',  assignedTo: 'นิดา สะอาด', staffId: 's004', status: 'in_progress', priority: 'high',   notes: 'ผู้เข้าพักออกแล้ว รีบทำความสะอาด',  scheduledAt: '2026-05-10T09:00:00', startedAt: '2026-05-10T09:30:00' },
-  { id: 'hk002', roomId: 'rB11', roomNumber: 'B11', assignedTo: 'มะลิ สวย',   staffId: 's005', status: 'pending',     priority: 'normal', notes: 'ทำความสะอาดประจำวัน',                  scheduledAt: '2026-05-10T10:00:00' },
-  { id: 'hk003', roomId: 'rB13', roomNumber: 'B13', assignedTo: 'นิดา สะอาด', staffId: 's004', status: 'pending',     priority: 'normal', notes: '',                                       scheduledAt: '2026-05-10T11:00:00' },
-  { id: 'hk004', roomId: 'rA20', roomNumber: 'A20', assignedTo: 'มะลิ สวย',   staffId: 's005', status: 'completed',   priority: 'normal', notes: 'เตรียมห้องสำหรับผู้เข้าพักรายใหม่',  scheduledAt: '2026-05-10T08:00:00', startedAt: '2026-05-10T08:05:00', completedAt: '2026-05-10T08:55:00' },
-  { id: 'hk005', roomId: 'rB7',  roomNumber: 'B7',  assignedTo: 'มะลิ สวย',   staffId: 's005', status: 'completed',   priority: 'urgent', notes: 'VIP เช็คอินบ่ายนี้',                   scheduledAt: '2026-05-10T07:00:00', startedAt: '2026-05-10T07:10:00', completedAt: '2026-05-10T07:50:00' },
+  { id: 'hk001', roomId: 'rA4',  roomNumber: 'A4',  assignedTo: 'นิดา สะอาด', staffId: 's004', status: 'in_progress', priority: 'high',   notes: 'ผู้เข้าพักออกแล้ว รีบทำความสะอาด',           scheduledAt: '2026-05-29T09:00:00', startedAt: '2026-05-29T09:30:00' },
+  { id: 'hk002', roomId: 'rB11', roomNumber: 'B11', assignedTo: 'มะลิ สวย',   staffId: 's005', status: 'pending',     priority: 'normal', notes: 'ทำความสะอาดประจำวัน',                         scheduledAt: '2026-05-29T10:00:00' },
+  { id: 'hk003', roomId: 'rB13', roomNumber: 'B13', assignedTo: 'นิดา สะอาด', staffId: 's004', status: 'pending',     priority: 'normal', notes: '',                                              scheduledAt: '2026-05-29T11:00:00' },
+  { id: 'hk004', roomId: 'rA2',  roomNumber: 'A2',  assignedTo: 'มะลิ สวย',   staffId: 's005', status: 'pending',     priority: 'high',   notes: 'เช็คเอาต์แล้ว รอทำความสะอาด',                scheduledAt: '2026-05-29T12:00:00' },
+  { id: 'hk005', roomId: 'rA19', roomNumber: 'A19', assignedTo: 'มะลิ สวย',   staffId: 's005', status: 'completed',   priority: 'urgent', notes: 'เตรียมห้องก่อนแขกเช็คอิน',                   scheduledAt: '2026-05-29T08:00:00', startedAt: '2026-05-29T08:05:00', completedAt: '2026-05-29T08:50:00' },
 ]
 
 export const mockMaintenanceLogs: MaintenanceLog[] = [
-  { id: 'm001', roomId: 'rA5',  roomNumber: 'A5',  issue: 'เครื่องปรับอากาศขัดข้อง', description: 'AC ไม่เย็น คอมเพรสเซอร์มีเสียงดัง',  status: 'in_progress', priority: 'high',   reportedBy: 'พนักงานต้อนรับ', reportedAt: '2026-05-09T14:00:00', assignedTo: 'ช่างสมศักดิ์' },
-  { id: 'm002', roomId: 'rA15', roomNumber: 'A15', issue: 'ท่อน้ำรั่ว',                description: 'ท่อน้ำในห้องน้ำรั่ว น้ำซึมออกมาที่พื้น', status: 'open',        priority: 'urgent', reportedBy: 'แม่บ้าน',         reportedAt: '2026-05-10T08:30:00' },
-  { id: 'm003', roomId: 'rB3',  roomNumber: 'B3',  issue: 'โทรทัศน์ไม่มีสัญญาณ',         description: 'รีโมทไม่ทำงาน สัญญาณขาดหาย',           status: 'resolved',    priority: 'normal', reportedBy: 'แขกผู้เข้าพัก',  reportedAt: '2026-05-08T20:00:00', assignedTo: 'ช่างไฟสมปอง', resolvedAt: '2026-05-08T21:00:00', cost: 200 },
-  { id: 'm004', roomId: 'rA1',  roomNumber: 'A1',  issue: 'หลอดไฟในห้องน้ำขาด',          description: 'หลอดไฟเสีย 1 ดวง',                       status: 'resolved',    priority: 'low',    reportedBy: 'แม่บ้าน',         reportedAt: '2026-05-07T09:00:00', assignedTo: 'ช่างไฟสมปอง', resolvedAt: '2026-05-07T09:30:00', cost: 150 },
+  { id: 'm001', roomId: 'rA5',  roomNumber: 'เฮียดิเรก',  issue: 'เครื่องปรับอากาศขัดข้อง', description: 'AC ไม่เย็น คอมเพรสเซอร์มีเสียงดัง',       status: 'in_progress', priority: 'high',   reportedBy: 'พนักงานต้อนรับ', reportedAt: '2026-05-25T14:00:00', assignedTo: 'สมศักดิ์ ช่างซ่อม' },
+  { id: 'm002', roomId: 'rA15', roomNumber: 'A15', issue: 'ท่อน้ำรั่ว',               description: 'ท่อน้ำในห้องน้ำรั่ว น้ำซึมออกมาที่พื้น',   status: 'open',        priority: 'urgent', reportedBy: 'แม่บ้าน',         reportedAt: '2026-05-29T08:30:00' },
+  { id: 'm003', roomId: 'rB3',  roomNumber: 'B3',  issue: 'โทรทัศน์ไม่มีสัญญาณ',    description: 'รีโมทไม่ทำงาน สัญญาณขาดหาย',                status: 'resolved',    priority: 'normal', reportedBy: 'แขกผู้เข้าพัก',  reportedAt: '2026-05-20T20:00:00', assignedTo: 'สมศักดิ์ ช่างซ่อม', resolvedAt: '2026-05-20T21:00:00', cost: 200 },
+  { id: 'm004', roomId: 'rA1',  roomNumber: 'A1',  issue: 'หลอดไฟในห้องน้ำขาด',     description: 'หลอดไฟเสีย 1 ดวง',                           status: 'resolved',    priority: 'low',    reportedBy: 'แม่บ้าน',         reportedAt: '2026-05-22T09:00:00', assignedTo: 'สมศักดิ์ ช่างซ่อม', resolvedAt: '2026-05-22T09:30:00', cost: 150 },
 ]
 
 export const mockStaff: Staff[] = [
@@ -210,12 +247,6 @@ export const mockUsers: User[] = [
   { id: 'u006', username: 'somsak',       password: 'somsak123', staffId: 's006' },
 ]
 
-export const mockOTAChannels: OTAChannel[] = [
-  { id: 'ota001', name: 'Agoda',       logo: '🟠', isConnected: true,  lastSync: '2026-05-10T06:00:00', inventoryMapped: 35, totalRooms: 40, pendingBookings: 2, commission: 15 },
-  { id: 'ota002', name: 'Booking.com', logo: '🔵', isConnected: true,  lastSync: '2026-05-10T05:45:00', inventoryMapped: 30, totalRooms: 40, pendingBookings: 1, commission: 17 },
-  { id: 'ota003', name: 'Expedia',     logo: '🟡', isConnected: true,  lastSync: '2026-05-10T06:15:00', inventoryMapped: 25, totalRooms: 40, pendingBookings: 0, commission: 18 },
-  { id: 'ota004', name: 'Airbnb',      logo: '🔴', isConnected: false, lastSync: '2026-04-01T00:00:00', inventoryMapped: 0,  totalRooms: 40, pendingBookings: 0, commission: 3 },
-]
 
 
 export const mockInventoryItems: InventoryItem[] = [
@@ -273,7 +304,7 @@ export const mockCorporateAccounts: CorporateAccount[] = [
 
 export const mockCorporateTransactions: CorporateTransaction[] = [
   { id: 'ctx001', corporateAccountId: 'corp001', type: 'deposit', amount: 100000, balanceBefore: 0,      balanceAfter: 100000, performedBy: 's003', date: '2025-01-15T10:00:00', notes: 'เปิดบัญชีและวางมัดจำครั้งแรก' },
-  { id: 'ctx002', corporateAccountId: 'corp001', type: 'charge',  amount: 48500,  balanceBefore: 100000, balanceAfter: 51500,  performedBy: 's002', date: '2026-04-20T15:30:00', bookingId: 'b007', notes: 'พนักงาน: นายวีระ สมใจ เข้าพัก 3 คืน' },
+  { id: 'ctx002', corporateAccountId: 'corp001', type: 'charge',  amount: 1500,   balanceBefore: 100000, balanceAfter: 98500,  performedBy: 's002', date: '2026-04-23T12:00:00', bookingId: 'b007', notes: 'พนักงาน: นายวีระ สมใจ เข้าพัก 3 คืน' },
   { id: 'ctx003', corporateAccountId: 'corp002', type: 'deposit', amount: 50000,  balanceBefore: 0,      balanceAfter: 50000,  performedBy: 's003', date: '2025-06-01T09:00:00', notes: 'วางมัดจำครั้งแรก' },
   { id: 'ctx004', corporateAccountId: 'corp002', type: 'charge',  amount: 38200,  balanceBefore: 50000,  balanceAfter: 11800,  performedBy: 's002', date: '2026-05-01T12:00:00', notes: 'พนักงานเข้าพักหลายรายการ' },
   { id: 'ctx005', corporateAccountId: 'corp003', type: 'deposit', amount: 20000,  balanceBefore: 0,      balanceAfter: 20000,  performedBy: 's003', date: '2025-03-10T11:00:00', notes: 'วางมัดจำ' },
@@ -297,10 +328,29 @@ export const mockBookingAddOns: BookingAddOn[] = [
 ]
 
 export const mockDynamicPricing = [
-  { id: 'dp001', roomType: 'standard',  name: 'ราคาปกติ',     startDate: '2026-01-01', endDate: '2026-12-31', price: 1200,  description: 'ราคามาตรฐาน Wing A' },
-  { id: 'dp002', roomType: 'standard',  name: 'High Season',  startDate: '2026-12-20', endDate: '2027-01-05', price: 1800,  description: 'ช่วงเทศกาลปีใหม่' },
-  { id: 'dp003', roomType: 'deluxe',    name: 'ราคาปกติ',     startDate: '2026-01-01', endDate: '2026-12-31', price: 1800,  description: 'ราคามาตรฐาน' },
-  { id: 'dp004', roomType: 'suite',     name: 'ราคาปกติ',     startDate: '2026-01-01', endDate: '2026-12-31', price: 4500,  description: 'ราคามาตรฐาน' },
-  { id: 'dp005', roomType: 'family',    name: 'ราคาปกติ',     startDate: '2026-01-01', endDate: '2026-12-31', price: 2800,  description: 'ราคามาตรฐาน' },
-  { id: 'dp006', roomType: 'penthouse', name: 'ราคาปกติ',     startDate: '2026-01-01', endDate: '2026-12-31', price: 8000,  description: 'ราคามาตรฐาน' },
+  { id: 'dp001', roomType: 'single', name: 'ราคาปกติ',    startDate: '2026-01-01', endDate: '2026-12-31', price: 500, description: 'ราคามาตรฐานเตียงเดี่ยว' },
+  { id: 'dp002', roomType: 'double', name: 'ราคาปกติ',    startDate: '2026-01-01', endDate: '2026-12-31', price: 500, description: 'ราคามาตรฐานเตียงคู่' },
+  { id: 'dp003', roomType: 'triple', name: 'ราคาปกติ',    startDate: '2026-01-01', endDate: '2026-12-31', price: 700, description: 'ราคามาตรฐาน 3 เตียง' },
+]
+
+// ========== EXPENSES: รายจ่าย/ต้นทุนดำเนินงาน ==========
+export const mockExpenses: Expense[] = [
+  // ----- งวด 5/2026 (เดือนปัจจุบันของ mock) -----
+  { id: 'exp001', date: '2026-05-28', category: 'salary',             description: 'เงินเดือนพนักงาน 5/2026 (ฝ่ายต้อนรับ)', payee: '-',                  amount: 17868, note: 'โอนผ่านธนาคาร', createdAt: '2026-05-28T10:00:00' },
+  { id: 'exp002', date: '2026-05-28', category: 'salary',             description: 'เงินเดือนพนักงาน 5/2026 (แม่บ้าน/ช่าง)', payee: '-',                  amount: 15148, note: 'โอนผ่านธนาคาร', createdAt: '2026-05-28T10:05:00' },
+  { id: 'exp003', date: '2026-05-15', category: 'utilities_electric', description: 'ค่าไฟฟ้ารวมเดือน 5/2026',           payee: 'การไฟฟ้านครหลวง',     amount: 24944.40, createdAt: '2026-05-15T09:00:00' },
+  { id: 'exp004', date: '2026-05-15', category: 'utilities_water',    description: 'ค่าน้ำประปารวมเดือน 5/2026',         payee: 'การประปานครหลวง',     amount: 4603.50, createdAt: '2026-05-15T09:05:00' },
+  { id: 'exp005', date: '2026-05-10', category: 'utilities_internet', description: 'ค่าอินเทอร์เน็ต/ไฟเบอร์ 5/2026',     payee: 'True Corporation',    amount: 3906, createdAt: '2026-05-10T11:00:00' },
+  { id: 'exp006', date: '2026-05-17', category: 'maintenance',        description: 'ซ่อมเครื่องปรับอากาศ + ปั๊มน้ำ',      payee: 'บริษัท คลีนเซอร์วิส',   amount: 6553, createdAt: '2026-05-17T14:00:00' },
+  { id: 'exp007', date: '2026-05-08', category: 'cleaning',           description: 'ค่าทำความสะอาดพื้นที่ส่วนกลาง',       payee: 'บริษัท คลีนเซอร์วิส',   amount: 7000, createdAt: '2026-05-08T13:00:00' },
+  { id: 'exp008', date: '2026-05-05', category: 'tax',                description: 'ภาษีโรงเรือนและที่ดิน',              payee: 'สำนักงานเขต',         amount: 7326, createdAt: '2026-05-05T10:30:00' },
+  { id: 'exp009', date: '2026-05-12', category: 'marketing',          description: 'ค่าโฆษณาออนไลน์ + ป้าย',             payee: 'Facebook Ads',        amount: 4888, createdAt: '2026-05-12T16:00:00' },
+  { id: 'exp010', date: '2026-05-21', category: 'supplies',           description: 'วัสดุสิ้นเปลือง (สบู่/กระดาษ/น้ำยา)', payee: 'แม็คโคร',             amount: 3210, createdAt: '2026-05-21T15:30:00' },
+  { id: 'exp011', date: '2026-05-21', category: 'other',              description: 'ค่าอาหารพนักงาน/เบ็ดเตล็ด',          payee: '-',                  amount: 1204, createdAt: '2026-05-21T12:00:00' },
+
+  // ----- งวด 4/2026 (เดือนก่อนหน้า — ไว้สลับดูย้อนหลัง) -----
+  { id: 'exp012', date: '2026-04-28', category: 'salary',             description: 'เงินเดือนพนักงาน 4/2026',            payee: '-',                  amount: 32500, createdAt: '2026-04-28T10:00:00' },
+  { id: 'exp013', date: '2026-04-15', category: 'utilities_electric', description: 'ค่าไฟฟ้ารวมเดือน 4/2026',           payee: 'การไฟฟ้านครหลวง',     amount: 21880, createdAt: '2026-04-15T09:00:00' },
+  { id: 'exp014', date: '2026-04-15', category: 'utilities_water',    description: 'ค่าน้ำประปารวมเดือน 4/2026',         payee: 'การประปานครหลวง',     amount: 4120, createdAt: '2026-04-15T09:05:00' },
+  { id: 'exp015', date: '2026-04-10', category: 'utilities_internet', description: 'ค่าอินเทอร์เน็ต/ไฟเบอร์ 4/2026',     payee: 'True Corporation',    amount: 3906, createdAt: '2026-04-10T11:00:00' },
 ]
