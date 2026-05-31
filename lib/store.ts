@@ -875,9 +875,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       }
     }),
 }), {
-  name: 'hotel-pms-storage',
+  name: 'hotel-pms-storage-v3',
   storage: createJSONStorage(() => localStorage),
-  version: 2,
+  version: 3,
   // เผื่อ field ใหม่ (เช่น auditLogs, payments) ที่ user เคย save ก่อนเพิ่มไว้
   merge: (persisted, current) => {
     const p = (persisted ?? {}) as Partial<typeof current>

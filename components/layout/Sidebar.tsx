@@ -52,7 +52,7 @@ export default function Sidebar() {
 
   function handleReset() {
     if (!confirm('ล้างข้อมูลทั้งหมดและโหลดข้อมูลตัวอย่างใหม่?\n(การกระทำนี้ย้อนกลับไม่ได้)')) return
-    localStorage.removeItem('hotel-pms-storage')
+    localStorage.removeItem('hotel-pms-storage-v3')
     toast.success('ล้างข้อมูลแล้ว กำลังโหลดใหม่...')
     setTimeout(() => window.location.reload(), 500)
   }
