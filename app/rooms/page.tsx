@@ -17,7 +17,7 @@ const statusColors: Record<RoomStatus, string> = {
 }
 
 const roomTypeStats = (rooms: ReturnType<typeof useHotelStore.getState>['rooms']) => {
-  const types: RoomType[] = ['standard', 'deluxe', 'family', 'suite', 'penthouse']
+  const types: RoomType[] = ['single', 'double', 'triple']
   return types.map((type) => {
     const typeRooms = rooms.filter((r) => r.type === type)
     return {
@@ -97,7 +97,7 @@ export default function RoomsPage() {
               <select value={filterType} onChange={(e) => setFilterType(e.target.value as RoomType | 'all')}
                 className="px-4 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none">
                 <option value="all">ประเภทห้องทั้งหมด</option>
-                {(['standard', 'deluxe', 'family', 'suite', 'penthouse'] as RoomType[]).map((t) => (
+                {(['single', 'double', 'triple'] as RoomType[]).map((t) => (
                   <option key={t} value={t}>{getRoomTypeLabel(t)}</option>
                 ))}
               </select>

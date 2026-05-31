@@ -1,8 +1,8 @@
 'use client'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, todayLocal, toLocalDateKey } from '@/lib/utils'
-import type { Booking } from '@/types'
+import { formatCurrency, todayLocal, toLocalDateKey, bookingOccupiesDay, bookingRevenue } from '@/lib/utils'
+import type { Booking, BookingAddOn } from '@/types'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area
@@ -13,7 +13,7 @@ import { TrendingUp, DollarSign, BarChart2, Users } from 'lucide-react'
 
 const COLORS = ['#f59e0b', '#3b82f6', '#22c55e', '#8b5cf6', '#ef4444']
 
-function buildDailyStats(bookings: Booking[], totalRooms: number, days: number) {
+function buildDailyStats(bookings: Booking[], addOns: BookingAddOn[], totalRooms: number, days: number) {
   const today = new Date()
   return Array.from({ length: days }, (_, i) => {
     const d = new Date(today)
@@ -21,12 +21,8 @@ function buildDailyStats(bookings: Booking[], totalRooms: number, days: number) 
     const day = toLocalDateKey(d)
     const revenue = bookings
       .filter((b) => b.status === 'checked_out' && b.checkOut.startsWith(day))
-      .reduce((s, b) => s + b.totalAmount, 0)
-    const occupied = bookings.filter((b) =>
-      b.status !== 'cancelled' &&
-      b.checkIn.split('T')[0] <= day &&
-      b.checkOut.split('T')[0] > day
-    ).length
+      .reduce((s, b) => s + bookingRevenue(b, addOns), 0)
+    const occupied = bookings.filter((b) => bookingOccupiesDay(b, day)).length
     const occupancy = totalRooms > 0 ? Math.round((occupied / totalRooms) * 100) : 0
     const revpar = totalRooms > 0 ? Math.round(revenue / totalRooms) : 0
     return { date: day, revenue, occupancy, revpar }
@@ -34,26 +30,26 @@ function buildDailyStats(bookings: Booking[], totalRooms: number, days: number) 
 }
 
 export default function ReportsPage() {
-  const { rooms, guests, bookings } = useHotelStore()
+  const { rooms, guests, bookings, bookingAddOns } = useHotelStore()
 
-  const revenueByType = ['standard', 'deluxe', 'family', 'suite', 'penthouse'].map((type) => {
+  const revenueByType = ['single', 'double', 'triple'].map((type) => {
     const typeRooms = rooms.filter((r) => r.type === type)
     const typeBookings = bookings.filter((b) =>
       typeRooms.some((r) => r.id === b.roomId) && b.status !== 'cancelled'
     )
     return {
-      type: { standard: 'Standard', deluxe: 'Deluxe', family: 'Family', suite: 'Suite', penthouse: 'Penthouse' }[type],
-      รายได้: typeBookings.reduce((s, b) => s + b.totalAmount, 0),
+      type: { single: 'เตียงเดี่ยว', double: 'เตียงคู่', triple: '3 เตียง' }[type],
+      รายได้: typeBookings.reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0),
       จำนวนการจอง: typeBookings.length,
     }
   }).filter((d) => d.จำนวนการจอง > 0)
 
-  const sourceData = ['direct', 'agoda', 'booking_com', 'expedia', 'walk_in'].map((src) => ({
-    name: { direct: 'จองตรง', agoda: 'Agoda', booking_com: 'Booking.com', expedia: 'Expedia', walk_in: 'Walk-in' }[src]!,
+  const sourceData = ['direct', 'walk_in'].map((src) => ({
+    name: { direct: 'จองตรง', walk_in: 'Walk-in' }[src]!,
     value: bookings.filter((b) => b.source === src && b.status !== 'cancelled').length,
   })).filter((d) => d.value > 0)
 
-  const dailyStats = buildDailyStats(bookings, rooms.length, 30)
+  const dailyStats = buildDailyStats(bookings, bookingAddOns, rooms.length, 30)
   const revparData = dailyStats.slice(-14).map((d) => ({
     date: format(parseISO(d.date), 'dd MMM', { locale: th }),
     RevPAR: d.revpar,
@@ -72,10 +68,10 @@ export default function ReportsPage() {
   // KPI จากข้อมูลจริง (booking ที่ไม่ถูกยกเลิก)
   const today = todayLocal()
   const activeBookings = bookings.filter((b) => b.status !== 'cancelled')
-  const totalRevenue = activeBookings.reduce((s, b) => s + b.totalAmount, 0)
+  const totalRevenue = activeBookings.reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
   const todayRevenue = bookings
     .filter((b) => b.status === 'checked_out' && b.checkOut.startsWith(today))
-    .reduce((s, b) => s + b.totalAmount, 0)
+    .reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
   const occupancyNow = rooms.length > 0
     ? (rooms.filter((r) => r.status === 'occupied').length / rooms.length) * 100
     : 0

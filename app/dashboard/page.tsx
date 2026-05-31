@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, getRoomStatusLabel, getRoomTypeLabel, todayLocal, toLocalDateKey } from '@/lib/utils'
+import { formatCurrency, formatDate, getRoomStatusLabel, getRoomTypeLabel, todayLocal, toLocalDateKey, getGuestDisplayName, bookingOccupiesDay, bookingActiveOnDay, bookingRevenue } from '@/lib/utils'
 import type { RoomStatus } from '@/types'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
@@ -13,7 +13,7 @@ import { th } from 'date-fns/locale'
 
 
 export default function DashboardPage() {
-  const { rooms, bookings, guests, updateRoomStatus } = useHotelStore()
+  const { rooms, bookings, guests, bookingAddOns, updateRoomStatus } = useHotelStore()
   const [selectedRoom, setSelectedRoom] = useState<string | null>(null)
   const [viewDate, setViewDate] = useState(() => todayLocal())
 
@@ -28,10 +28,10 @@ export default function DashboardPage() {
   const checkInQueue = bookings.filter((b) => b.status === 'confirmed' && b.checkIn.startsWith(today)).length
   const checkOutToday = bookings.filter((b) => b.status === 'checked_in' && b.checkOut.startsWith(today)).length
   const occupancyRate = stats.total > 0 ? Math.round((stats.occupied / stats.total) * 100) : 0
-  // รายได้วันนี้ = ยอดรวมของ booking ที่ check-out วันนี้
+  // รายได้วันนี้ = ยอดรวมของ booking ที่ check-out วันนี้ (ค่าห้อง + add-on)
   const todayRevenue = bookings
     .filter((b) => b.status === 'checked_out' && b.checkOut.startsWith(today))
-    .reduce((sum, b) => sum + b.totalAmount, 0)
+    .reduce((sum, b) => sum + bookingRevenue(b, bookingAddOns), 0)
   // RevPAR (มาตรฐาน) = รายได้วันนี้ ÷ ห้องทั้งหมด
   const revpar = stats.total > 0 ? Math.round(todayRevenue / stats.total) : 0
 
@@ -39,11 +39,7 @@ export default function DashboardPage() {
     const d = new Date()
     d.setDate(d.getDate() - (13 - i))
     const day = toLocalDateKey(d)
-    const occupied = bookings.filter((b) =>
-      b.status !== 'cancelled' &&
-      b.checkIn.split('T')[0] <= day &&
-      b.checkOut.split('T')[0] > day
-    ).length
+    const occupied = bookings.filter((b) => bookingOccupiesDay(b, day)).length
     return {
       dateLabel: format(parseISO(day), 'dd MMM', { locale: th }),
       occupancy: rooms.length > 0 ? Math.round((occupied / rooms.length) * 100) : 0,
@@ -53,12 +49,7 @@ export default function DashboardPage() {
   const selectedRoomData = rooms.find((r) => r.id === selectedRoom)
 
   function getBookingOnDate(roomId: string, date: string) {
-    return bookings.find((b) =>
-      b.roomId === roomId &&
-      ['confirmed', 'checked_in', 'pending'].includes(b.status) &&
-      b.checkIn.split('T')[0] <= date &&
-      b.checkOut.split('T')[0] > date
-    ) ?? null
+    return bookings.find((b) => b.roomId === roomId && bookingActiveOnDay(b, date)) ?? null
   }
 
   function getRoomColorForDate(room: typeof rooms[0]) {
@@ -182,7 +173,7 @@ export default function DashboardPage() {
             {/* Room detail panel */}
             {selectedRoomData && (() => {
               const booking = getBookingOnDate(selectedRoomData.id, viewDate)
-              const guest = booking ? guests.find((g) => g.id === booking.guestId) : null
+              const guest = booking?.guestId ? guests.find((g) => g.id === booking.guestId) : null
               return (
                 <div className="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
                   <div className="flex items-start justify-between mb-3">
@@ -199,15 +190,15 @@ export default function DashboardPage() {
                     )}
                   </div>
 
-                  {booking && guest ? (
+                  {booking && (guest || booking.guestSnapshot) ? (
                     <div className="space-y-1.5 text-sm">
                       <div className="flex items-center gap-2">
                         <span className="text-slate-500 w-20 shrink-0">ลูกค้า:</span>
-                        <span className="font-semibold text-slate-800">{guest.name}</span>
+                        <span className="font-semibold text-slate-800">{getGuestDisplayName(booking, guests)}</span>
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-slate-500 w-20 shrink-0">เบอร์:</span>
-                        <span>{guest.phone}</span>
+                        <span>{guest?.phone ?? booking.guestSnapshot?.phone ?? '–'}</span>
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-slate-500 w-20 shrink-0">เช็คอิน:</span>
@@ -226,7 +217,7 @@ export default function DashboardPage() {
                     <div className="text-sm text-slate-500 space-y-1">
                       <div><span className="text-slate-400">ราคา/คืน: </span>{formatCurrency(selectedRoomData.pricePerNight)}</div>
                       <div><span className="text-slate-400">รองรับ: </span>{selectedRoomData.maxGuests} ท่าน · ชั้น {selectedRoomData.floor}</div>
-                      {viewDate === today && (
+                      {viewDate === today && selectedRoomData.status !== 'occupied' && (
                         <>
                           <div className="pt-2 flex gap-2 flex-wrap">
                             {(['available', 'cleaning', 'maintenance'] as RoomStatus[]).map((s) => (
@@ -248,6 +239,9 @@ export default function DashboardPage() {
                           </div>
                           <p className="text-[11px] text-slate-400 pt-1.5">สถานะ "มีผู้เข้าพัก" จะเปลี่ยนอัตโนมัติเมื่อเช็คอินจาก /front-desk</p>
                         </>
+                      )}
+                      {viewDate === today && selectedRoomData.status === 'occupied' && (
+                        <p className="text-[11px] text-amber-600 pt-1.5 font-medium">🔒 ห้องนี้มีผู้เข้าพักอยู่ — เปลี่ยนสถานะได้เฉพาะผ่านการเช็คเอาต์ที่ /front-desk</p>
                       )}
                     </div>
                   )}

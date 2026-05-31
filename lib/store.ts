@@ -1,18 +1,20 @@
 'use client'
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
+import { supabaseStorage } from './supabase-storage'
 import type {
   Room, Guest, Booking, Invoice, InvoiceItem, InvoiceStatus, HousekeepingTask,
   MaintenanceLog, Staff, RoomStatus, BookingStatus, HousekeepingStatus, MaintenanceStatus,
   InventoryItem, InventoryTransaction, CorporateAccount, CorporateTransaction,
-  AddOnItem, BookingAddOn, AuditLog, AuditCategory
+  AddOnItem, BookingAddOn, AuditLog, AuditCategory, Expense
 } from '@/types'
 import { useAuthStore } from './auth-store'
+import { calcAddOnTotal, calcOutstanding, roomHasConflict } from './utils'
 import {
   mockRooms, mockGuests, mockBookings, mockInvoices,
   mockHousekeepingTasks, mockMaintenanceLogs, mockStaff,
   mockInventoryItems, mockInventoryTransactions, mockCorporateAccounts, mockCorporateTransactions,
-  mockAddOnItems, mockBookingAddOns, mockDynamicPricing
+  mockAddOnItems, mockBookingAddOns, mockExpenses, mockDynamicPricing, shiftMockDates
 } from './mock-data'
 
 interface HotelStore {
@@ -29,19 +31,34 @@ interface HotelStore {
   corporateTransactions: CorporateTransaction[]
   addOnItems: AddOnItem[]
   bookingAddOns: BookingAddOn[]
+  expenses: Expense[]
   auditLogs: AuditLog[]
+
+  // Cloud hydration (Supabase storage โหลดแบบ async — ต้องรอให้เสร็จก่อนใช้งาน)
+  _hasHydrated: boolean
+  setHasHydrated: (v: boolean) => void
+
   logAudit: (entry: { category: AuditCategory; action: string; summary: string; entityId?: string }) => void
+
+  // Expense actions
+  addExpense: (expense: Omit<Expense, 'id' | 'createdAt'>) => void
+  updateExpense: (id: string, updates: Partial<Omit<Expense, 'id' | 'createdAt'>>) => void
+  deleteExpense: (id: string) => void
 
   // Room actions
   updateRoomStatus: (roomId: string, status: RoomStatus) => void
 
   // Booking actions
-  createBooking: (booking: Omit<Booking, 'id' | 'createdAt'>) => void
+  createBooking: (booking: Omit<Booking, 'id' | 'createdAt'>) => { ok: boolean; error?: string }
   updateBookingStatus: (bookingId: string, status: BookingStatus) => void
   cancelBooking: (bookingId: string) => void
   updateBooking: (bookingId: string, updates: Partial<Pick<Booking, 'adults' | 'children' | 'source' | 'specialRequests' | 'paymentMethod'>>) => void
   extendBooking: (bookingId: string, additionalNights: number) => { ok: boolean; error?: string }
   moveBooking: (bookingId: string, newRoomId: string) => { ok: boolean; error?: string }
+
+  // Data backup / restore
+  exportData: () => Record<string, unknown>
+  importData: (data: Record<string, unknown>) => void
 
   // Guest actions
   addGuest: (guest: Omit<Guest, 'id'>) => string
@@ -82,18 +99,23 @@ interface HotelStore {
 export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   rooms: mockRooms,
   guests: mockGuests,
-  bookings: mockBookings,
-  invoices: mockInvoices,
-  housekeepingTasks: mockHousekeepingTasks,
-  maintenanceLogs: mockMaintenanceLogs,
+  // เลื่อนวันที่ของ seed ที่เกี่ยวกับกิจกรรมให้อิงวันนี้จริง (เดโมมีชีวิตทุกวัน)
+  bookings: shiftMockDates(mockBookings),
+  invoices: shiftMockDates(mockInvoices),
+  housekeepingTasks: shiftMockDates(mockHousekeepingTasks),
+  maintenanceLogs: shiftMockDates(mockMaintenanceLogs),
   staff: mockStaff,
-  inventoryItems: mockInventoryItems,
-  inventoryTransactions: mockInventoryTransactions,
+  inventoryItems: shiftMockDates(mockInventoryItems),
+  inventoryTransactions: shiftMockDates(mockInventoryTransactions),
   corporateAccounts: mockCorporateAccounts,
-  corporateTransactions: mockCorporateTransactions,
+  corporateTransactions: shiftMockDates(mockCorporateTransactions),
   addOnItems: mockAddOnItems,
-  bookingAddOns: mockBookingAddOns,
+  bookingAddOns: shiftMockDates(mockBookingAddOns),
+  expenses: shiftMockDates(mockExpenses),
   auditLogs: [],
+
+  _hasHydrated: false,
+  setHasHydrated: (v) => set({ _hasHydrated: v }),
 
   logAudit: ({ category, action, summary, entityId }) => {
     const u = useAuthStore.getState().user
@@ -117,7 +139,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       ),
     })),
 
-  createBooking: (bookingData) =>
+  createBooking: (bookingData) => {
+    // ด่านสุดท้ายกันจองซ้ำ: ห้ามมี booking active อื่นในห้องเดียวกันที่ช่วงวันคร่อมกัน
+    const state = get()
+    if (roomHasConflict(state.bookings, bookingData.roomId, bookingData.checkIn, bookingData.checkOut)) {
+      return { ok: false, error: 'ห้องนี้มีการจองอื่นทับช่วงวันที่เลือกแล้ว' }
+    }
+
     set((state) => {
       const now = new Date().toISOString()
       const bookingId = `b${Date.now()}`
@@ -150,7 +178,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         bookings: [newBooking, ...state.bookings],
         rooms: updatedRooms,
       }
-    }),
+    })
+    return { ok: true }
+  },
 
   updateBookingStatus: (bookingId, status) =>
     set((state) => {
@@ -190,11 +220,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       const now = new Date().toISOString()
       const room = state.rooms.find((r) => r.id === booking.roomId)
 
-      // 1) รวมยอด add-on (เฉพาะ fulfilled) เข้ายอดสุดท้าย
-      const fulfilledAddOns = state.bookingAddOns.filter(
-        (a) => a.bookingId === bookingId && a.status === 'fulfilled'
+      // 1) รวมยอด add-on ที่ยังไม่ถูกยกเลิก (requested + fulfilled) เข้ายอดสุดท้าย
+      //    ใช้เกณฑ์เดียวกับยอดค้างที่แสดงหน้า front-desk เพื่อไม่ให้รายการ add-on หายจากบิล
+      const chargeableAddOns = state.bookingAddOns.filter(
+        (a) => a.bookingId === bookingId && a.status !== 'cancelled'
       )
-      const addOnTotal = fulfilledAddOns.reduce((sum, a) => sum + a.totalPrice, 0)
+      const addOnTotal = calcAddOnTotal(bookingId, state.bookingAddOns)
       const combinedTotal = booking.totalAmount + addOnTotal
       const outstanding = combinedTotal - booking.paidAmount
 
@@ -259,7 +290,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           unitPrice: booking.nights > 0 ? booking.totalAmount / booking.nights : booking.totalAmount,
           total: booking.totalAmount,
         },
-        ...fulfilledAddOns.map((a) => {
+        ...chargeableAddOns.map((a) => {
           const item = state.addOnItems.find((i) => i.id === a.addOnItemId)
           return {
             description: `Add-on: ${item?.name ?? '-'}`,
@@ -329,6 +360,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
+      if (booking.status === 'cancelled') return {}
       const wasCheckedIn = booking.status === 'checked_in'
       const room = state.rooms.find((r) => r.id === booking.roomId)
       const now = new Date().toISOString()
@@ -346,9 +378,50 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             scheduledAt: now,
           }
         : null
+
+      // คืนเงินที่รับมาแล้ว: บันทึก refund payment (ยอดติดลบ) + เคลียร์ยอดที่จ่าย
+      const refundAmount = booking.paidAmount
+      const refundPayment: import('@/types').Payment | null = refundAmount > 0
+        ? {
+            id: `pay${Date.now()}`,
+            amount: -refundAmount,
+            method: booking.paymentMethod ?? 'cash',
+            date: now,
+            staffId: 'system',
+            notes: 'คืนเงินจากการยกเลิกการจอง',
+          }
+        : null
+
+      // ถ้าเป็น booking องค์กร → คืนเครดิตกลับเข้าบัญชี
+      let updatedCorpAccounts = state.corporateAccounts
+      let updatedCorpTx = state.corporateTransactions
+      if (refundAmount > 0 && booking.isCorporate && booking.corporateAccountId) {
+        const acc = state.corporateAccounts.find((a) => a.id === booking.corporateAccountId)
+        if (acc) {
+          updatedCorpAccounts = state.corporateAccounts.map((a) =>
+            a.id === acc.id
+              ? { ...a, totalUsed: Math.max(0, a.totalUsed - refundAmount), availableBalance: a.availableBalance + refundAmount }
+              : a
+          )
+          const ctx: CorporateTransaction = {
+            id: `ctx${Date.now()}`, corporateAccountId: acc.id, type: 'refund', amount: refundAmount,
+            balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + refundAmount,
+            performedBy: 'system', date: now, bookingId, notes: 'คืนเครดิตจากการยกเลิกการจอง',
+          }
+          updatedCorpTx = [ctx, ...state.corporateTransactions]
+        }
+      }
+
       return {
         bookings: state.bookings.map((b) =>
-          b.id === bookingId ? { ...b, status: 'cancelled' as BookingStatus } : b
+          b.id === bookingId
+            ? {
+                ...b,
+                status: 'cancelled' as BookingStatus,
+                paidAmount: 0,
+                payments: refundPayment ? [...(b.payments ?? []), refundPayment] : b.payments,
+              }
+            : b
         ),
         rooms: state.rooms.map((r) =>
           r.id === booking.roomId
@@ -356,6 +429,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             : r
         ),
         housekeepingTasks: newTask ? [...state.housekeepingTasks, newTask] : state.housekeepingTasks,
+        // ยกเลิกใบแจ้งหนี้ของการจองนี้ → สถานะ refunded
+        invoices: state.invoices.map((iv) =>
+          iv.bookingId === bookingId && iv.status !== 'refunded' ? { ...iv, status: 'refunded' as InvoiceStatus } : iv
+        ),
+        corporateAccounts: updatedCorpAccounts,
+        corporateTransactions: updatedCorpTx,
       }
     }),
 
@@ -379,17 +458,11 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const newCheckOutDate = new Date(oldCheckOut)
     newCheckOutDate.setDate(newCheckOutDate.getDate() + additionalNights)
     const newCheckOut = newCheckOutDate.toISOString()
-    const newCheckOutDay = newCheckOut.split('T')[0]
 
-    // เช็คชน booking อื่นในห้องเดียวกัน ช่วงระหว่าง oldCheckOut → newCheckOut
-    const conflict = state.bookings.some((b) =>
-      b.id !== bookingId &&
-      b.roomId === booking.roomId &&
-      ['confirmed', 'checked_in', 'pending'].includes(b.status) &&
-      b.checkIn.split('T')[0] < newCheckOutDay &&
-      b.checkOut.split('T')[0] > oldCheckOut
-    )
-    if (conflict) return { ok: false, error: 'มีการจองอื่นทับช่วงวันที่ขยาย' }
+    // เช็คชน booking อื่นในห้องเดียวกัน ช่วงระหว่าง oldCheckOut → newCheckOut (ข้ามตัวเอง)
+    if (roomHasConflict(state.bookings, booking.roomId, oldCheckOut, newCheckOut, bookingId)) {
+      return { ok: false, error: 'มีการจองอื่นทับช่วงวันที่ขยาย' }
+    }
 
     // คำนวณราคาเพิ่ม (dynamic pricing ของวันที่เพิ่ม)
     const room = state.rooms.find((r) => r.id === booking.roomId)
@@ -437,16 +510,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (!newRoom) return { ok: false, error: 'ไม่พบห้องใหม่' }
     if (newRoom.status === 'maintenance') return { ok: false, error: 'ห้องใหม่ปิดปรับปรุง' }
 
-    const ci = booking.checkIn.split('T')[0]
-    const co = booking.checkOut.split('T')[0]
-    const conflict = state.bookings.some((b) =>
-      b.id !== bookingId &&
-      b.roomId === newRoomId &&
-      ['confirmed', 'checked_in', 'pending'].includes(b.status) &&
-      b.checkIn.split('T')[0] < co &&
-      b.checkOut.split('T')[0] > ci
-    )
-    if (conflict) return { ok: false, error: 'ห้องใหม่มีการจองทับช่วงนี้' }
+    if (roomHasConflict(state.bookings, newRoomId, booking.checkIn, booking.checkOut, bookingId)) {
+      return { ok: false, error: 'ห้องใหม่มีการจองทับช่วงนี้' }
+    }
 
     const wasCheckedIn = booking.status === 'checked_in'
     const oldRoom = state.rooms.find((r) => r.id === booking.roomId)
@@ -514,12 +580,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         if (status === 'completed') updates.completedAt = now
         return { ...t, ...updates }
       })
-      // When task completed, mark room as available
+      // เมื่อทำความสะอาดเสร็จ → คืนห้องเป็น available เฉพาะห้องที่กำลัง 'cleaning' (หลังเช็คเอาต์)
+      // ห้ามแตะห้องที่ 'occupied' (งานทำความสะอาดระหว่างเข้าพัก) หรือ 'maintenance'
       const task = updatedTasks.find((t) => t.id === taskId)
       const updatedRooms =
         status === 'completed' && task
           ? state.rooms.map((r) =>
-              r.id === task.roomId ? { ...r, status: 'available' as RoomStatus } : r
+              r.id === task.roomId && r.status === 'cleaning' ? { ...r, status: 'available' as RoomStatus } : r
             )
           : state.rooms
       return { housekeepingTasks: updatedTasks, rooms: updatedRooms }
@@ -608,6 +675,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
 
   restockItem: (itemId, quantity, staffId, notes) =>
     set((state) => {
+      if (quantity <= 0) return {} // กันเติมสต็อกค่าติดลบ/ศูนย์
       const now = new Date().toISOString()
       const tx: InventoryTransaction = {
         id: `itx${Date.now()}`, itemId, type: 'restock', quantity, performedBy: staffId, date: now, notes,
@@ -739,16 +807,41 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       }
     }),
 
+  // ===== Expense actions =====
+  addExpense: (expense) =>
+    set((state) => ({
+      expenses: [{ ...expense, id: `exp${Date.now()}`, createdAt: new Date().toISOString() }, ...state.expenses],
+    })),
+
+  updateExpense: (id, updates) =>
+    set((state) => ({
+      expenses: state.expenses.map((e) => (e.id === id ? { ...e, ...updates } : e)),
+    })),
+
+  deleteExpense: (id) =>
+    set((state) => ({
+      expenses: state.expenses.filter((e) => e.id !== id),
+    })),
+
+  // สำรองข้อมูล: คืนเฉพาะ state ที่เป็นข้อมูล (ตัด function ออก)
+  exportData: () => {
+    const s = get() as unknown as Record<string, unknown>
+    const data: Record<string, unknown> = {}
+    for (const k of Object.keys(s)) {
+      if (typeof s[k] !== 'function') data[k] = s[k]
+    }
+    return data
+  },
+  // กู้คืนข้อมูล: เขียนทับ state ด้วยข้อมูลจากไฟล์ (เก็บ function เดิมไว้)
+  importData: (data) => set(() => ({ ...(data as Partial<HotelStore>) })),
+
   recordPayment: (bookingId, amount, method, staffId, notes) => {
     const state = get()
     const booking = state.bookings.find((b) => b.id === bookingId)
     if (!booking) return { ok: false, error: 'ไม่พบการจอง' }
     if (amount <= 0) return { ok: false, error: 'จำนวนเงินต้องมากกว่า 0' }
-    // คำนวณยอดคงค้าง รวม add-on ที่ fulfilled แล้ว
-    const addOnTotal = state.bookingAddOns
-      .filter((a) => a.bookingId === bookingId && a.status === 'fulfilled')
-      .reduce((s, a) => s + a.totalPrice, 0)
-    const outstanding = booking.totalAmount + addOnTotal - booking.paidAmount
+    // คำนวณยอดคงค้าง (helper กลาง ใช้เกณฑ์เดียวกับทุกหน้า)
+    const outstanding = calcOutstanding(booking, state.bookingAddOns)
     if (outstanding <= 0) return { ok: false, error: 'การจองนี้ชำระครบแล้ว' }
     if (amount > outstanding) return { ok: false, error: `เกินยอดค้างชำระ (สูงสุด ${outstanding.toLocaleString()} บาท)` }
 
@@ -844,8 +937,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     set((state) => {
       const addOn = state.bookingAddOns.find((a) => a.id === addOnId)
       if (!addOn) return {}
+      if (addOn.status === 'cancelled') return {} // กันยกเลิกซ้ำ
+      const now = new Date().toISOString()
       const wasFulfilled = addOn.status === 'fulfilled'
-      const item = wasFulfilled ? state.addOnItems.find((i) => i.id === addOn.addOnItemId) : null
+      const item = state.addOnItems.find((i) => i.id === addOn.addOnItemId) ?? null
 
       // ถ้าเคย fulfilled แล้วและมี inventoryItemId → คืนสต็อกกลับ
       let updatedItems = state.inventoryItems
@@ -855,7 +950,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         const invTx: InventoryTransaction = {
           id: `itx${Date.now()}`, itemId: item.inventoryItemId, type: 'adjust',
           quantity: restore, referenceId: addOnId, performedBy: 'system',
-          date: new Date().toISOString(),
+          date: now,
           notes: `คืนสต็อกจากการยกเลิก Add-on: ${item.name} x${addOn.quantity}`,
         }
         updatedItems = state.inventoryItems.map((i) =>
@@ -866,21 +961,77 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         updatedTx = [invTx, ...state.inventoryTransactions]
       }
 
+      // คืนเงินส่วนที่จ่ายเกิน ถ้า add-on นี้ถูกชำระไปแล้ว (paidAmount เกินยอดที่ต้องจ่ายหลังยกเลิก)
+      let updatedBookings = state.bookings
+      const booking = state.bookings.find((b) => b.id === addOn.bookingId)
+      let updatedCorpAccounts = state.corporateAccounts
+      let updatedCorpTx = state.corporateTransactions
+      if (booking) {
+        const otherAddOnTotal = state.bookingAddOns
+          .filter((a) => a.bookingId === booking.id && a.id !== addOnId && a.status !== 'cancelled')
+          .reduce((s, a) => s + a.totalPrice, 0)
+        const newCharge = booking.totalAmount + otherAddOnTotal
+        const overpaid = Math.max(0, booking.paidAmount - newCharge)
+        if (overpaid > 0) {
+          const refundPayment: import('@/types').Payment = {
+            id: `pay${Date.now()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash',
+            date: now, staffId: 'system', notes: `คืนเงินจากการยกเลิก Add-on: ${item?.name ?? addOn.addOnItemId}`,
+          }
+          updatedBookings = state.bookings.map((b) =>
+            b.id === booking.id
+              ? { ...b, paidAmount: b.paidAmount - overpaid, payments: [...(b.payments ?? []), refundPayment] }
+              : b
+          )
+          // ถ้าเป็น booking องค์กร → คืนเครดิตกลับบัญชี
+          if (booking.isCorporate && booking.corporateAccountId) {
+            const acc = state.corporateAccounts.find((a) => a.id === booking.corporateAccountId)
+            if (acc) {
+              updatedCorpAccounts = state.corporateAccounts.map((a) =>
+                a.id === acc.id
+                  ? { ...a, totalUsed: Math.max(0, a.totalUsed - overpaid), availableBalance: a.availableBalance + overpaid }
+                  : a
+              )
+              const ctx: CorporateTransaction = {
+                id: `ctx${Date.now()}`, corporateAccountId: acc.id, type: 'refund', amount: overpaid,
+                balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + overpaid,
+                performedBy: 'system', date: now, bookingId: booking.id, notes: 'คืนเครดิตจากการยกเลิก Add-on',
+              }
+              updatedCorpTx = [ctx, ...state.corporateTransactions]
+            }
+          }
+        } else {
+          updatedBookings = state.bookings
+        }
+      } else {
+        updatedBookings = state.bookings
+      }
+
       return {
         bookingAddOns: state.bookingAddOns.map((a) =>
           a.id === addOnId ? { ...a, status: 'cancelled' as const } : a
         ),
+        bookings: updatedBookings,
         inventoryItems: updatedItems,
         inventoryTransactions: updatedTx,
+        corporateAccounts: updatedCorpAccounts,
+        corporateTransactions: updatedCorpTx,
       }
     }),
 }), {
-  name: 'hotel-pms-storage-v3',
-  storage: createJSONStorage(() => localStorage),
-  version: 3,
+  name: 'hotel-pms-storage',
+  storage: createJSONStorage(() => supabaseStorage),
+  version: 2,
+  // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
+  // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
+  skipHydration: true,
   // เผื่อ field ใหม่ (เช่น auditLogs, payments) ที่ user เคย save ก่อนเพิ่มไว้
   merge: (persisted, current) => {
     const p = (persisted ?? {}) as Partial<typeof current>
     return { ...current, ...p, auditLogs: p.auditLogs ?? current.auditLogs ?? [] }
+  },
+  // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading
+  onRehydrateStorage: () => (_state, error) => {
+    if (error) console.error('[hotel-store] rehydrate error:', error)
+    useHotelStore.setState({ _hasHydrated: true })
   },
 }))

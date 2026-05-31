@@ -2,8 +2,18 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, getBookingSourceLabel, todayLocal } from '@/lib/utils'
-import { Printer, Calendar, LogIn, LogOut, DollarSign, ShoppingBag, Wrench, Hotel as HotelIcon, UserPlus } from 'lucide-react'
+import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, getBookingSourceLabel, todayLocal, getGuestDisplayName, calcAddOnTotal, bookingOccupiesDay, bookingRevenue } from '@/lib/utils'
+import { downloadExcel } from '@/lib/export-excel'
+import { Printer, Calendar, LogIn, LogOut, DollarSign, ShoppingBag, Wrench, Hotel as HotelIcon, UserPlus, FileSpreadsheet } from 'lucide-react'
+import { toast } from 'sonner'
+
+const TH_MONTHS = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม']
+// แปลง YYYY-MM-DD → "8 พฤษภาคม 2569" (ปี พ.ศ.)
+function thaiDateBE(ymd: string): string {
+  const d = new Date(`${ymd}T00:00:00`)
+  return `${d.getDate()} ${TH_MONTHS[d.getMonth()]} ${d.getFullYear() + 543}`
+}
+const WING_LABEL: Record<string, string> = { front: 'อาคารหน้า', back: 'อาคารหลัง' }
 
 export default function DailyReportPage() {
   const { bookings, guests, rooms, invoices, bookingAddOns, addOnItems, housekeepingTasks, maintenanceLogs } = useHotelStore()
@@ -18,11 +28,11 @@ export default function DailyReportPage() {
 
   // Check-outs ที่เกิดวันนี้ (checked_out + checkOut ตรงวัน)
   const checkOutsToday = bookings.filter((b) => b.status === 'checked_out' && onDate(b.checkOut))
-  const checkOutRevenue = checkOutsToday.reduce((s, b) => s + b.totalAmount, 0)
+  const checkOutRevenue = checkOutsToday.reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
 
   // Walk-ins (source walk_in + createdAt วันนี้)
   const walkInsToday = bookings.filter((b) => b.source === 'walk_in' && onDate(b.createdAt))
-  const walkInRevenue = walkInsToday.reduce((s, b) => s + b.totalAmount, 0)
+  const walkInRevenue = walkInsToday.reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
 
   // Payments received วันนี้
   type PaymentEntry = { bookingId: string; guestName: string; amount: number; method: string; time: string }
@@ -31,8 +41,7 @@ export default function DailyReportPage() {
     if (!b.payments) continue
     for (const p of b.payments) {
       if (onDate(p.date)) {
-        const g = guests.find((x) => x.id === b.guestId)
-        payments.push({ bookingId: b.id, guestName: g?.name ?? '–', amount: p.amount, method: p.method, time: p.date })
+        payments.push({ bookingId: b.id, guestName: getGuestDisplayName(b, guests), amount: p.amount, method: p.method, time: p.date })
       }
     }
   }
@@ -52,13 +61,91 @@ export default function DailyReportPage() {
   const invoicesToday = invoices.filter((iv) => onDate(iv.issuedAt))
   const invoiceTotal = invoicesToday.reduce((s, iv) => s + iv.total, 0)
 
-  // ห้องที่เข้าพักอยู่ในวันที่เลือก (นับ booking ที่ active บน date นั้น)
-  const occupied = bookings.filter((b) =>
-    b.status !== 'cancelled' &&
-    b.checkIn.split('T')[0] <= date &&
-    b.checkOut.split('T')[0] > date
-  ).length
+  // ห้องที่เข้าพักอยู่ในวันที่เลือก (occupancy — นับ booking ที่ครอบครองคืนนั้น)
+  const occupied = bookings.filter((b) => bookingOccupiesDay(b, date)).length
   const total = rooms.length
+
+  // ===== ส่งออก Excel: รายงานเข้าพัก + การชำระเงินรายห้อง ของวันที่เลือก =====
+  function exportDailyExcel() {
+    // booking ที่เกี่ยวข้องกับวันนี้ (พักอยู่ + เข้า/ออกวันนี้) ไม่รวมที่ยกเลิก
+    const stays = bookings.filter((b) =>
+      b.status !== 'cancelled' &&
+      b.checkIn.split('T')[0] <= date &&
+      b.checkOut.split('T')[0] >= date
+    )
+    if (stays.length === 0) {
+      toast.error('ไม่มีรายการเข้าพักในวันที่เลือก')
+      return
+    }
+
+    type Row = { wing: string; room: string; guest: string; ci: string; co: string; nights: number; amount: number; cash: number; transfer: number; outstanding: number; status: string }
+    const computed: Row[] = stays.map((b) => {
+      const room = rooms.find((r) => r.id === b.roomId)
+      const addOnTotal = calcAddOnTotal(b.id, bookingAddOns)
+      const totalCharge = b.totalAmount + addOnTotal
+      let cash = 0, transfer = 0
+      if (b.payments && b.payments.length) {
+        for (const p of b.payments) { if (p.method === 'cash') cash += p.amount; else transfer += p.amount }
+      } else if (b.paidAmount > 0) {
+        if (b.paymentMethod === 'cash') cash = b.paidAmount; else transfer = b.paidAmount
+      }
+      const outstanding = Math.max(0, totalCharge - b.paidAmount)
+      const status = outstanding <= 0 ? 'ชำระแล้ว' : b.paidAmount > 0 ? 'ชำระบางส่วน' : 'ค้างชำระ'
+      return {
+        wing: room?.wing ?? '-', room: room?.number ?? '–', guest: getGuestDisplayName(b, guests),
+        ci: formatDate(b.checkIn), co: formatDate(b.checkOut), nights: b.nights,
+        amount: Math.round(totalCharge * 100) / 100, cash: Math.round(cash * 100) / 100,
+        transfer: Math.round(transfer * 100) / 100, outstanding: Math.round(outstanding * 100) / 100, status,
+      }
+    })
+
+    const columns = [
+      { header: 'ห้อง', width: 12 },
+      { header: 'ชื่อผู้เข้าพัก', width: 22 },
+      { header: 'เช็คอิน', width: 13, align: 'center' as const },
+      { header: 'เช็คเอาต์', width: 13, align: 'center' as const },
+      { header: 'จำนวนคืน', width: 9, align: 'center' as const },
+      { header: 'จำนวนเงิน', width: 13, money: true },
+      { header: 'สด', width: 12, money: true },
+      { header: 'โอน', width: 12, money: true },
+      { header: 'ค้างชำระ', width: 13, money: true },
+      { header: 'สถานะ', width: 13, align: 'center' as const },
+    ]
+    const toDataRow = (x: Row) => [x.room, x.guest, x.ci, x.co, x.nights, x.amount, x.cash, x.transfer, x.outstanding, x.status]
+    const sum = (rows: Row[], k: 'amount' | 'cash' | 'transfer' | 'outstanding') =>
+      Math.round(rows.reduce((s, r) => s + r[k], 0) * 100) / 100
+
+    // จัดกลุ่มตามอาคาร (wing) เรียงห้องในแต่ละกลุ่ม
+    const wings = Array.from(new Set(computed.map((r) => r.wing)))
+    const tables = wings.map((w) => {
+      const items = computed.filter((r) => r.wing === w).sort((a, b) => a.room.localeCompare(b.room, 'th', { numeric: true }))
+      return {
+        heading: `${WING_LABEL[w] ?? w} (${items.length} ห้อง)`,
+        columns,
+        rows: items.map(toDataRow),
+        totalRow: ['', `รวม ${items.length} ห้อง`, '', '', '', sum(items, 'amount'), sum(items, 'cash'), sum(items, 'transfer'), sum(items, 'outstanding'), ''],
+      }
+    })
+
+    // แถวสรุปรวมทั้งหมด (เมื่อมีมากกว่า 1 อาคาร)
+    if (wings.length > 1) {
+      tables.push({
+        heading: 'สรุปรวมทั้งหมด',
+        columns,
+        rows: [],
+        totalRow: ['', `รวม ${computed.length} ห้อง`, '', '', '', sum(computed, 'amount'), sum(computed, 'cash'), sum(computed, 'transfer'), sum(computed, 'outstanding'), ''],
+      })
+    }
+
+    downloadExcel({
+      filename: `รายงานประจำวัน-${date}`,
+      sheetName: 'ประจำวัน',
+      title: `รายงานประจำวันที่ ${thaiDateBE(date)}`,
+      subtitle: 'Pruksatara Park & Resort · โทร 011-344, 098-753-2109',
+      tables,
+    })
+    toast.success(`ส่งออกรายงานประจำวัน ${computed.length} ห้องแล้ว`)
+  }
 
   return (
     <div className="flex flex-col h-screen">
@@ -76,12 +163,20 @@ export default function DailyReportPage() {
               className="text-sm border border-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-amber-500"
             />
           </div>
-          <button
-            onClick={() => window.print()}
-            className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-800 text-white rounded-lg text-sm font-medium transition-colors"
-          >
-            <Printer size={15} /> พิมพ์รายงาน
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={exportDailyExcel}
+              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              <FileSpreadsheet size={15} /> ส่งออก Excel
+            </button>
+            <button
+              onClick={() => window.print()}
+              className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-800 text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              <Printer size={15} /> พิมพ์รายงาน
+            </button>
+          </div>
         </div>
 
         {/* Print header */}
@@ -115,12 +210,11 @@ export default function DailyReportPage() {
           ) : (
             <ReportTable headers={['เวลา', 'ลูกค้า', 'ห้อง', 'ช่องทาง']}>
               {checkInsToday.map((b) => {
-                const g = guests.find((x) => x.id === b.guestId)
                 const r = rooms.find((x) => x.id === b.roomId)
                 return (
                   <tr key={b.id} className="border-b border-slate-50">
                     <td className="px-3 py-2 text-slate-500 text-xs">{formatDateTime(b.checkIn)}</td>
-                    <td className="px-3 py-2 font-medium">{g?.name ?? '–'}</td>
+                    <td className="px-3 py-2 font-medium">{getGuestDisplayName(b, guests)}</td>
                     <td className="px-3 py-2">ห้อง {r?.number ?? '–'}</td>
                     <td className="px-3 py-2 text-slate-500 text-xs">{getBookingSourceLabel(b.source)}</td>
                   </tr>
@@ -137,11 +231,10 @@ export default function DailyReportPage() {
           ) : (
             <ReportTable headers={['ลูกค้า', 'ห้อง', 'จำนวนคืน', 'ยอดรวม', 'ชำระแล้ว']}>
               {checkOutsToday.map((b) => {
-                const g = guests.find((x) => x.id === b.guestId)
                 const r = rooms.find((x) => x.id === b.roomId)
                 return (
                   <tr key={b.id} className="border-b border-slate-50">
-                    <td className="px-3 py-2 font-medium">{g?.name ?? '–'}</td>
+                    <td className="px-3 py-2 font-medium">{getGuestDisplayName(b, guests)}</td>
                     <td className="px-3 py-2">ห้อง {r?.number ?? '–'}</td>
                     <td className="px-3 py-2 text-center">{b.nights}</td>
                     <td className="px-3 py-2 font-semibold">{formatCurrency(b.totalAmount)}</td>
@@ -160,12 +253,11 @@ export default function DailyReportPage() {
           ) : (
             <ReportTable headers={['เวลา', 'ลูกค้า', 'ห้อง', 'ยอด']}>
               {walkInsToday.map((b) => {
-                const g = guests.find((x) => x.id === b.guestId)
                 const r = rooms.find((x) => x.id === b.roomId)
                 return (
                   <tr key={b.id} className="border-b border-slate-50">
                     <td className="px-3 py-2 text-slate-500 text-xs">{formatDateTime(b.createdAt)}</td>
-                    <td className="px-3 py-2 font-medium">{g?.name ?? '–'}</td>
+                    <td className="px-3 py-2 font-medium">{getGuestDisplayName(b, guests)}</td>
                     <td className="px-3 py-2">ห้อง {r?.number ?? '–'}</td>
                     <td className="px-3 py-2 font-semibold">{formatCurrency(b.totalAmount)}</td>
                   </tr>

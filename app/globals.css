@@ -21,6 +21,86 @@ body {
   }
 }
 
+/* ===== DARK MODE ===== */
+/* ใช้วิธี override utility class กลางๆ (specificity .dark .x > .x) เพื่อครอบทั้งแอป
+   โดยไม่ต้องไล่เติม dark: ทุกไฟล์ สีเน้น (amber/emerald/blue/red) ปล่อยไว้ตามเดิม */
+.dark {
+  color-scheme: dark;
+  --background: #0f172a;
+  --foreground: #e2e8f0;
+}
+
+/* พื้นหลังหลัก */
+.dark body,
+.dark .bg-slate-50 { background-color: #0f172a; }
+.dark .bg-white { background-color: #1e293b; }
+.dark .bg-slate-100 { background-color: #334155; }
+.dark .bg-slate-200 { background-color: #334155; }
+
+/* ตัวอักษร */
+.dark .text-slate-900 { color: #f8fafc; }
+.dark .text-slate-800 { color: #f1f5f9; }
+.dark .text-slate-700 { color: #e2e8f0; }
+.dark .text-slate-600 { color: #cbd5e1; }
+.dark .text-slate-500 { color: #94a3b8; }
+.dark .text-slate-400 { color: #64748b; }
+
+/* เส้นขอบ */
+.dark .border-slate-50 { border-color: #1e293b; }
+.dark .border-slate-100 { border-color: #334155; }
+.dark .border-slate-200 { border-color: #334155; }
+.dark .border-slate-300 { border-color: #475569; }
+
+/* เส้นคั่นใน list/table (divide-*) */
+.dark .divide-slate-50 > :not([hidden]) ~ :not([hidden]) { border-color: #243044; }
+.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: #334155; }
+
+/* hover states ที่ใช้บ่อย */
+.dark .hover\:bg-slate-50:hover { background-color: #243044; }
+.dark .hover\:bg-slate-100:hover { background-color: #334155; }
+.dark .hover\:bg-slate-50\/50:hover { background-color: #243044; }
+.dark .hover\:text-slate-800:hover { color: #f1f5f9; }
+.dark .hover\:text-slate-700:hover { color: #e2e8f0; }
+.dark .hover\:border-slate-300:hover { border-color: #475569; }
+
+/* ฟอร์ม: input/select/textarea ให้พื้นเข้ม ตัวอักษรสว่าง */
+.dark input,
+.dark select,
+.dark textarea {
+  background-color: #0f172a;
+  color: #e2e8f0;
+  border-color: #334155;
+}
+.dark input::placeholder,
+.dark textarea::placeholder { color: #64748b; }
+.dark select option { background-color: #1e293b; color: #e2e8f0; }
+
+/* react-date-range ในโหมดมืด */
+.dark .rdrCalendarWrapper,
+.dark .rdrDateDisplayWrapper,
+.dark .rdrMonthAndYearWrapper,
+.dark .rdrMonthName,
+.dark .rdrMonth { background-color: #1e293b; color: #e2e8f0; }
+.dark .rdrDayNumber span { color: #e2e8f0; }
+.dark .rdrDayPassive .rdrDayNumber span { color: #64748b; }
+.dark .rdrWeekDay { color: #94a3b8; }
+.dark .rdrNextPrevButton { background: #334155; }
+.dark .rdrDateDisplayItem { background-color: #0f172a; border-color: #334155; }
+.dark .rdrDateDisplayItem input { color: #e2e8f0; }
+
+/* ===== DATE RANGE PICKER ===== */
+/* วันเช็คเอาท์ (ขอบขวาของช่วง) แสดงเป็นกรอบโปร่งแทนการถมสีเต็ม
+   เพื่อสื่อว่าเป็น "วันออก" ไม่ใช่คืนที่นอน เช่น 4 → 11 = 7 คืน (ไม่ใช่ 8) */
+.rdrEndEdge {
+  background-color: #fffbeb !important; /* amber-50 */
+  border: 2px dashed #f59e0b !important;
+  box-sizing: border-box;
+}
+/* เลขวันบนช่องเช็คเอาท์ให้เป็นสีเข้มเพื่ออ่านบนพื้นอ่อน */
+.rdrDay:not(.rdrDayPassive) .rdrEndEdge ~ .rdrDayNumber span {
+  color: #b45309 !important; /* amber-700 */
+}
+
 /* ===== PRINT STYLES ===== */
 @media print {
   /* ซ่อน sidebar และ reset margin */

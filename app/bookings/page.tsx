@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
 import {
-  formatCurrency, formatDate, getBookingStatusLabel, getBookingSourceLabel, calcBookingTotal, calcNights
+  formatCurrency, formatDate, getBookingStatusLabel, getBookingSourceLabel, calcBookingTotal, calcNights, getGuestDisplayName, getRoomTypeLabel, calcOutstanding, roomHasConflict
 } from '@/lib/utils'
 import type { BookingStatus, BookingSource, PaymentMethod } from '@/types'
 import { Plus, Search, X, Eye, Ban } from 'lucide-react'
@@ -23,24 +23,31 @@ const statusColors: Record<BookingStatus, string> = {
 }
 
 export default function BookingsPage() {
-  const { bookings, rooms, guests, corporateAccounts, createBooking, cancelBooking, logAudit } = useHotelStore()
+  const { bookings, rooms, guests, corporateAccounts, bookingAddOns, createBooking, cancelBooking, logAudit } = useHotelStore()
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState<BookingStatus | 'all'>('all')
   const [showModal, setShowModal] = useState(false)
   const [dateRange, setDateRange] = useState([{ startDate: new Date(), endDate: new Date(), key: 'selection' }])
+  const [guestMode, setGuestMode] = useState<'existing' | 'new'>('existing')
+  const [guestSearch, setGuestSearch] = useState('')
+  const [guestOpen, setGuestOpen] = useState(false)
   const [form, setForm] = useState({
     roomId: '', guestId: '', checkIn: '', checkOut: '',
     source: 'direct' as BookingSource, adults: 1, children: 0,
     specialRequests: '', paymentMethod: 'credit_card' as PaymentMethod,
     corporateAccountId: '', isCorporate: false,
+    // snapshot fields (ใช้เมื่อ guestMode = 'new')
+    snapName: '', snapPhone: '', snapIdNumber: '',
   })
 
   const filtered = bookings.filter((b) => {
-    const guest = guests.find((g) => g.id === b.guestId)
+    const guestName = getGuestDisplayName(b, guests)
+    const guest = b.guestId ? guests.find((g) => g.id === b.guestId) : null
     const room = rooms.find((r) => r.id === b.roomId)
     const matchSearch = !search ||
-      guest?.name.toLowerCase().includes(search.toLowerCase()) ||
+      guestName.toLowerCase().includes(search.toLowerCase()) ||
       guest?.phone.includes(search) ||
+      b.guestSnapshot?.phone?.includes(search) ||
       room?.number.includes(search) || b.id.includes(search)
     const matchStatus = filterStatus === 'all' || b.status === filterStatus
     return matchSearch && matchStatus
@@ -53,22 +60,59 @@ export default function BookingsPage() {
     return calcBookingTotal(room.type, form.checkIn, form.checkOut, room.pricePerNight)
   }
 
+  function resetForm() {
+    setGuestMode('existing')
+    setGuestSearch('')
+    setGuestOpen(false)
+    setDateRange([{ startDate: new Date(), endDate: new Date(), key: 'selection' }])
+    setForm({ roomId: '', guestId: '', checkIn: '', checkOut: '', source: 'direct', adults: 1, children: 0, specialRequests: '', paymentMethod: 'credit_card', corporateAccountId: '', isCorporate: false, snapName: '', snapPhone: '', snapIdNumber: '' })
+  }
+
+  function closeModal() {
+    setShowModal(false)
+    resetForm()
+  }
+
   function handleCreate() {
     if (!form.roomId || !form.checkIn || !form.checkOut) return
+    if (guestMode === 'new' && !form.snapName.trim()) {
+      toast.error('กรุณาระบุชื่อแขก')
+      return
+    }
+    if (bookingOverCapacity) {
+      toast.error('จำนวนผู้เข้าพักเกินความจุห้อง')
+      return
+    }
     const nights = calcNights(form.checkIn, form.checkOut)
     const total = calcTotal()
-    createBooking({
-      ...form, nights, status: 'confirmed',
+    const guestSnapshot = guestMode === 'new' ? {
+      name: form.snapName.trim(),
+      phone: form.snapPhone.trim() || undefined,
+      idNumber: form.snapIdNumber.trim() || undefined,
+    } : undefined
+    const result = createBooking({
+      roomId: form.roomId,
+      guestId: guestMode === 'existing' ? form.guestId || undefined : undefined,
+      guestSnapshot,
+      checkIn: form.checkIn, checkOut: form.checkOut,
+      nights, status: 'confirmed',
       totalAmount: total,
       paidAmount: form.paymentMethod === 'pay_later' ? 0 : total,
       source: form.source,
+      adults: form.adults, children: form.children,
+      specialRequests: form.specialRequests,
+      paymentMethod: form.paymentMethod,
+      corporateAccountId: form.corporateAccountId || undefined,
+      isCorporate: form.isCorporate,
     })
-    setShowModal(false)
-    setDateRange([{ startDate: new Date(), endDate: new Date(), key: 'selection' }])
-    setForm({ roomId: '', guestId: '', checkIn: '', checkOut: '', source: 'direct', adults: 1, children: 0, specialRequests: '', paymentMethod: 'credit_card', corporateAccountId: '', isCorporate: false })
+    if (!result.ok) {
+      toast.error(result.error ?? 'สร้างการจองไม่สำเร็จ')
+      return
+    }
+    closeModal()
     const room = rooms.find((r) => r.id === form.roomId)
-    const guest = guests.find((g) => g.id === form.guestId)
-    logAudit({ category: 'booking', action: 'create', summary: `สร้างการจอง ${guest?.name ?? 'walk-in'} ห้อง ${room?.number ?? '-'} ${nights} คืน · ${total.toLocaleString()} บาท` })
+    const guestName = guestMode === 'existing' ? (guests.find((g) => g.id === form.guestId)?.name ?? 'walk-in') : form.snapName
+    logAudit({ category: 'booking', action: 'create', summary: `สร้างการจอง ${guestName} ห้อง ${room?.number ?? '-'} ${nights} คืน · ${total.toLocaleString()} บาท` })
     toast.success('สร้างการจองสำเร็จ', { description: `${nights} คืน · ${total.toLocaleString()} บาท` })
   }
 
@@ -76,16 +120,12 @@ export default function BookingsPage() {
   const availableRooms = rooms.filter((r) => {
     if (r.status === 'maintenance') return false
     if (!form.checkIn || !form.checkOut) return r.status === 'available'
-    const ci = form.checkIn.split('T')[0]
-    const co = form.checkOut.split('T')[0]
-    const conflict = bookings.some((b) =>
-      b.roomId === r.id &&
-      ['confirmed', 'checked_in', 'pending'].includes(b.status) &&
-      b.checkIn.split('T')[0] < co &&
-      b.checkOut.split('T')[0] > ci
-    )
-    return !conflict
+    return !roomHasConflict(bookings, r.id, form.checkIn, form.checkOut)
   })
+
+  // เกินความจุห้องที่เลือกหรือไม่ (ใช้บล็อกปุ่มยืนยัน)
+  const selectedRoomForCap = rooms.find((r) => r.id === form.roomId)
+  const bookingOverCapacity = !!selectedRoomForCap && (form.adults + form.children) > selectedRoomForCap.maxGuests
 
   return (
     <div className="flex flex-col h-screen">
@@ -146,12 +186,15 @@ export default function BookingsPage() {
               </thead>
               <tbody className="divide-y divide-slate-50">
                 {filtered.map((b) => {
-                  const guest = guests.find((g) => g.id === b.guestId)
                   const room = rooms.find((r) => r.id === b.roomId)
+                  const guestName = getGuestDisplayName(b, guests)
                   return (
                     <tr key={b.id} className="hover:bg-slate-50 transition-colors">
                       <td className="hidden xl:table-cell px-4 py-3 font-mono text-xs text-slate-500">{b.id}</td>
-                      <td className="px-4 py-3 font-medium text-slate-800">{guest?.name ?? '-'}</td>
+                      <td className="px-4 py-3 font-medium text-slate-800">
+                        {guestName}
+                        {b.guestSnapshot && <span className="ml-1.5 text-xs text-slate-400">(ไม่ลงทะเบียน)</span>}
+                      </td>
                       <td className="px-4 py-3">ห้อง {room?.number ?? '-'}</td>
                       <td className="px-4 py-3 text-slate-600">{formatDate(b.checkIn)}</td>
                       <td className="px-4 py-3 text-slate-600">{formatDate(b.checkOut)}</td>
@@ -159,7 +202,7 @@ export default function BookingsPage() {
                       <td className="px-4 py-3 font-semibold">{formatCurrency(b.totalAmount)}</td>
                       <td className="hidden xl:table-cell px-4 py-3 text-slate-500">{getBookingSourceLabel(b.source)}</td>
                       <td className="hidden lg:table-cell px-4 py-3">
-                        {b.paidAmount >= b.totalAmount
+                        {calcOutstanding(b, bookingAddOns) <= 0
                           ? <span className="text-xs px-2.5 py-1 rounded-full font-medium text-emerald-700 bg-emerald-100">ชำระแล้ว</span>
                           : b.paidAmount > 0
                             ? <span className="text-xs px-2.5 py-1 rounded-full font-medium text-amber-700 bg-amber-100">ชำระบางส่วน</span>
@@ -179,7 +222,7 @@ export default function BookingsPage() {
                           {(b.status === 'confirmed' || b.status === 'pending') && (
                             <button
                               onClick={() => {
-                                if (!confirm(`ยืนยันยกเลิกการจอง ${b.id} ของ ${guest?.name ?? 'walk-in'}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`)) return
+                                if (!confirm(`ยืนยันยกเลิกการจอง ${b.id} ของ ${guestName}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`)) return
                                 cancelBooking(b.id)
                                 logAudit({ category: 'booking', action: 'cancel', summary: `ยกเลิกการจอง ${b.id}`, entityId: b.id })
                                 toast.success('ยกเลิกการจองแล้ว')
@@ -210,38 +253,126 @@ export default function BookingsPage() {
           <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between p-5 border-b border-slate-100 shrink-0">
               <h2 className="font-semibold text-slate-800">สร้างการจองใหม่</h2>
-              <button onClick={() => setShowModal(false)} className="p-2 rounded-lg hover:bg-slate-100 transition-colors">
+              <button onClick={closeModal} className="p-2 rounded-lg hover:bg-slate-100 transition-colors">
                 <X size={18} />
               </button>
             </div>
             <div className="p-5 space-y-4 overflow-y-auto flex-1">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ห้องพัก *</label>
-                  <select
-                    value={form.roomId} onChange={(e) => setForm({ ...form, roomId: e.target.value })}
-                    className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">ห้องพัก *</label>
+                <select
+                  value={form.roomId} onChange={(e) => setForm({ ...form, roomId: e.target.value })}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">เลือกห้อง</option>
+                  {availableRooms.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      ห้อง {r.number} — {getRoomTypeLabel(r.type)} ({formatCurrency(r.pricePerNight)}/คืน)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* แขก — toggle mode */}
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">ข้อมูลแขก *</label>
+                <div className="flex rounded-lg border border-slate-200 overflow-hidden mb-3 text-sm">
+                  <button
+                    type="button"
+                    onClick={() => setGuestMode('existing')}
+                    className={`flex-1 py-2 font-medium transition-colors ${guestMode === 'existing' ? 'bg-amber-500 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
                   >
-                    <option value="">เลือกห้อง</option>
-                    {availableRooms.map((r) => (
-                      <option key={r.id} value={r.id}>
-                        ห้อง {r.number} — {r.type} ({formatCurrency(r.pricePerNight)}/คืน)
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">แขก *</label>
-                  <select
-                    value={form.guestId} onChange={(e) => setForm({ ...form, guestId: e.target.value })}
-                    className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    เลือกจากระบบ
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGuestMode('new')}
+                    className={`flex-1 py-2 font-medium transition-colors ${guestMode === 'new' ? 'bg-amber-500 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
                   >
-                    <option value="">— ไม่ระบุ (Walk-in) —</option>
-                    {guests.map((g) => (
-                      <option key={g.id} value={g.id}>{g.name}</option>
-                    ))}
-                  </select>
+                    กรอกใหม่ (ไม่บันทึก)
+                  </button>
                 </div>
+
+                {guestMode === 'existing' ? (
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={guestSearch}
+                      onChange={(e) => { setGuestSearch(e.target.value); setGuestOpen(true); if (form.guestId) setForm({ ...form, guestId: '' }) }}
+                      onFocus={() => setGuestOpen(true)}
+                      onBlur={() => setTimeout(() => setGuestOpen(false), 150)}
+                      placeholder="พิมพ์ชื่อหรือเบอร์โทรเพื่อค้นหา · เว้นว่าง = Walk-in"
+                      className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    {guestOpen && (
+                      <div className="absolute z-10 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow-lg max-h-56 overflow-y-auto">
+                        <button
+                          type="button"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => { setForm({ ...form, guestId: '' }); setGuestSearch(''); setGuestOpen(false) }}
+                          className={`w-full text-left px-3 py-2 text-sm hover:bg-amber-50 text-slate-500 ${!form.guestId ? 'bg-amber-100 font-medium' : ''}`}
+                        >
+                          — ไม่ระบุ (Walk-in) —
+                        </button>
+                        {guests
+                          .filter((g) => {
+                            const q = guestSearch.toLowerCase()
+                            return !q || g.name.toLowerCase().includes(q) || g.phone.includes(guestSearch)
+                          })
+                          .map((g) => (
+                            <button
+                              key={g.id}
+                              type="button"
+                              onMouseDown={(e) => e.preventDefault()}
+                              onClick={() => { setForm({ ...form, guestId: g.id }); setGuestSearch(`${g.name} · ${g.phone}`); setGuestOpen(false) }}
+                              className={`w-full text-left px-3 py-2 text-sm hover:bg-amber-50 ${form.guestId === g.id ? 'bg-amber-100 font-medium' : ''}`}
+                            >
+                              {g.name} <span className="text-slate-400">· {g.phone}</span>
+                            </button>
+                          ))}
+                        {guests.filter((g) => {
+                          const q = guestSearch.toLowerCase()
+                          return !q || g.name.toLowerCase().includes(q) || g.phone.includes(guestSearch)
+                        }).length === 0 && (
+                          <div className="px-3 py-2 text-sm text-slate-400">ไม่พบลูกค้า — ลองใช้ "กรอกใหม่" หรือเว้นว่างสำหรับ Walk-in</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-2.5 border border-slate-200 rounded-lg p-3 bg-slate-50">
+                    <p className="text-xs text-slate-500">ข้อมูลจะแสดงในประวัติการจองเท่านั้น ไม่บันทึกเป็นลูกค้าประจำ</p>
+                    <div>
+                      <label className="block text-xs text-slate-500 mb-1">ชื่อ-นามสกุล *</label>
+                      <input
+                        type="text"
+                        value={form.snapName} onChange={(e) => setForm({ ...form, snapName: e.target.value })}
+                        placeholder="เช่น สมชาย ใจดี"
+                        className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 bg-white"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs text-slate-500 mb-1">เบอร์โทร</label>
+                        <input
+                          type="text"
+                          value={form.snapPhone} onChange={(e) => setForm({ ...form, snapPhone: e.target.value })}
+                          placeholder="0812345678"
+                          className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none bg-white"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-slate-500 mb-1">เลขบัตร / Passport</label>
+                      <input
+                        type="text"
+                        value={form.snapIdNumber} onChange={(e) => setForm({ ...form, snapIdNumber: e.target.value })}
+                        placeholder="1234567890123"
+                        className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none bg-white"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">วันเช็คอิน – เช็คเอาต์ *</label>
@@ -298,9 +429,17 @@ export default function BookingsPage() {
                     </div>
                   </div>
                 </div>
+                <div className="hidden md:flex items-center gap-4 mt-2 text-xs text-slate-500">
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block w-3.5 h-3.5 rounded bg-amber-500" /> คืนที่เข้าพัก
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block w-3.5 h-3.5 rounded border-2 border-dashed border-amber-500 bg-amber-50" /> วันเช็คเอาต์ (ไม่นับเป็นคืน)
+                  </span>
+                </div>
                 {form.checkIn && form.checkOut && (
                   <p className="text-xs text-slate-500 mt-1.5">
-                    {formatDate(form.checkIn)} → {formatDate(form.checkOut)} · {calcNights(form.checkIn, form.checkOut)} คืน
+                    {formatDate(form.checkIn)} → {formatDate(form.checkOut)} · <span className="font-semibold text-slate-700">{calcNights(form.checkIn, form.checkOut)} คืน</span>
                   </p>
                 )}
               </div>
@@ -320,13 +459,22 @@ export default function BookingsPage() {
                   <select value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value as BookingSource })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                     <option value="direct">จองตรง</option>
-                    <option value="agoda">Agoda</option>
-                    <option value="booking_com">Booking.com</option>
-                    <option value="expedia">Expedia</option>
                     <option value="walk_in">Walk-in</option>
                   </select>
                 </div>
               </div>
+              {(() => {
+                const selectedRoom = rooms.find((r) => r.id === form.roomId)
+                if (!selectedRoom) return null
+                const occupants = form.adults + form.children
+                const over = occupants > selectedRoom.maxGuests
+                return (
+                  <p className={`text-xs -mt-2 ${over ? 'text-red-600 font-medium' : 'text-slate-400'}`}>
+                    เข้าพัก {occupants} คน · ความจุห้อง {selectedRoom.number} = {selectedRoom.maxGuests} คน
+                    {over && ' — เกินความจุห้อง'}
+                  </p>
+                )
+              })()}
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">บัญชีองค์กร (ถ้ามี)</label>
                 <select
@@ -369,8 +517,8 @@ export default function BookingsPage() {
               )}
             </div>
             <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100 shrink-0">
-              <button onClick={() => setShowModal(false)} className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50 transition-colors">ยกเลิก</button>
-              <button onClick={handleCreate} className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-medium transition-colors">ยืนยันการจอง</button>
+              <button onClick={closeModal} className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50 transition-colors">ยกเลิก</button>
+              <button onClick={handleCreate} disabled={bookingOverCapacity} title={bookingOverCapacity ? 'จำนวนผู้เข้าพักเกินความจุห้อง' : undefined} className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors">ยืนยันการจอง</button>
             </div>
           </div>
         </div>

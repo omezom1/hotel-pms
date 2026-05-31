@@ -1,15 +1,18 @@
 'use client'
 import Link from 'next/link'
+import { useRef } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import type { LucideIcon } from 'lucide-react'
 import {
   LayoutDashboard, CalendarDays, Users, DollarSign,
-  Wrench, UserCog, Globe, BarChart3, BedDouble, Hotel, LogOut, Package, ConciergeBell, CalendarRange, ClipboardList, RotateCcw, History
+  UserCog, BarChart3, BedDouble, Hotel, LogOut, Package, ConciergeBell, CalendarRange, ClipboardList, RotateCcw, History, DatabaseBackup, Upload, Receipt
 } from 'lucide-react'
 import { cn, getStaffRoleLabel } from '@/lib/utils'
 import { useAuthStore } from '@/lib/auth-store'
+import { useHotelStore } from '@/lib/store'
 import type { StaffPermissions } from '@/types'
 import { toast } from 'sonner'
+import ThemeToggle from './ThemeToggle'
 
 type NavItem = {
   href: string
@@ -26,11 +29,11 @@ const navItems: NavItem[] = [
   { href: '/calendar',     label: 'ปฏิทินการจอง',           icon: CalendarRange,   permission: 'canManageBookings' },
   { href: '/guests',       label: 'ข้อมูลลูกค้า',            icon: Users,           permission: 'canManageGuests' },
   { href: '/finance',      label: 'การเงิน & การชำระเงิน',  icon: DollarSign,      permission: 'canViewFinance' },
+  { href: '/expenses',     label: 'รายจ่าย',                 icon: Receipt,         permission: 'canViewFinance' },
   { href: '/housekeeping', label: 'แม่บ้าน',                 icon: Hotel,           permission: 'canManageHousekeeping' },
-  { href: '/maintenance',  label: 'ซ่อมบำรุง',               icon: Wrench,          permission: 'canManageMaintenance' },
   { href: '/inventory',    label: 'คลังสินค้า',              icon: Package,         permission: 'canManageInventory' },
   { href: '/staff',        label: 'พนักงาน',                 icon: UserCog,         permission: 'canManageStaff' },
-  { href: '/channels',     label: 'ช่องทางขาย (OTA)',        icon: Globe,           permission: 'canManageBookings' },
+
   { href: '/reports',      label: 'รายงาน & วิเคราะห์',     icon: BarChart3,       permission: 'canViewReports' },
   { href: '/daily-report', label: 'รายงานประจำวัน',         icon: ClipboardList,   permission: 'canViewReports' },
   { href: '/audit-log',    label: 'บันทึกการใช้งาน',         icon: History,         permission: 'canManageStaff' },
@@ -40,6 +43,7 @@ export default function Sidebar() {
   const pathname = usePathname()
   const router = useRouter()
   const { user, logout } = useAuthStore()
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   if (!user) return null
 
@@ -52,9 +56,52 @@ export default function Sidebar() {
 
   function handleReset() {
     if (!confirm('ล้างข้อมูลทั้งหมดและโหลดข้อมูลตัวอย่างใหม่?\n(การกระทำนี้ย้อนกลับไม่ได้)')) return
-    localStorage.removeItem('hotel-pms-storage-v3')
+    localStorage.removeItem('hotel-pms-storage')
     toast.success('ล้างข้อมูลแล้ว กำลังโหลดใหม่...')
     setTimeout(() => window.location.reload(), 500)
+  }
+
+  // สำรองข้อมูลทั้งระบบเป็นไฟล์ JSON
+  function handleBackup() {
+    const data = useHotelStore.getState().exportData()
+    const payload = { _app: 'hotel-pms', _version: 1, _exportedAt: new Date().toISOString(), data }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    const d = new Date()
+    const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    a.href = url
+    a.download = `hotel-pms-backup-${stamp}.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    toast.success('สำรองข้อมูลเป็นไฟล์แล้ว')
+  }
+
+  // กู้คืนข้อมูลจากไฟล์ JSON ที่เคยสำรองไว้
+  function handleRestoreFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (e.target) e.target.value = '' // เคลียร์เพื่อให้เลือกไฟล์เดิมซ้ำได้
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result))
+        const data = parsed?.data ?? parsed // รองรับทั้งไฟล์ที่ห่อ _app และ data ดิบ
+        if (!data || typeof data !== 'object' || !Array.isArray(data.bookings)) {
+          toast.error('ไฟล์ไม่ถูกต้อง: ไม่พบข้อมูลการจอง')
+          return
+        }
+        if (!confirm('กู้คืนข้อมูลจากไฟล์นี้? ข้อมูลปัจจุบันจะถูกเขียนทับทั้งหมด')) return
+        useHotelStore.getState().importData(data)
+        toast.success('กู้คืนข้อมูลแล้ว กำลังโหลดใหม่...')
+        setTimeout(() => window.location.reload(), 600)
+      } catch {
+        toast.error('อ่านไฟล์ไม่สำเร็จ — ต้องเป็นไฟล์ .json ที่สำรองจากระบบนี้')
+      }
+    }
+    reader.readAsText(file)
   }
 
   const initial = user.staff.name.charAt(0).toUpperCase()
@@ -107,15 +154,35 @@ export default function Sidebar() {
           </div>
         </div>
         {user.staff.permissions.canManageStaff && (
-          <button
-            onClick={handleReset}
-            className="mt-2 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-amber-300 transition-colors"
-            title="ล้างข้อมูล localStorage แล้วโหลด mock data ใหม่"
-          >
-            <RotateCcw size={14} className="shrink-0" />
-            <span className="hidden group-hover:inline lg:inline whitespace-nowrap">รีเซ็ตข้อมูลตัวอย่าง</span>
-          </button>
+          <>
+            <input ref={fileInputRef} type="file" accept=".json,application/json" onChange={handleRestoreFile} className="hidden" />
+            <button
+              onClick={handleBackup}
+              className="mt-2 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-emerald-300 transition-colors"
+              title="สำรองข้อมูลทั้งระบบเป็นไฟล์ .json"
+            >
+              <DatabaseBackup size={14} className="shrink-0" />
+              <span className="hidden group-hover:inline lg:inline whitespace-nowrap">สำรองข้อมูล (Backup)</span>
+            </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="mt-1 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-blue-300 transition-colors"
+              title="กู้คืนข้อมูลจากไฟล์สำรอง"
+            >
+              <Upload size={14} className="shrink-0" />
+              <span className="hidden group-hover:inline lg:inline whitespace-nowrap">กู้คืนข้อมูล (Restore)</span>
+            </button>
+            <button
+              onClick={handleReset}
+              className="mt-1 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-amber-300 transition-colors"
+              title="ล้างข้อมูล localStorage แล้วโหลด mock data ใหม่"
+            >
+              <RotateCcw size={14} className="shrink-0" />
+              <span className="hidden group-hover:inline lg:inline whitespace-nowrap">รีเซ็ตข้อมูลตัวอย่าง</span>
+            </button>
+          </>
         )}
+        <ThemeToggle />
         <button
           onClick={handleLogout}
           className="mt-2 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-300 hover:bg-red-500/20 hover:text-red-300 transition-colors"
