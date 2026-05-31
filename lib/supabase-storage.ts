@@ -15,6 +15,32 @@ import { supabase } from './supabase'
 
 const TABLE = 'app_state'
 
+/**
+ * id เฉพาะของแท็บ/หน้าต่างนี้ (อยู่ใน memory ไม่ persist)
+ * ฝังลงแถวตอนเขียน เพื่อให้ Realtime แยกออกว่า event ไหนคือ "เสียงสะท้อนของตัวเอง"
+ */
+export const CLIENT_ID =
+  (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) +
+  '-' +
+  Date.now().toString(36)
+
+/**
+ * ระหว่าง apply ข้อมูลจาก Realtime (แท็บอื่นเขียนมา) เราจะ setState ทับ
+ * ซึ่ง persist จะพยายามเขียนกลับ cloud ทันที → เกิด ping-pong loop
+ * flag นี้สั่งให้ setItem "ข้าม" การเขียนกลับช่วงนั้น
+ */
+let applyingRemote = false
+
+/** ครอบ setState จาก Realtime เพื่อระงับการเขียนกลับ cloud (echo suppression) */
+export function applyRemoteState(apply: () => void) {
+  applyingRemote = true
+  try {
+    apply()
+  } finally {
+    applyingRemote = false
+  }
+}
+
 export const supabaseStorage: StateStorage = {
   getItem: async (name) => {
     const { data, error } = await supabase
@@ -27,15 +53,21 @@ export const supabaseStorage: StateStorage = {
       console.error('[supabaseStorage] getItem:', error.message)
       return null
     }
-    return data ? JSON.stringify(data.data) : null
+    if (!data) return null
+    // ถอด _writer ออกก่อนคืนให้ zustand (envelope ต้องตรงกับที่ persist เขียน)
+    const { _writer, ...envelope } = (data.data ?? {}) as Record<string, unknown>
+    return JSON.stringify(envelope)
   },
 
   setItem: async (name, value) => {
+    // กำลัง apply ข้อมูลจาก remote อยู่ → ไม่ต้องเขียนกลับ (กัน loop)
+    if (applyingRemote) return
+
     const { error } = await supabase
       .from(TABLE)
       .upsert({
         id: name,
-        data: JSON.parse(value),
+        data: { ...JSON.parse(value), _writer: CLIENT_ID },
         updated_at: new Date().toISOString(),
       })
 

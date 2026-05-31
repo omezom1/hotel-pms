@@ -5,8 +5,12 @@ import Sidebar from './Sidebar'
 import GlobalSearch from '@/components/GlobalSearch'
 import { useAuthStore } from '@/lib/auth-store'
 import { useHotelStore } from '@/lib/store'
+import { supabase } from '@/lib/supabase'
+import { CLIENT_ID, applyRemoteState } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
 import { toast } from 'sonner'
+
+const STORE_KEY = 'hotel-pms-storage'
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
@@ -18,8 +22,33 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const isAuthRoute = pathname?.startsWith('/login')
 
   // โหลด state ก้อนใหญ่จาก Supabase ครั้งเดียวตอน mount (กัน mock state เขียนทับ cloud)
+  // แล้ว subscribe Realtime: ถ้าแท็บ/เครื่องอื่นเขียนข้อมูล ให้ดึงมา sync ทันที
+  // (ลดความเสี่ยง last-write-wins ที่งานของกันและกันหายเมื่อเปิดหลายที่พร้อมกัน)
   useEffect(() => {
     useHotelStore.persist.rehydrate()
+
+    const channel = supabase
+      .channel('app_state-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'app_state', filter: `id=eq.${STORE_KEY}` },
+        (payload) => {
+          const row = payload.new as { data?: Record<string, unknown> } | null
+          const data = row?.data
+          // ข้าม event ที่เกิดจากการเขียนของแท็บนี้เอง (echo)
+          if (!data || data._writer === CLIENT_ID) return
+          const { _writer, ...envelope } = data
+          const incoming = (envelope as { state?: Record<string, unknown> }).state
+          if (!incoming) return
+          // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
+          applyRemoteState(() => useHotelStore.setState(incoming as never))
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [])
 
   // AuthGuard: redirect ไป /login ถ้ายังไม่ login
