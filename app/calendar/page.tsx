@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { getRoomTypeLabel, toLocalDateKey } from '@/lib/utils'
+import { getRoomTypeLabel, toLocalDateKey, getGuestDisplayName, bookingActiveOnDay } from '@/lib/utils'
 import Link from 'next/link'
 import { ChevronLeft, ChevronRight, CalendarDays } from 'lucide-react'
 import { format } from 'date-fns'
@@ -35,14 +35,9 @@ export default function CalendarPage() {
 
   const sortedRooms = [...rooms].sort((a, b) => a.number.localeCompare(b.number, undefined, { numeric: true }))
 
-  function bookingOnDay(roomId: string, day: Date) {
-    const key = toLocalDateKey(day)
-    return bookings.find((b) =>
-      b.roomId === roomId &&
-      ['confirmed', 'checked_in', 'pending'].includes(b.status) &&
-      b.checkIn.split('T')[0] <= key &&
-      b.checkOut.split('T')[0] > key
-    ) ?? null
+  function bookingOnDay(roomId: string, dayDate: Date) {
+    const key = toLocalDateKey(dayDate)
+    return bookings.find((b) => b.roomId === roomId && bookingActiveOnDay(b, key)) ?? null
   }
 
   function shift(days: number) {
@@ -100,12 +95,12 @@ export default function CalendarPage() {
                 return (
                   <div
                     key={i}
-                    className={`w-12 shrink-0 px-1 py-2 text-center border-r border-slate-100 ${isToday ? 'bg-amber-100' : isWeekend ? 'bg-slate-50' : ''}`}
+                    className={`w-12 shrink-0 px-1 py-2 text-center border-r border-slate-100 ${isToday ? 'bg-amber-100 dark:bg-amber-500/25' : isWeekend ? 'bg-slate-50' : ''}`}
                   >
-                    <div className={`text-[10px] ${isToday ? 'text-amber-700 font-bold' : 'text-slate-400'}`}>
+                    <div className={`text-[10px] ${isToday ? 'text-amber-700 dark:text-amber-300 font-bold' : 'text-slate-400'}`}>
                       {format(d, 'EEE', { locale: th })}
                     </div>
-                    <div className={`text-sm font-medium ${isToday ? 'text-amber-700' : 'text-slate-700'}`}>
+                    <div className={`text-sm font-medium ${isToday ? 'text-amber-700 dark:text-amber-300' : 'text-slate-700'}`}>
                       {d.getDate()}
                     </div>
                   </div>
@@ -134,13 +129,13 @@ export default function CalendarPage() {
                   }
 
                   const booking = bookingOnDay(room.id, d)
-                  const cellBg = isToday ? 'bg-amber-50' : isWeekend ? 'bg-slate-50/40' : ''
+                  const cellBg = isToday ? 'bg-amber-50 dark:bg-amber-500/15' : isWeekend ? 'bg-slate-50/40 dark:bg-slate-700/25' : ''
 
                   if (!booking) {
                     return <div key={i} className={`w-12 shrink-0 border-r border-slate-100 ${cellBg}`} />
                   }
 
-                  const guest = guests.find((g) => g.id === booking.guestId)
+                  const guestName = getGuestDisplayName(booking, guests)
                   const isStart = booking.checkIn.split('T')[0] === key
                   const isEnd = (() => {
                     const next = new Date(d)
@@ -152,13 +147,13 @@ export default function CalendarPage() {
                     <Link
                       key={i}
                       href={`/bookings/${booking.id}`}
-                      title={`${guest?.name ?? 'ไม่ระบุ'} · ${booking.nights} คืน`}
+                      title={`${guestName} · ${booking.nights} คืน`}
                       className={`w-12 shrink-0 border-r border-slate-100 p-0.5 ${cellBg}`}
                     >
                       <div
                         className={`h-7 text-white text-[10px] font-medium flex items-center justify-center px-1 truncate ${statusBg[booking.status]} ${isStart ? 'rounded-l' : ''} ${isEnd ? 'rounded-r' : ''} hover:opacity-80 transition-opacity`}
                       >
-                        {isStart ? (guest?.name.split(' ')[0] ?? '–') : ''}
+                        {isStart ? (guestName.split(' ')[0] || '–') : ''}
                       </div>
                     </Link>
                   )

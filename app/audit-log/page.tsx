@@ -16,6 +16,7 @@ const categoryLabels: Record<AuditCategory, string> = {
   inventory: 'คลังสินค้า',
   corporate: 'บัญชีองค์กร',
   auth: 'ระบบ',
+  expense: 'รายจ่าย',
 }
 
 const categoryColors: Record<AuditCategory, string> = {
@@ -28,6 +29,7 @@ const categoryColors: Record<AuditCategory, string> = {
   inventory: 'bg-orange-100 text-orange-700',
   corporate: 'bg-indigo-100 text-indigo-700',
   auth: 'bg-slate-100 text-slate-500',
+  expense: 'bg-rose-100 text-rose-700',
 }
 
 export default function AuditLogPage() {

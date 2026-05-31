@@ -3,10 +3,20 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
 import { formatCurrency, formatDateTime } from '@/lib/utils'
-import type { InventoryCategory, InventoryItem, InventoryUnit } from '@/types'
-import { Plus, X, AlertTriangle, RefreshCw, Minus, Edit2, Trash2 } from 'lucide-react'
+import type { InventoryCategory, InventoryItem, InventoryUnit, InventoryTransaction } from '@/types'
+import { Plus, X, AlertTriangle, RefreshCw, Minus, Edit2, Trash2, History, Search } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
 import { toast } from 'sonner'
+
+const txTypeLabel: Record<InventoryTransaction['type'], string> = {
+  restock: 'เติมสต็อก', use: 'เบิกใช้', adjust: 'ปรับยอด', waste: 'เสียหาย',
+}
+const txTypeColor: Record<InventoryTransaction['type'], string> = {
+  restock: 'text-emerald-700 bg-emerald-100',
+  use: 'text-amber-700 bg-amber-100',
+  adjust: 'text-blue-700 bg-blue-100',
+  waste: 'text-red-700 bg-red-100',
+}
 
 const categoryLabels: Record<InventoryCategory, string> = {
   room_amenities: 'อุปกรณ์ห้องพัก',
@@ -38,7 +48,7 @@ const emptyForm = {
 
 export default function InventoryPage() {
   const store = useHotelStore()
-  const { inventoryItems, inventoryTransactions, addInventoryItem, updateInventoryItem, deleteInventoryItem, restockItem, adjustStock, logAudit } = store
+  const { inventoryItems, inventoryTransactions, staff, addInventoryItem, updateInventoryItem, deleteInventoryItem, restockItem, adjustStock, logAudit } = store
   const consumeInventory = store.useInventoryItem
   const { user } = useAuthStore()
 
@@ -50,9 +60,35 @@ export default function InventoryPage() {
   const [stockNote, setStockNote] = useState('')
   const [form, setForm] = useState(emptyForm)
   const [deleteConfirm, setDeleteConfirm] = useState<InventoryItem | null>(null)
+  const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null)
+  const [historyType, setHistoryType] = useState<'all' | InventoryTransaction['type']>('all')
+  const [historySearch, setHistorySearch] = useState('')
 
   const filtered = inventoryItems.filter((i) => activeTab === 'all' || i.category === activeTab)
   const lowItems = inventoryItems.filter((i) => getStockLevel(i) === 'critical')
+
+  const staffName = (id: string) => staff.find((s) => s.id === id)?.name ?? id
+
+  // เรียงตามวันที่ใหม่→เก่า (ไม่พึ่งลำดับการ insert)
+  const sortedTx = [...inventoryTransactions].sort((a, b) => b.date.localeCompare(a.date))
+
+  // ประวัติของสินค้าหนึ่งรายการ พร้อมยอดคงเหลือหลังแต่ละรายการ (ไล่ย้อนจากสต็อกปัจจุบัน)
+  function itemHistory(item: InventoryItem) {
+    const txs = sortedTx.filter((t) => t.itemId === item.id)
+    let balance = item.currentStock
+    return txs.map((t) => {
+      const balanceAfter = balance
+      balance = balanceAfter - t.quantity // ย้อนกลับไปยอดก่อนหน้า
+      return { tx: t, balanceAfter }
+    })
+  }
+
+  const globalFilteredTx = sortedTx.filter((t) => {
+    if (historyType !== 'all' && t.type !== historyType) return false
+    if (!historySearch) return true
+    const item = inventoryItems.find((i) => i.id === t.itemId)
+    return (item?.name ?? '').toLowerCase().includes(historySearch.toLowerCase())
+  })
 
   function handleSaveItem() {
     if (!form.name) return
@@ -221,6 +257,13 @@ export default function InventoryPage() {
                             <RefreshCw size={14} />
                           </button>
                           <button
+                            onClick={() => setHistoryItem(item)}
+                            title="ดูประวัติทั้งหมด"
+                            className="p-1.5 rounded hover:bg-violet-50 text-slate-400 hover:text-violet-600 transition-colors"
+                          >
+                            <History size={14} />
+                          </button>
+                          <button
                             onClick={() => openEdit(item)}
                             title="แก้ไข"
                             className="p-1.5 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors"
@@ -249,26 +292,66 @@ export default function InventoryPage() {
           </div>
         </div>
 
-        {/* Recent transactions */}
+        {/* Movement history log */}
         {inventoryTransactions.length > 0 && (
           <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
-            <h2 className="font-semibold text-slate-800 mb-4">ประวัติการเคลื่อนไหวล่าสุด</h2>
-            <div className="space-y-2">
-              {inventoryTransactions.slice(0, 8).map((tx) => {
-                const item = inventoryItems.find((i) => i.id === tx.itemId)
-                const typeLabel = { restock: 'เติมสต็อก', use: 'ใช้งาน', adjust: 'ปรับ', waste: 'เสียหาย' }[tx.type]
-                const typeColor = { restock: 'text-emerald-700 bg-emerald-100', use: 'text-amber-700 bg-amber-100', adjust: 'text-blue-700 bg-blue-100', waste: 'text-red-700 bg-red-100' }[tx.type]
-                return (
-                  <div key={tx.id} className="flex items-center gap-3 py-2 border-b border-slate-50 last:border-0">
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${typeColor}`}>{typeLabel}</span>
-                    <span className="text-sm text-slate-700 flex-1">{item?.name ?? tx.itemId}</span>
-                    <span className={`text-sm font-semibold ${tx.quantity > 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {tx.quantity > 0 ? '+' : ''}{tx.quantity}
-                    </span>
-                    <span className="text-xs text-slate-400">{formatDateTime(tx.date)}</span>
-                  </div>
-                )
-              })}
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <h2 className="font-semibold text-slate-800">ประวัติการเคลื่อนไหว
+                <span className="ml-2 text-xs font-normal text-slate-400">{globalFilteredTx.length} รายการ</span>
+              </h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    value={historySearch} onChange={(e) => setHistorySearch(e.target.value)}
+                    placeholder="ค้นหาชื่อสินค้า..."
+                    className="pl-8 pr-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 w-44"
+                  />
+                </div>
+                <div className="flex gap-1 bg-slate-100 p-1 rounded-lg">
+                  {([['all', 'ทั้งหมด'], ['restock', 'เติม'], ['use', 'เบิก'], ['adjust', 'ปรับ']] as const).map(([k, l]) => (
+                    <button key={k} onClick={() => setHistoryType(k)}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${historyType === k ? 'bg-white shadow-sm text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}>
+                      {l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-slate-400 border-b border-slate-100">
+                    <th className="py-2 pr-3 font-medium">ประเภท</th>
+                    <th className="py-2 pr-3 font-medium">สินค้า</th>
+                    <th className="py-2 pr-3 font-medium text-right">จำนวน</th>
+                    <th className="py-2 pr-3 font-medium hidden md:table-cell">ผู้ทำรายการ</th>
+                    <th className="py-2 pr-3 font-medium hidden lg:table-cell">หมายเหตุ</th>
+                    <th className="py-2 font-medium text-right">วันเวลา</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {globalFilteredTx.slice(0, 50).map((tx) => {
+                    const item = inventoryItems.find((i) => i.id === tx.itemId)
+                    return (
+                      <tr key={tx.id} className="hover:bg-slate-50">
+                        <td className="py-2.5 pr-3"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${txTypeColor[tx.type]}`}>{txTypeLabel[tx.type]}</span></td>
+                        <td className="py-2.5 pr-3 text-slate-700">{item?.name ?? tx.itemId}</td>
+                        <td className={`py-2.5 pr-3 text-right font-semibold ${tx.quantity > 0 ? 'text-emerald-600' : 'text-red-600'}`}>{tx.quantity > 0 ? '+' : ''}{tx.quantity}</td>
+                        <td className="py-2.5 pr-3 text-slate-500 hidden md:table-cell">{staffName(tx.performedBy)}</td>
+                        <td className="py-2.5 pr-3 text-slate-400 hidden lg:table-cell">{tx.notes || (tx.referenceId ? `อ้างอิง: ${tx.referenceId}` : '–')}</td>
+                        <td className="py-2.5 text-slate-400 text-xs text-right whitespace-nowrap">{formatDateTime(tx.date)}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+              {globalFilteredTx.length === 0 && (
+                <div className="text-center py-8 text-slate-400 text-sm">ไม่พบรายการที่ตรงกับเงื่อนไข</div>
+              )}
+              {globalFilteredTx.length > 50 && (
+                <p className="text-center text-xs text-slate-400 pt-3">แสดง 50 รายการล่าสุด — ใช้ค้นหา/ตัวกรองเพื่อดูเฉพาะที่ต้องการ</p>
+              )}
             </div>
           </div>
         )}
@@ -441,6 +524,66 @@ export default function InventoryPage() {
           </div>
         </div>
       )}
+
+      {/* Per-item full history ledger */}
+      {historyItem && (() => {
+        const ledger = itemHistory(historyItem)
+        const restockTotal = ledger.filter((r) => r.tx.quantity > 0).reduce((s, r) => s + r.tx.quantity, 0)
+        const outTotal = ledger.filter((r) => r.tx.quantity < 0).reduce((s, r) => s + r.tx.quantity, 0)
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+              <div className="flex items-center justify-between p-5 border-b border-slate-100">
+                <div>
+                  <h2 className="font-semibold text-slate-800 flex items-center gap-2">
+                    <History size={17} className="text-violet-600" /> ประวัติการเคลื่อนไหว: {historyItem.name}
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-1">
+                    สต็อกปัจจุบัน <span className="font-semibold text-slate-600">{historyItem.currentStock} {unitLabels[historyItem.unit]}</span>
+                    {' · '}{ledger.length} รายการ
+                    {' · '}<span className="text-emerald-600">รับเข้า +{restockTotal}</span>
+                    {' · '}<span className="text-red-600">จ่ายออก {outTotal}</span>
+                  </p>
+                </div>
+                <button onClick={() => setHistoryItem(null)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
+              </div>
+              <div className="overflow-y-auto p-5">
+                {ledger.length === 0 ? (
+                  <div className="text-center py-12 text-slate-400 text-sm">ยังไม่มีประวัติการเคลื่อนไหวของสินค้านี้</div>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-slate-400 border-b border-slate-100">
+                        <th className="py-2 pr-3 font-medium">ประเภท</th>
+                        <th className="py-2 pr-3 font-medium text-right">จำนวน</th>
+                        <th className="py-2 pr-3 font-medium text-right">คงเหลือหลังรายการ</th>
+                        <th className="py-2 pr-3 font-medium">ผู้ทำรายการ</th>
+                        <th className="py-2 pr-3 font-medium">หมายเหตุ</th>
+                        <th className="py-2 font-medium text-right">วันเวลา</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {ledger.map(({ tx, balanceAfter }) => (
+                        <tr key={tx.id} className="hover:bg-slate-50">
+                          <td className="py-2.5 pr-3"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${txTypeColor[tx.type]}`}>{txTypeLabel[tx.type]}</span></td>
+                          <td className={`py-2.5 pr-3 text-right font-semibold ${tx.quantity > 0 ? 'text-emerald-600' : 'text-red-600'}`}>{tx.quantity > 0 ? '+' : ''}{tx.quantity}</td>
+                          <td className="py-2.5 pr-3 text-right font-medium text-slate-700">{balanceAfter} {unitLabels[historyItem.unit]}</td>
+                          <td className="py-2.5 pr-3 text-slate-500">{staffName(tx.performedBy)}</td>
+                          <td className="py-2.5 pr-3 text-slate-400">{tx.notes || (tx.referenceId ? `อ้างอิง: ${tx.referenceId}` : '–')}</td>
+                          <td className="py-2.5 text-slate-400 text-xs text-right whitespace-nowrap">{formatDateTime(tx.date)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+              <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100">
+                <button onClick={() => setHistoryItem(null)} className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ปิด</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }

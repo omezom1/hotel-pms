@@ -1,5 +1,5 @@
 export type RoomStatus = 'available' | 'occupied' | 'cleaning' | 'maintenance'
-export type RoomType = 'standard' | 'deluxe' | 'suite' | 'family' | 'penthouse'
+export type RoomType = 'single' | 'double' | 'triple'
 export type RoomWing = 'front' | 'back'
 export type BookingStatus = 'confirmed' | 'checked_in' | 'checked_out' | 'cancelled' | 'pending'
 export type BookingSource = 'direct' | 'walk_in'
@@ -46,10 +46,19 @@ export interface GuestPreferences {
   bedType: 'single' | 'double' | 'twin' | null
 }
 
+// ข้อมูลแขกแบบชั่วคราว — ไม่บันทึกเข้า CRM (guests)
+export interface GuestSnapshot {
+  name: string
+  phone?: string
+  nationality?: string
+  idNumber?: string
+}
+
 export interface Booking {
   id: string
   roomId: string
-  guestId: string
+  guestId?: string          // optional: ถ้าเป็นลูกค้าประจำ
+  guestSnapshot?: GuestSnapshot  // optional: ถ้าเป็นแขกชั่วคราว (ไม่บันทึก CRM)
   checkIn: string
   checkOut: string
   nights: number
@@ -76,7 +85,7 @@ export interface Payment {
   notes?: string
 }
 
-export type AuditCategory = 'booking' | 'payment' | 'room' | 'guest' | 'housekeeping' | 'maintenance' | 'inventory' | 'corporate' | 'auth'
+export type AuditCategory = 'booking' | 'payment' | 'room' | 'guest' | 'housekeeping' | 'maintenance' | 'inventory' | 'corporate' | 'auth' | 'expense'
 
 export interface AuditLog {
   id: string
@@ -92,7 +101,7 @@ export interface AuditLog {
 export interface Invoice {
   id: string
   bookingId: string
-  guestId: string
+  guestId?: string   // optional: snapshot booking ไม่มี guestId
   amount: number
   tax: number
   total: number
@@ -108,6 +117,30 @@ export interface InvoiceItem {
   quantity: number
   unitPrice: number
   total: number
+}
+
+// ===== รายจ่าย / ต้นทุนดำเนินงาน =====
+export type ExpenseCategory =
+  | 'salary'              // เงินเดือนพนักงาน
+  | 'utilities_electric' // ค่าไฟฟ้า กฟภ./กฟน.
+  | 'utilities_water'    // ค่าน้ำประปา
+  | 'utilities_internet' // ค่าอินเตอร์เน็ต
+  | 'maintenance'        // ค่าซ่อมบำรุง
+  | 'cleaning'           // ค่าทำความสะอาด
+  | 'tax'                // ภาษีโรงเรือน/ภาษีอื่น
+  | 'marketing'          // ค่าการตลาด
+  | 'supplies'           // ค่าวัสดุสิ้นเปลือง
+  | 'other'              // ค่าใช้จ่ายอื่นๆ
+
+export interface Expense {
+  id: string
+  date: string          // ISO — วันที่จ่าย
+  category: ExpenseCategory
+  description: string   // รายการ
+  payee?: string        // ผู้รับเงิน
+  amount: number
+  note?: string
+  createdAt: string
 }
 
 export interface HousekeepingTask {

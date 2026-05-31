@@ -10,6 +10,7 @@ export const routePermissions: Array<{ href: string; permission: keyof StaffPerm
   { href: '/calendar',     permission: 'canManageBookings' },
   { href: '/guests',       permission: 'canManageGuests' },
   { href: '/finance',      permission: 'canViewFinance' },
+  { href: '/expenses',     permission: 'canViewFinance' },
   { href: '/housekeeping', permission: 'canManageHousekeeping' },
   { href: '/maintenance',  permission: 'canManageMaintenance' },
   { href: '/inventory',    permission: 'canManageInventory' },

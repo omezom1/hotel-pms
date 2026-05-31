@@ -3,9 +3,95 @@ import { twMerge } from 'tailwind-merge'
 import { format, differenceInDays, parseISO } from 'date-fns'
 import { th } from 'date-fns/locale'
 import { mockDynamicPricing } from './mock-data'
+import type { Booking, Guest, BookingAddOn, BookingStatus } from '@/types'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
+}
+
+const day = (iso: string) => iso.split('T')[0]
+
+// ============================================================
+//  SINGLE SOURCE OF TRUTH สำหรับ logic ธุรกิจที่เคยถูกเขียนซ้ำหลายที่
+//  ห้าม inline เงื่อนไขพวกนี้ในหน้า/หรือ store อีก — เรียก helper พวกนี้แทน
+//  status ใช้ exhaustive switch: เพิ่มสถานะใหม่ใน types แล้ว build จะแตกที่นี่จุดเดียว
+// ============================================================
+
+// add-on นี้ต้องคิดเงินไหม (requested/fulfilled = คิด, cancelled = ไม่คิด)
+export function addOnCountsTowardCharge(status: BookingAddOn['status']): boolean {
+  switch (status) {
+    case 'requested':
+    case 'fulfilled':
+      return true
+    case 'cancelled':
+      return false
+    default: {
+      const _exhaustive: never = status
+      return _exhaustive
+    }
+  }
+}
+
+// booking นี้เป็น "การจองที่ยัง active" ไหม (จะมาใช้ห้อง — ใช้กับกันชน + แสดงผลปฏิทิน/grid)
+// checked_out/cancelled = ไม่ active แล้ว
+export function isActiveReservation(status: BookingStatus): boolean {
+  switch (status) {
+    case 'confirmed':
+    case 'checked_in':
+    case 'pending':
+      return true
+    case 'checked_out':
+    case 'cancelled':
+      return false
+    default: {
+      const _exhaustive: never = status
+      return _exhaustive
+    }
+  }
+}
+
+// ===== ยอดค้างชำระ / add-on (single source of truth) =====
+// รวม add-on ที่ยังไม่ถูกยกเลิก (requested + fulfilled) — ใช้เกณฑ์เดียวกันทุกหน้า
+export function calcAddOnTotal(bookingId: string, addOns: BookingAddOn[]): number {
+  return addOns
+    .filter((a) => a.bookingId === bookingId && addOnCountsTowardCharge(a.status))
+    .reduce((s, a) => s + a.totalPrice, 0)
+}
+
+export function calcOutstanding(booking: Booking, addOns: BookingAddOn[]): number {
+  return booking.totalAmount + calcAddOnTotal(booking.id, addOns) - booking.paidAmount
+}
+
+// รายได้ที่รับรู้จากการจองหนึ่ง = ค่าห้อง + add-on (ไม่ถูกยกเลิก) = ยอดที่ออกบิลจริง
+// ใช้กับ "รายได้วันนี้/รายวัน" ทุกหน้า เพื่อไม่ให้รายงานต่ำกว่าจริงเพราะลืม add-on
+export function bookingRevenue(booking: Booking, addOns: BookingAddOn[]): number {
+  return booking.totalAmount + calcAddOnTotal(booking.id, addOns)
+}
+
+// ===== การครอบครองห้อง / ชนกันของการจอง (single source of truth) =====
+// (display) booking นี้เป็นการจอง active บน "วัน" ที่กำหนดไหม — ใช้กับปฏิทิน/grid
+export function bookingActiveOnDay(b: Booking, dayKey: string): boolean {
+  return isActiveReservation(b.status) && day(b.checkIn) <= dayKey && day(b.checkOut) > dayKey
+}
+
+// (stats) booking นี้ครอบครองคืนของ "วัน" ที่กำหนดไหม — ใช้กับ occupancy/รายงาน
+// นับ checked_out ด้วย (แขกที่เช็คเอาท์ไปแล้วก็เคยใช้ห้องคืนนั้นจริง) ไม่นับ cancelled
+export function bookingOccupiesDay(b: Booking, dayKey: string): boolean {
+  return b.status !== 'cancelled' && day(b.checkIn) <= dayKey && day(b.checkOut) > dayKey
+}
+
+// การจอง active ทับช่วง [checkIn, checkOut) ไหม — ใช้ตรวจห้องว่าง/กันชน
+export function bookingOverlapsRange(b: Booking, checkIn: string, checkOut: string): boolean {
+  return isActiveReservation(b.status) && day(b.checkIn) < day(checkOut) && day(b.checkOut) > day(checkIn)
+}
+
+// ห้องนี้มีการจองชนช่วง [checkIn, checkOut) ไหม (ข้าม booking ที่ระบุได้ เช่นตอนแก้ของตัวเอง)
+export function roomHasConflict(
+  bookings: Booking[], roomId: string, checkIn: string, checkOut: string, excludeBookingId?: string
+): boolean {
+  return bookings.some(
+    (b) => b.id !== excludeBookingId && b.roomId === roomId && bookingOverlapsRange(b, checkIn, checkOut)
+  )
 }
 
 export function formatCurrency(amount: number): string {
@@ -89,11 +175,9 @@ export function getRoomStatusLabel(status: string): string {
 
 export function getRoomTypeLabel(type: string): string {
   const labels: Record<string, string> = {
-    standard: 'Standard',
-    deluxe: 'Deluxe',
-    suite: 'Suite',
-    family: 'Family',
-    penthouse: 'Penthouse',
+    single: 'เตียงเดี่ยว',
+    double: 'เตียงคู่',
+    triple: '3 เตียง',
   }
   return labels[type] ?? type
 }
@@ -138,6 +222,14 @@ export function getPaymentMethodLabel(method: string): string {
     pay_later: 'ชำระภายหลัง',
   }
   return labels[method] ?? method
+}
+
+// ดึงชื่อแขกจาก booking — รองรับทั้ง registered guest และ snapshot (ชั่วคราว)
+export function getGuestDisplayName(booking: Booking, guests: Guest[]): string {
+  if (booking.guestId) {
+    return guests.find((g) => g.id === booking.guestId)?.name ?? '–'
+  }
+  return booking.guestSnapshot?.name ?? 'Walk-in'
 }
 
 export function getPriorityLabel(priority: string): string {

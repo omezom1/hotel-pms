@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, getBookingSourceLabel, getRoomTypeLabel, calcBookingTotal, todayLocal } from '@/lib/utils'
+import { formatCurrency, formatDate, getBookingSourceLabel, getRoomTypeLabel, calcBookingTotal, todayLocal, getGuestDisplayName, calcOutstanding } from '@/lib/utils'
 import type { PaymentMethod } from '@/types'
 import { BedDouble, UserPlus, CheckCircle2, Clock, AlertTriangle, LogIn, X } from 'lucide-react'
 import { toast } from 'sonner'
@@ -26,10 +26,7 @@ export default function FrontDeskPage() {
   function outstandingOf(bookingId: string) {
     const b = bookings.find((x) => x.id === bookingId)
     if (!b) return 0
-    const addOnTotal = bookingAddOns
-      .filter((a) => a.bookingId === bookingId && a.status !== 'cancelled')
-      .reduce((s, a) => s + a.totalPrice, 0)
-    return b.totalAmount + addOnTotal - b.paidAmount
+    return calcOutstanding(b, bookingAddOns)
   }
 
   const today = todayLocal()
@@ -55,24 +52,25 @@ export default function FrontDeskPage() {
 
   function handleCheckIn(bookingId: string) {
     const b = bookings.find((x) => x.id === bookingId)
-    const g = guests.find((x) => x.id === b?.guestId)
+    const gName = b ? getGuestDisplayName(b, guests) : '-'
     const r = rooms.find((x) => x.id === b?.roomId)
     updateBookingStatus(bookingId, 'checked_in')
-    logAudit({ category: 'booking', action: 'check_in', summary: `เช็คอิน ${g?.name ?? '-'} ห้อง ${r?.number ?? '-'}`, entityId: bookingId })
-    toast.success(`เช็คอินสำเร็จ${g ? ` — ${g.name}` : ''}`)
+    logAudit({ category: 'booking', action: 'check_in', summary: `เช็คอิน ${gName} ห้อง ${r?.number ?? '-'}`, entityId: bookingId })
+    toast.success(`เช็คอินสำเร็จ — ${gName}`)
   }
 
   function handleCheckOut(bookingId: string) {
     const b = bookings.find((x) => x.id === bookingId)
-    const g = guests.find((x) => x.id === b?.guestId)
+    const g = b?.guestId ? guests.find((x) => x.id === b.guestId) : null
     const r = rooms.find((x) => x.id === b?.roomId)
     const outstanding = outstandingOf(bookingId)
     if (outstanding > 0) {
       if (!confirm(`แขกยังค้างชำระ ${formatCurrency(outstanding)}\nยืนยันเช็คเอาต์โดยไม่เก็บเงิน?`)) return
     }
+    const gName = b ? getGuestDisplayName(b, guests) : (g?.name ?? '-')
     updateBookingStatus(bookingId, 'checked_out')
-    logAudit({ category: 'booking', action: 'check_out', summary: `เช็คเอาต์ ${g?.name ?? '-'} ห้อง ${r?.number ?? '-'}`, entityId: bookingId })
-    toast.success(`เช็คเอาต์สำเร็จ${g ? ` — ${g.name}` : ''}`, {
+    logAudit({ category: 'booking', action: 'check_out', summary: `เช็คเอาต์ ${gName} ห้อง ${r?.number ?? '-'}`, entityId: bookingId })
+    toast.success(`เช็คเอาต์สำเร็จ — ${gName}`, {
       description: 'สร้างใบแจ้งหนี้ + งานทำความสะอาดอัตโนมัติแล้ว',
     })
   }
@@ -100,6 +98,10 @@ export default function FrontDeskPage() {
     if (!walkInRoomId || !user) return
     const room = rooms.find((r) => r.id === walkInRoomId)
     if (!room) return
+    if (form.adults + form.children > room.maxGuests) {
+      toast.error('จำนวนผู้เข้าพักเกินความจุห้อง')
+      return
+    }
 
     // ถ้าโหมดเพิ่มลูกค้าใหม่ → สร้าง guest ก่อน
     let guestId = form.guestId
@@ -124,7 +126,7 @@ export default function FrontDeskPage() {
     const checkIn = new Date().toISOString()
     const checkOut = new Date(Date.now() + form.nights * 86400000).toISOString()
     const total = calcBookingTotal(room.type, checkIn, checkOut, room.pricePerNight)
-    createBooking({
+    const result = createBooking({
       roomId: walkInRoomId,
       guestId,
       checkIn,
@@ -139,6 +141,10 @@ export default function FrontDeskPage() {
       specialRequests: '',
       paymentMethod: form.paymentMethod,
     })
+    if (!result.ok) {
+      toast.error(result.error ?? 'Walk-in ไม่สำเร็จ')
+      return
+    }
     setWalkInRoomId(null)
     setForm({ guestId: '', nights: 1, adults: 1, children: 0, paymentMethod: 'cash' })
     setNewGuestMode(false)
@@ -189,7 +195,7 @@ export default function FrontDeskPage() {
               ) : (
                 <div className="divide-y divide-slate-50">
                   {checkInQueue.map((booking) => {
-                    const guest = guests.find((g) => g.id === booking.guestId)
+                    const guestName = getGuestDisplayName(booking, guests)
                     const room = rooms.find((r) => r.id === booking.roomId)
                     const isDue = booking.checkIn.split('T')[0] <= today
                     return (
@@ -199,7 +205,7 @@ export default function FrontDeskPage() {
                       >
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-1">
-                            <span className="font-semibold text-slate-800">{guest?.name ?? '–'}</span>
+                            <span className="font-semibold text-slate-800">{guestName}</span>
                             {isDue && <AlertTriangle size={13} className="text-amber-500 shrink-0" />}
                           </div>
                           <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-slate-500">
@@ -242,7 +248,7 @@ export default function FrontDeskPage() {
               ) : (
                 <div className="divide-y divide-slate-50">
                   {stayingQueue.map((booking) => {
-                    const guest = guests.find((g) => g.id === booking.guestId)
+                    const guestName = getGuestDisplayName(booking, guests)
                     const room = rooms.find((r) => r.id === booking.roomId)
                     const isDueToday = booking.checkOut.split('T')[0] <= today
                     const outstanding = outstandingOf(booking.id)
@@ -253,7 +259,7 @@ export default function FrontDeskPage() {
                       >
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-                            <span className="font-semibold text-slate-800">{guest?.name ?? '–'}</span>
+                            <span className="font-semibold text-slate-800">{guestName}</span>
                             {isDueToday && (
                               <span className="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-medium">
                                 เช็คเอาต์วันนี้
@@ -390,18 +396,29 @@ export default function FrontDeskPage() {
                                 />
                               </div>
                               <div>
-                                <label className="block text-[11px] text-slate-500 mb-0.5">ชำระ</label>
-                                <select
-                                  value={form.paymentMethod}
-                                  onChange={(e) => setForm({ ...form, paymentMethod: e.target.value as PaymentMethod })}
+                                <label className="block text-[11px] text-slate-500 mb-0.5">เด็ก</label>
+                                <input type="number" min={0} max={10} value={form.children}
+                                  onChange={(e) => setForm({ ...form, children: Math.max(0, +e.target.value) })}
                                   className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
-                                >
-                                  <option value="cash">เงินสด</option>
-                                  <option value="credit_card">บัตร</option>
-                                  <option value="qr_code">QR</option>
-                                  <option value="bank_transfer">โอน</option>
-                                </select>
+                                />
                               </div>
+                            </div>
+                            <div className={`text-[11px] ${form.adults + form.children > room.maxGuests ? 'text-red-600 font-medium' : 'text-slate-400'}`}>
+                              เข้าพัก {form.adults + form.children} คน · ความจุห้อง {room.maxGuests} คน
+                              {form.adults + form.children > room.maxGuests && ' — เกินความจุ'}
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-500 mb-0.5">ชำระ</label>
+                              <select
+                                value={form.paymentMethod}
+                                onChange={(e) => setForm({ ...form, paymentMethod: e.target.value as PaymentMethod })}
+                                className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
+                              >
+                                <option value="cash">เงินสด</option>
+                                <option value="credit_card">บัตร</option>
+                                <option value="qr_code">QR</option>
+                                <option value="bank_transfer">โอน</option>
+                              </select>
                             </div>
                             <div className="flex items-center justify-between bg-amber-100 rounded-lg px-3 py-2">
                               <span className="text-xs text-amber-700">รวม {form.nights} คืน</span>
@@ -411,8 +428,9 @@ export default function FrontDeskPage() {
                             </div>
                             <button
                               onClick={handleWalkIn}
-                              disabled={newGuestMode ? !newGuest.name : !form.guestId}
-                              className="w-full px-4 py-2.5 min-h-[44px] bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors"
+                              disabled={(newGuestMode ? !newGuest.name : !form.guestId) || form.adults + form.children > room.maxGuests}
+                              title={form.adults + form.children > room.maxGuests ? 'จำนวนผู้เข้าพักเกินความจุห้อง' : undefined}
+                              className="w-full px-4 py-2.5 min-h-[44px] bg-amber-500 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
                             >
                               ยืนยัน Walk-in
                             </button>

@@ -18,6 +18,13 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="th">
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `try{if(localStorage.getItem('hotel-pms-theme')==='dark')document.documentElement.classList.add('dark')}catch(e){}`,
+          }}
+        />
+      </head>
       <body className={`${notoSansThai.className} bg-slate-50`}>
         <AppShell>{children}</AppShell>
         <Toaster position="top-right" richColors closeButton />

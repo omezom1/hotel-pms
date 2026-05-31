@@ -4,7 +4,7 @@ import { useParams } from 'next/navigation'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getBookingStatusLabel, getBookingSourceLabel, getPaymentMethodLabel, getRoomTypeLabel } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime, getBookingStatusLabel, getBookingSourceLabel, getPaymentMethodLabel, getRoomTypeLabel, getGuestDisplayName, roomHasConflict, calcAddOnTotal } from '@/lib/utils'
 import type { BookingStatus, PaymentMethod } from '@/types'
 import Link from 'next/link'
 import { ArrowLeft, User, BedDouble, CalendarDays, CreditCard, MessageSquare, ShoppingBag, Plus, X, Ban, Banknote } from 'lucide-react'
@@ -44,10 +44,11 @@ export default function BookingDetailPage() {
   const booking = bookings.find((b) => b.id === id)
   if (!booking) return <div className="p-8 text-slate-500">ไม่พบข้อมูลการจอง</div>
 
-  const guest = guests.find((g) => g.id === booking.guestId)
+  const guest = booking.guestId ? guests.find((g) => g.id === booking.guestId) : null
+  const guestDisplayName = getGuestDisplayName(booking, guests)
   const room = rooms.find((r) => r.id === booking.roomId)
   const myAddOns = bookingAddOns.filter((a) => a.bookingId === id)
-  const addOnTotal = myAddOns.filter((a) => a.status !== 'cancelled').reduce((s, a) => s + a.totalPrice, 0)
+  const addOnTotal = calcAddOnTotal(id, bookingAddOns)
 
   function handleRequestAddOn() {
     if (!addOnForm.addOnItemId || !user) return
@@ -129,15 +130,7 @@ export default function BookingDetailPage() {
   const moveableRooms = rooms.filter((r) => {
     if (r.id === booking.roomId) return false
     if (r.status === 'maintenance') return false
-    const ci = booking.checkIn.split('T')[0]
-    const co = booking.checkOut.split('T')[0]
-    return !bookings.some((b) =>
-      b.id !== booking.id &&
-      b.roomId === r.id &&
-      ['confirmed', 'checked_in', 'pending'].includes(b.status) &&
-      b.checkIn.split('T')[0] < co &&
-      b.checkOut.split('T')[0] > ci
-    )
+    return !roomHasConflict(bookings, r.id, booking.checkIn, booking.checkOut, booking.id)
   })
 
   return (
@@ -163,7 +156,7 @@ export default function BookingDetailPage() {
                   {booking.status === 'confirmed' && (
                     <button onClick={() => {
                       updateBookingStatus(booking.id, 'checked_in')
-                      logAudit({ category: 'booking', action: 'check_in', summary: `เช็คอิน ${guest?.name ?? '-'} ห้อง ${room?.number ?? '-'}`, entityId: booking.id })
+                      logAudit({ category: 'booking', action: 'check_in', summary: `เช็คอิน ${guestDisplayName} ห้อง ${room?.number ?? '-'}`, entityId: booking.id })
                       toast.success('เช็คอินสำเร็จ')
                     }}
                       className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium transition-colors">
@@ -173,7 +166,7 @@ export default function BookingDetailPage() {
                   {booking.status === 'checked_in' && (
                     <button onClick={() => {
                       updateBookingStatus(booking.id, 'checked_out')
-                      logAudit({ category: 'booking', action: 'check_out', summary: `เช็คเอาต์ ${guest?.name ?? '-'} ห้อง ${room?.number ?? '-'}`, entityId: booking.id })
+                      logAudit({ category: 'booking', action: 'check_out', summary: `เช็คเอาต์ ${guestDisplayName} ห้อง ${room?.number ?? '-'}`, entityId: booking.id })
                       toast.success('เช็คเอาต์สำเร็จ', { description: 'สร้างใบแจ้งหนี้ + งานทำความสะอาดอัตโนมัติแล้ว' })
                     }}
                       className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-sm font-medium transition-colors">
@@ -198,9 +191,9 @@ export default function BookingDetailPage() {
                   )}
                   {(booking.status === 'confirmed' || booking.status === 'pending') && (
                     <button onClick={() => {
-                      if (!confirm(`ยืนยันยกเลิกการจอง ${booking.id} ของ ${guest?.name ?? '-'}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`)) return
+                      if (!confirm(`ยืนยันยกเลิกการจอง ${booking.id} ของ ${guestDisplayName}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`)) return
                       cancelBooking(booking.id)
-                      logAudit({ category: 'booking', action: 'cancel', summary: `ยกเลิกการจอง ${guest?.name ?? '-'} ห้อง ${room?.number ?? '-'}`, entityId: booking.id })
+                      logAudit({ category: 'booking', action: 'cancel', summary: `ยกเลิกการจอง ${guestDisplayName} ห้อง ${room?.number ?? '-'}`, entityId: booking.id })
                       toast.success('ยกเลิกการจองแล้ว')
                     }}
                       className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition-colors">
@@ -343,13 +336,25 @@ export default function BookingDetailPage() {
                 <h2 className="font-semibold text-slate-800">ข้อมูลแขก</h2>
               </div>
               <div className="space-y-2 text-sm">
-                <div className="font-semibold text-slate-800 text-base">{guest?.name}</div>
-                <div className="text-slate-500">{guest?.email}</div>
-                <div className="text-slate-500">{guest?.phone}</div>
-                <div className="text-slate-500">{guest?.nationality}</div>
-                <Link href={`/guests/${guest?.id}`} className="inline-block text-blue-600 hover:text-blue-800 text-xs mt-2">
-                  ดูโปรไฟล์แขก →
-                </Link>
+                <div className="font-semibold text-slate-800 text-base">{guestDisplayName}</div>
+                {guest ? (
+                  <>
+                    <div className="text-slate-500">{guest.email}</div>
+                    <div className="text-slate-500">{guest.phone}</div>
+                    <div className="text-slate-500">{guest.nationality}</div>
+                    <Link href={`/guests/${guest.id}`} className="inline-block text-blue-600 hover:text-blue-800 text-xs mt-2">
+                      ดูโปรไฟล์แขก →
+                    </Link>
+                  </>
+                ) : booking.guestSnapshot ? (
+                  <>
+                    {booking.guestSnapshot.phone && <div className="text-slate-500">{booking.guestSnapshot.phone}</div>}
+                    {booking.guestSnapshot.idNumber && <div className="text-slate-500">เลขบัตร: {booking.guestSnapshot.idNumber}</div>}
+                    <div className="mt-2 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                      ไม่บันทึกเป็นลูกค้าประจำ
+                    </div>
+                  </>
+                ) : null}
               </div>
             </div>
             <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">

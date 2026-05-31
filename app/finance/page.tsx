@@ -2,14 +2,15 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, toLocalDateKey } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, toLocalDateKey, bookingRevenue } from '@/lib/utils'
+import { downloadExcel, dateStamp } from '@/lib/export-excel'
 import type { InvoiceStatus, CorporateAccount } from '@/types'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell
 } from 'recharts'
 import { format, parseISO } from 'date-fns'
 import { th } from 'date-fns/locale'
-import { Plus, X, Building2, History } from 'lucide-react'
+import { Plus, X, Building2, History, Download } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
 import { toast } from 'sonner'
 
@@ -41,9 +42,12 @@ const emptyCorpForm = {
 }
 
 export default function FinancePage() {
-  const { invoices, bookings, guests, corporateAccounts, corporateTransactions, addCorporateAccount, depositToAccount, logAudit } = useHotelStore()
+  const { invoices, bookings, guests, corporateAccounts, corporateTransactions, bookingAddOns, addCorporateAccount, depositToAccount, logAudit } = useHotelStore()
   const { user } = useAuthStore()
   const [activeTab, setActiveTab] = useState<'overview' | 'invoices' | 'corporate'>('overview')
+  // ช่วงวันที่สำหรับกรองตอนส่งออกใบแจ้งหนี้ (ตามวันที่ออกใบ)
+  const [exportFrom, setExportFrom] = useState('')
+  const [exportTo, setExportTo] = useState('')
 
   // Corporate state
   const [showCorpForm, setShowCorpForm] = useState(false)
@@ -54,8 +58,14 @@ export default function FinancePage() {
   const [historyAccount, setHistoryAccount] = useState<CorporateAccount | null>(null)
 
   const totalRevenue = invoices.filter((i) => i.status === 'paid').reduce((s, i) => s + i.total, 0)
-  const pendingAmount = invoices.filter((i) => i.status !== 'paid' && i.status !== 'refunded').reduce((s, i) => s + i.total, 0)
-  const totalTax = invoices.filter((i) => i.status === 'paid').reduce((s, i) => s + i.tax, 0)
+  // รอชำระ = เฉพาะส่วนที่ยังไม่จ่ายของแต่ละใบ (ยอดใบ − ยอดที่จ่ายของ booking นั้น) ไม่ใช่ยอดเต็มใบ
+  const pendingAmount = invoices
+    .filter((i) => i.status !== 'paid' && i.status !== 'refunded')
+    .reduce((s, i) => {
+      const b = bookings.find((x) => x.id === i.bookingId)
+      const paid = b ? b.paidAmount : 0
+      return s + Math.max(0, i.total - paid)
+    }, 0)
 
   const revenueChart = Array.from({ length: 7 }, (_, i) => {
     const d = new Date()
@@ -63,7 +73,7 @@ export default function FinancePage() {
     const day = toLocalDateKey(d)
     const revenue = bookings
       .filter((b) => b.status === 'checked_out' && b.checkOut.startsWith(day))
-      .reduce((s, b) => s + b.totalAmount, 0)
+      .reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
     return { date: format(parseISO(day), 'dd MMM', { locale: th }), รายได้: revenue }
   })
 
@@ -75,6 +85,95 @@ export default function FinancePage() {
     { name: 'บัตรเดบิต', value: bookings.filter((b) => b.paymentMethod === 'debit_card' && b.status !== 'cancelled').length },
   ].filter((d) => d.value > 0)
 
+  // ===== ส่งออก Excel (.xlsx) เฉพาะข้อมูลการเงิน =====
+  const m = (n: number) => Math.round(n * 100) / 100 // ปัดทศนิยม 2 ตำแหน่ง กัน floating-point เพี้ยน
+  const subtitleNow = `ข้อมูล ณ ${formatDate(new Date().toISOString())}`
+
+  async function exportOverview() {
+    await downloadExcel({
+      filename: `การเงิน-สรุป-${dateStamp()}`,
+      sheetName: 'สรุปการเงิน',
+      title: 'สรุปการเงิน',
+      subtitle: subtitleNow,
+      tables: [
+        {
+          columns: [{ header: 'รายการ', width: 24 }, { header: 'จำนวนเงิน (บาท)', money: true, width: 18 }],
+          rows: [
+            ['รายได้ที่ชำระแล้ว', m(totalRevenue)],
+            ['รอชำระ', m(pendingAmount)],
+            ['จำนวนใบแจ้งหนี้', invoices.length],
+          ],
+        },
+        {
+          heading: 'รายได้ 7 วันย้อนหลัง',
+          columns: [{ header: 'วันที่', width: 16 }, { header: 'รายได้ (บาท)', money: true, width: 18 }],
+          rows: revenueChart.map((r) => [r.date, m(r.รายได้)]),
+        },
+      ],
+    })
+    toast.success('ส่งออกสรุปการเงินเป็น Excel แล้ว')
+  }
+
+  async function exportInvoices() {
+    // กรองตามช่วงวันที่ออกใบ (ถ้าระบุ)
+    const filtered = invoices.filter((inv) => {
+      const day = inv.issuedAt.split('T')[0]
+      if (exportFrom && day < exportFrom) return false
+      if (exportTo && day > exportTo) return false
+      return true
+    })
+    if (filtered.length === 0) {
+      toast.error('ไม่มีใบแจ้งหนี้ในช่วงวันที่เลือก')
+      return
+    }
+    const rangeLabel = exportFrom || exportTo
+      ? ` (${exportFrom ? formatDate(exportFrom) : 'เริ่มต้น'} – ${exportTo ? formatDate(exportTo) : 'ปัจจุบัน'})`
+      : ''
+    await downloadExcel({
+      filename: `ใบแจ้งหนี้-${dateStamp()}`,
+      sheetName: 'ใบแจ้งหนี้',
+      title: `รายการใบแจ้งหนี้${rangeLabel}`,
+      subtitle: subtitleNow,
+      tables: [{
+        columns: [
+          { header: 'เลขที่ใบแจ้งหนี้' }, { header: 'แขก' },
+          { header: 'ยอดรวม (บาท)', money: true },
+          { header: 'วิธีชำระ' }, { header: 'วันที่ออก' }, { header: 'สถานะ' },
+        ],
+        rows: filtered.map((inv) => {
+          const guest = guests.find((g) => g.id === inv.guestId)
+          return [
+            inv.id, guest?.name ?? '-',
+            m(inv.total),
+            getPaymentMethodLabel(inv.paymentMethod ?? ''), formatDate(inv.issuedAt), statusLabels[inv.status],
+          ]
+        }),
+        totalRow: ['', 'รวม', m(filtered.reduce((s, i) => s + i.total, 0)), '', '', ''],
+      }],
+    })
+    toast.success(`ส่งออกใบแจ้งหนี้ ${filtered.length} รายการแล้ว`)
+  }
+
+  async function exportCorporate() {
+    await downloadExcel({
+      filename: `เครดิตองค์กร-${dateStamp()}`,
+      sheetName: 'เครดิตองค์กร',
+      title: 'บัญชีเครดิตองค์กร',
+      subtitle: subtitleNow,
+      tables: [{
+        columns: [
+          { header: 'บริษัท' }, { header: 'ผู้ติดต่อ' }, { header: 'เบอร์โทร' }, { header: 'เลขภาษี' },
+          { header: 'ยอดฝากสะสม (บาท)', money: true }, { header: 'ยอดใช้ไป (บาท)', money: true }, { header: 'ยอดคงเหลือ (บาท)', money: true },
+          { header: 'สถานะ' },
+        ],
+        rows: corporateAccounts.map((acc) => [
+          acc.companyName, acc.contactPerson, acc.contactPhone ?? '', acc.taxId ?? '',
+          m(acc.totalDeposited), m(acc.totalUsed), m(acc.availableBalance), corpStatusLabels[acc.status],
+        ]),
+      }],
+    })
+    toast.success(`ส่งออกบัญชีองค์กร ${corporateAccounts.length} รายการแล้ว`)
+  }
 
   return (
     <div className="flex flex-col h-screen">
@@ -92,22 +191,46 @@ export default function FinancePage() {
             <div className="text-2xl font-bold text-amber-600">{formatCurrency(pendingAmount)}</div>
           </div>
           <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
-            <div className="text-sm text-slate-500 mb-2">ภาษีที่รวบรวมได้</div>
-            <div className="text-2xl font-bold text-slate-800">{formatCurrency(totalTax)}</div>
+            <div className="text-sm text-slate-500 mb-2">ใบแจ้งหนี้ทั้งหมด</div>
+            <div className="text-2xl font-bold text-slate-800">{invoices.length} ใบ</div>
           </div>
         </div>
 
-        {/* Tabs */}
-        <div className="flex gap-1 bg-slate-100 p-1 rounded-lg w-fit">
-          {([['overview', 'ภาพรวม'], ['invoices', 'ใบแจ้งหนี้'], ['corporate', 'เครดิตองค์กร']] as const).map(([tab, label]) => (
+        {/* Tabs + Export */}
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex gap-1 bg-slate-100 p-1 rounded-lg w-fit">
+            {([['overview', 'ภาพรวม'], ['invoices', 'ใบแจ้งหนี้'], ['corporate', 'เครดิตองค์กร']] as const).map(([tab, label]) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === tab ? 'bg-white shadow-sm text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {activeTab === 'invoices' && (
+              <div className="flex items-center gap-1.5 text-xs text-slate-500">
+                <span>ช่วงวันที่:</span>
+                <input type="date" value={exportFrom} onChange={(e) => setExportFrom(e.target.value)}
+                  className="border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+                <span>–</span>
+                <input type="date" value={exportTo} onChange={(e) => setExportTo(e.target.value)}
+                  className="border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+                {(exportFrom || exportTo) && (
+                  <button onClick={() => { setExportFrom(''); setExportTo('') }} className="text-slate-400 hover:text-slate-600 px-1" title="ล้างช่วงวันที่">✕</button>
+                )}
+              </div>
+            )}
             <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === tab ? 'bg-white shadow-sm text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}
+              onClick={activeTab === 'overview' ? exportOverview : activeTab === 'invoices' ? exportInvoices : exportCorporate}
+              className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium transition-colors shrink-0"
+              title="ดาวน์โหลดเป็นไฟล์ Excel (.xlsx)"
             >
-              {label}
+              <Download size={16} /> ส่งออก Excel
             </button>
-          ))}
+          </div>
         </div>
 
         {activeTab === 'overview' && (
@@ -146,7 +269,7 @@ export default function FinancePage() {
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 border-b border-slate-100">
                   <tr>
-                    {['เลขที่ใบแจ้งหนี้', 'แขก', 'จำนวน', 'ภาษี', 'รวม', 'วิธีชำระ', 'วันที่ออก', 'สถานะ'].map((h) => (
+                    {['เลขที่ใบแจ้งหนี้', 'แขก', 'ยอดรวม', 'วิธีชำระ', 'วันที่ออก', 'สถานะ'].map((h) => (
                       <th key={h} className="text-left px-4 py-3 font-medium text-slate-500">{h}</th>
                     ))}
                   </tr>
@@ -158,8 +281,6 @@ export default function FinancePage() {
                       <tr key={inv.id} className="hover:bg-slate-50">
                         <td className="px-4 py-3 font-mono text-xs text-slate-500">{inv.id}</td>
                         <td className="px-4 py-3 font-medium">{guest?.name ?? '-'}</td>
-                        <td className="px-4 py-3">{formatCurrency(inv.amount)}</td>
-                        <td className="px-4 py-3">{formatCurrency(inv.tax)}</td>
                         <td className="px-4 py-3 font-semibold">{formatCurrency(inv.total)}</td>
                         <td className="px-4 py-3 text-slate-500">{getPaymentMethodLabel(inv.paymentMethod ?? '')}</td>
                         <td className="px-4 py-3 text-slate-500">{formatDate(inv.issuedAt)}</td>
