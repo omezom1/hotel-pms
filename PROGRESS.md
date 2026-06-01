@@ -57,7 +57,7 @@
 ไฟล์อยู่ใน `supabase/migrations/` — **วาง *เนื้อใน* ไฟล์ ไม่ใช่ path**
 - `002_app_state.sql` — สร้างตาราง `app_state` + RLS (anon full access) — ✅ รันแล้ว
 - `003_realtime_app_state.sql` — เปิด realtime publication + replica identity full — ✅ รันแล้ว
-- `004_app_state_version.sql` — เพิ่มคอลัมน์ `version` (optimistic concurrency) — ⚠️ **ยังไม่รัน — ต้องรันใน Dashboard**
+- `004_app_state_version.sql` — เพิ่มคอลัมน์ `version` (optimistic concurrency) — ✅ รันแล้ว (2026-06-01)
 > DDL รันผ่าน anon key ไม่ได้ ต้องทำใน Dashboard เท่านั้น
 
 ## 5. ✅ ทำเสร็จแล้ว
@@ -73,10 +73,24 @@
   หน้า login รอ cloud hydrate ก่อนเปิดปุ่ม, เพิ่ม panel จัดการบัญชี (เพิ่ม/แก้/ลบ) ใน
   หน้า `/staff` (เฉพาะ `canManageStaff`) — **session ยังแยกแต่ละเครื่อง (localStorage ถูกต้อง)**
   ไฟล์: `lib/store.ts`, `lib/auth-store.ts`, `app/login/page.tsx`, `app/staff/page.tsx`
-- **ข้อ 2 — version guard (optimistic concurrency):** ดูข้อ 3c — ⚠️ ต้องรัน migration 004
+- **ข้อ 2 — version guard (optimistic concurrency):** ดูข้อ 3c — ✅ รัน migration 004 แล้ว
   > เลือกแนวนี้แทนการแยก bookings/rooms เป็น relational tables เพราะ action เช่น เช็คเอาต์
   > เขียนพร้อมกันหลาย entity (invoices/HK/guests/corporate) ที่ยังเป็น blob → hybrid จะเกิด
   > partial-write ไม่ atomic; version guard ปลอดภัยกว่าและตรงเป้า "หลายคนทำไม่ทับกันหาย"
+
+### 2026-06-01 (รอบ 2 — quick wins + ฟีเจอร์ใช้งานจริง)
+- เมนู **ซ่อมบำรุง** เข้า Sidebar + **permission editor** รายคนในหน้า /staff (ตั้งสิทธิ์ได้จริง)
+- `/invoice` redirect → /finance กัน 404; บังคับ `canManageFinance` จริง (finance/expenses)
+- `exportData` ตัด password ออก (กัน plaintext รั่วในไฟล์ backup)
+- **เช็คเอาต์ค้างชำระ**: CheckoutConfirmDialog (รับชำระก่อน/เช็คเอาต์ค้าง) แทน confirm native
+- **extend** เตือนยอดค้างใหม่; **ปุ่ม reset** แก้ให้ลบแถวบน Supabase จริง (เดิมลบ localStorage)
+- **reliability**: toast เตือนเมื่อเขียน cloud ล้มเหลว (registerSaveErrorHandler) + loading timeout/retry ใน AppShell
+- **แก้ข้อมูลแขก** (wire updateGuest); **เปลี่ยนรหัสผ่านตัวเอง** (ChangePasswordButton)
+- **Staff CRUD** เพิ่ม/แก้/ลบพนักงาน (store: addStaff/deleteStaff) + สิทธิ์เริ่มต้นตามตำแหน่ง
+- **มัดจำตอน walk-in** (ชำระเต็ม/มัดจำ) + **early check-out** ปรับยอดตามคืนจริง + คืนเงินส่วนเกิน
+  (store.adjustForEarlyCheckout, EarlyCheckoutDialog ใช้ทั้ง front-desk + booking detail)
+- **ConfirmProvider/useConfirm**: confirm modal กลาง (Esc/aria-modal) แทน window.confirm ทั้งแอป
+- commit: 2b59348, 2b3de5a, 5b2153f, 478f63e, 2687f93, e0c6848, b9eb6e2, ea65e47 (ยังไม่ push)
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
@@ -86,6 +100,9 @@
    proper tables + Postgres RPC ให้ checkout/cancel เป็น transaction เดียว = งานใหญ่
 3. ความปลอดภัย: RLS เป็น anon full access (ใครมี URL+key เข้าได้เต็ม) — เหมาะงานภายในเท่านั้น
 4. รหัสผ่านเก็บเป็น plaintext ใน blob (demo) — production ควร hash (bcrypt) + ไม่ส่งกลับ client
+5. **VAT 7% ในใบแจ้งหนี้** — ยังไม่ทำ (`tax: 0` ตายตัว) ผู้ใช้ขอเลื่อนไว้ก่อน
+6. **accessibility** ทำบางส่วน (confirm modal มี Esc/aria-modal แล้ว) — ยังเหลือ focus-trap
+   ใน dialog อื่น ๆ และ `<label htmlFor>` ผูก input ให้ครบ
 
 ## 7. ⚠️ Gotchas
 - **อย่า `pkill -f "next dev"`** — จับ shell ของคำสั่งเองด้วย ทำให้ command ตาย
