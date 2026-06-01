@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
+import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
 import {
   formatCurrency, formatDate, getBookingStatusLabel, getBookingSourceLabel, calcBookingTotal, calcNights, getGuestDisplayName, getRoomTypeLabel, calcOutstanding, roomHasConflict
@@ -24,6 +25,7 @@ const statusColors: Record<BookingStatus, string> = {
 
 export default function BookingsPage() {
   const { bookings, rooms, guests, corporateAccounts, bookingAddOns, createBooking, cancelBooking, logAudit } = useHotelStore()
+  const confirm = useConfirm()
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState<BookingStatus | 'all'>('all')
   const [showModal, setShowModal] = useState(false)
@@ -221,8 +223,8 @@ export default function BookingsPage() {
                           </Link>
                           {(b.status === 'confirmed' || b.status === 'pending') && (
                             <button
-                              onClick={() => {
-                                if (!confirm(`ยืนยันยกเลิกการจอง ${b.id} ของ ${guestName}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`)) return
+                              onClick={async () => {
+                                if (!(await confirm({ title: 'ยกเลิกการจอง?', message: `ยกเลิกการจอง ${b.id} ของ ${guestName}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`, danger: true, confirmText: 'ยกเลิกการจอง' }))) return
                                 cancelBooking(b.id)
                                 logAudit({ category: 'booking', action: 'cancel', summary: `ยกเลิกการจอง ${b.id}`, entityId: b.id })
                                 toast.success('ยกเลิกการจองแล้ว')

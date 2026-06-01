@@ -10,6 +10,7 @@ import Link from 'next/link'
 import { ArrowLeft, User, BedDouble, CalendarDays, CreditCard, MessageSquare, ShoppingBag, Plus, X, Ban, Banknote } from 'lucide-react'
 import CheckoutConfirmDialog from '@/components/CheckoutConfirmDialog'
 import EarlyCheckoutDialog from '@/components/EarlyCheckoutDialog'
+import { useConfirm } from '@/components/ConfirmProvider'
 import { toast } from 'sonner'
 
 const statusColors: Record<BookingStatus, string> = {
@@ -33,6 +34,7 @@ export default function BookingDetailPage() {
   const { id } = useParams<{ id: string }>()
   const { bookings, rooms, guests, addOnItems, bookingAddOns, invoices, updateBookingStatus, cancelBooking, requestAddOn, cancelAddOn, recordPayment, extendBooking, moveBooking, updateBooking, adjustForEarlyCheckout, logAudit } = useHotelStore()
   const { user } = useAuthStore()
+  const confirm = useConfirm()
   const [showAddOnDialog, setShowAddOnDialog] = useState(false)
   const [addOnForm, setAddOnForm] = useState({ addOnItemId: '', quantity: 1, notes: '' })
   const [showPayDialog, setShowPayDialog] = useState(false)
@@ -234,8 +236,8 @@ export default function BookingDetailPage() {
                     </>
                   )}
                   {(booking.status === 'confirmed' || booking.status === 'pending') && (
-                    <button onClick={() => {
-                      if (!confirm(`ยืนยันยกเลิกการจอง ${booking.id} ของ ${guestDisplayName}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`)) return
+                    <button onClick={async () => {
+                      if (!(await confirm({ title: 'ยกเลิกการจอง?', message: `ยกเลิกการจอง ${booking.id} ของ ${guestDisplayName}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`, danger: true, confirmText: 'ยกเลิกการจอง' }))) return
                       cancelBooking(booking.id)
                       logAudit({ category: 'booking', action: 'cancel', summary: `ยกเลิกการจอง ${guestDisplayName} ห้อง ${room?.number ?? '-'}`, entityId: booking.id })
                       toast.success('ยกเลิกการจองแล้ว')
@@ -347,8 +349,8 @@ export default function BookingDetailPage() {
                         </span>
                         {ao.status === 'requested' && (
                           <button
-                            onClick={() => {
-                              if (!confirm(`ยกเลิก add-on "${item?.name ?? 'รายการนี้'}"?\nรายได้ ${formatCurrency(ao.totalPrice)} จะหายไปจากบิล`)) return
+                            onClick={async () => {
+                              if (!(await confirm({ title: 'ยกเลิก Add-on?', message: `ยกเลิก add-on "${item?.name ?? 'รายการนี้'}"?\nรายได้ ${formatCurrency(ao.totalPrice)} จะหายไปจากบิล`, danger: true }))) return
                               cancelAddOn(ao.id)
                               toast.info('ยกเลิก Add-on แล้ว')
                             }}

@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
+import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
 import { formatCurrency, formatDate, getRoomStatusLabel, getRoomTypeLabel, todayLocal, toLocalDateKey, getGuestDisplayName, bookingOccupiesDay, bookingActiveOnDay, bookingRevenue } from '@/lib/utils'
 import type { RoomStatus } from '@/types'
@@ -14,6 +15,7 @@ import { th } from 'date-fns/locale'
 
 export default function DashboardPage() {
   const { rooms, bookings, guests, bookingAddOns, updateRoomStatus } = useHotelStore()
+  const confirm = useConfirm()
   const [selectedRoom, setSelectedRoom] = useState<string | null>(null)
   const [viewDate, setViewDate] = useState(() => todayLocal())
 
@@ -223,12 +225,10 @@ export default function DashboardPage() {
                             {(['available', 'cleaning', 'maintenance'] as RoomStatus[]).map((s) => (
                               <button
                                 key={s}
-                                onClick={() => {
-                                  if (
-                                    s === 'available' &&
-                                    selectedRoomData.status === 'cleaning' &&
-                                    !confirm('ยืนยันว่าห้องทำความสะอาดเสร็จและพร้อมรับแขกแล้วใช่หรือไม่?')
-                                  ) return
+                                onClick={async () => {
+                                  if (s === 'available' && selectedRoomData.status === 'cleaning') {
+                                    if (!(await confirm({ message: 'ยืนยันว่าห้องทำความสะอาดเสร็จและพร้อมรับแขกแล้วใช่หรือไม่?', confirmText: 'พร้อมรับแขก' }))) return
+                                  }
                                   updateRoomStatus(selectedRoomData.id, s)
                                 }}
                                 className={`text-xs px-3 py-1.5 min-h-[36px] rounded-full border transition-colors font-medium ${selectedRoomData.status === s ? 'bg-slate-800 text-white border-slate-800' : 'border-slate-300 text-slate-600 hover:border-slate-500'}`}

@@ -7,6 +7,7 @@ import { formatDate, getStaffRoleLabel } from '@/lib/utils'
 import type { StaffRole, StaffPermissions, Staff } from '@/types'
 import { CheckCircle2, XCircle, KeyRound, UserPlus, Trash2, Eye, EyeOff, Save, X, Pencil } from 'lucide-react'
 import { toast } from 'sonner'
+import { useConfirm } from '@/components/ConfirmProvider'
 
 const roleColors: Record<StaffRole, string> = {
   admin: 'text-red-700 bg-red-100',
@@ -141,6 +142,7 @@ function AccountsManager() {
   const updateUser = useHotelStore((s) => s.updateUser)
   const deleteUser = useHotelStore((s) => s.deleteUser)
   const currentUserId = useAuthStore((s) => s.user?.userId)
+  const confirm = useConfirm()
 
   const [revealId, setRevealId] = useState<string | null>(null)
   const [editId, setEditId] = useState<string | null>(null)
@@ -181,9 +183,9 @@ function AccountsManager() {
     setNewStaffId(''); setNewUsername(''); setNewPassword('')
   }
 
-  function handleDelete(id: string, username: string) {
+  async function handleDelete(id: string, username: string) {
     if (id === currentUserId) { toast.error('ลบบัญชีที่กำลังใช้งานอยู่ไม่ได้'); return }
-    if (!confirm(`ลบบัญชี "${username}" ?`)) return
+    if (!(await confirm({ title: 'ลบบัญชีผู้ใช้?', message: `ลบบัญชี "${username}" ออกจากระบบ?`, danger: true, confirmText: 'ลบ' }))) return
     deleteUser(id)
     toast.success('ลบบัญชีแล้ว')
   }

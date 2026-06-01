@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
+import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
 import { formatDateTime, getPriorityLabel, getRoomStatusLabel } from '@/lib/utils'
 import type { MaintenanceStatus } from '@/types'
@@ -23,6 +24,7 @@ const priorityColors: Record<string, string> = {
 export default function MaintenancePage() {
   const { maintenanceLogs, rooms, addMaintenanceLog, updateMaintenanceStatus, removeMaintenanceLog, logAudit } = useHotelStore()
   const { user } = useAuthStore()
+  const confirm = useConfirm()
   const [filter, setFilter] = useState<MaintenanceStatus | 'all'>('all')
   const [showModal, setShowModal] = useState(false)
   const [showAllTasks, setShowAllTasks] = useState(false)
@@ -37,13 +39,13 @@ export default function MaintenancePage() {
 
   const filtered = visibleLogs.filter((l) => filter === 'all' || l.status === filter)
 
-  function handleAdd() {
+  async function handleAdd() {
     if (!form.roomId || !form.issue) return
     const room = rooms.find((r) => r.id === form.roomId)
     if (!room) return
     // Fix C: warn if room is occupied before reporting maintenance
     if (room.status === 'occupied') {
-      if (!confirm(`ห้อง ${room.number} มีผู้เข้าพักอยู่\nการแจ้งซ่อมจะปิดห้องอัตโนมัติ ยืนยันหรือไม่?`)) return
+      if (!(await confirm({ title: 'ห้องมีผู้เข้าพัก', message: `ห้อง ${room.number} มีผู้เข้าพักอยู่\nการแจ้งซ่อมจะปิดห้องอัตโนมัติ ยืนยันหรือไม่?`, danger: true }))) return
     }
     const reportedBy = form.reportedBy || user?.staff.name || 'พนักงาน'
     addMaintenanceLog({
@@ -59,8 +61,8 @@ export default function MaintenancePage() {
   }
 
   // Fix D: cancel open maintenance report
-  function handleCancel(log: typeof maintenanceLogs[0]) {
-    if (!confirm(`ยกเลิกการแจ้งซ่อม "${log.issue}" ห้อง ${log.roomNumber}?\n(ห้องจะถูกคืนสถานะเป็น "ว่าง" อัตโนมัติ)`)) return
+  async function handleCancel(log: typeof maintenanceLogs[0]) {
+    if (!(await confirm({ title: 'ยกเลิกการแจ้งซ่อม?', message: `ยกเลิกการแจ้งซ่อม "${log.issue}" ห้อง ${log.roomNumber}?\nห้องจะถูกคืนสถานะเป็น "ว่าง" อัตโนมัติ`, danger: true, confirmText: 'ยกเลิกแจ้งซ่อม' }))) return
     removeMaintenanceLog(log.id)
     logAudit({ category: 'maintenance', action: 'cancel', summary: `ยกเลิกแจ้งซ่อมห้อง ${log.roomNumber}: ${log.issue}`, entityId: log.id })
     toast.success(`ยกเลิกแจ้งซ่อมห้อง ${log.roomNumber} แล้ว`)

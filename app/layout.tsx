@@ -3,6 +3,7 @@ import { Noto_Sans_Thai } from 'next/font/google'
 import { Toaster } from 'sonner'
 import './globals.css'
 import AppShell from '@/components/layout/AppShell'
+import { ConfirmProvider } from '@/components/ConfirmProvider'
 
 const notoSansThai = Noto_Sans_Thai({
   subsets: ['thai', 'latin'],
@@ -26,7 +27,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body className={`${notoSansThai.className} bg-slate-50`}>
-        <AppShell>{children}</AppShell>
+        <ConfirmProvider>
+          <AppShell>{children}</AppShell>
+        </ConfirmProvider>
         <Toaster position="top-right" richColors closeButton />
       </body>
     </html>

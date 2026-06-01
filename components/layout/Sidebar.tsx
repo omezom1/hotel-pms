@@ -14,6 +14,7 @@ import type { StaffPermissions } from '@/types'
 import { toast } from 'sonner'
 import ThemeToggle from './ThemeToggle'
 import ChangePasswordButton from '@/components/ChangePasswordButton'
+import { useConfirm } from '@/components/ConfirmProvider'
 
 type NavItem = {
   href: string
@@ -46,6 +47,7 @@ export default function Sidebar() {
   const router = useRouter()
   const { user, logout } = useAuthStore()
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const confirm = useConfirm()
 
   if (!user) return null
 
@@ -57,7 +59,11 @@ export default function Sidebar() {
   }
 
   async function handleReset() {
-    if (!confirm('ล้างข้อมูลทั้งหมดบนคลาวด์และโหลดข้อมูลตัวอย่างใหม่?\n(ย้อนกลับไม่ได้ และมีผลกับทุกเครื่องที่ใช้ระบบนี้)')) return
+    if (!(await confirm({
+      title: 'ล้างข้อมูลทั้งหมด?',
+      message: 'ล้างข้อมูลทั้งหมดบนคลาวด์และโหลดข้อมูลตัวอย่างใหม่\nย้อนกลับไม่ได้ และมีผลกับทุกเครื่องที่ใช้ระบบนี้',
+      danger: true, confirmText: 'ล้างข้อมูล',
+    }))) return
     // ข้อมูลอยู่บน Supabase แล้ว — ต้องลบแถว state บนคลาวด์ (ไม่ใช่ localStorage ที่เลิกใช้)
     await useHotelStore.persist.clearStorage()
     toast.success('ล้างข้อมูลแล้ว กำลังโหลดใหม่...')
@@ -88,7 +94,7 @@ export default function Sidebar() {
     if (e.target) e.target.value = '' // เคลียร์เพื่อให้เลือกไฟล์เดิมซ้ำได้
     if (!file) return
     const reader = new FileReader()
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const parsed = JSON.parse(String(reader.result))
         const data = parsed?.data ?? parsed // รองรับทั้งไฟล์ที่ห่อ _app และ data ดิบ
@@ -96,7 +102,7 @@ export default function Sidebar() {
           toast.error('ไฟล์ไม่ถูกต้อง: ไม่พบข้อมูลการจอง')
           return
         }
-        if (!confirm('กู้คืนข้อมูลจากไฟล์นี้? ข้อมูลปัจจุบันจะถูกเขียนทับทั้งหมด')) return
+        if (!(await confirm({ title: 'กู้คืนข้อมูล?', message: 'กู้คืนข้อมูลจากไฟล์นี้? ข้อมูลปัจจุบันจะถูกเขียนทับทั้งหมด', danger: true, confirmText: 'กู้คืน' }))) return
         useHotelStore.getState().importData(data)
         toast.success('กู้คืนข้อมูลแล้ว กำลังโหลดใหม่...')
         setTimeout(() => window.location.reload(), 600)

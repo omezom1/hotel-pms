@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
+import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
 import { formatDateTime, getPriorityLabel, getRoomStatusLabel } from '@/lib/utils'
 import type { HousekeepingStatus } from '@/types'
@@ -24,6 +25,7 @@ const columns: { key: HousekeepingStatus; label: string; icon: React.ReactNode }
 export default function HousekeepingPage() {
   const { housekeepingTasks, rooms, staff, addHousekeepingTask, updateTaskStatus, logAudit } = useHotelStore()
   const { user } = useAuthStore()
+  const confirm = useConfirm()
   const [showModal, setShowModal] = useState(false)
   const [form, setForm] = useState({ roomId: '', staffId: '', priority: 'normal', notes: '', scheduledAt: '' })
   const [showAllTasks, setShowAllTasks] = useState(false)
@@ -34,12 +36,12 @@ export default function HousekeepingPage() {
     ? housekeepingTasks.filter((t) => t.staffId === user?.staff.id)
     : housekeepingTasks
 
-  function handleAdd() {
+  async function handleAdd() {
     if (!form.roomId || !form.staffId) return
     const room = rooms.find((r) => r.id === form.roomId)
     const hk = staff.find((s) => s.id === form.staffId)
     if (!room || !hk) return
-    if (room.status === 'occupied' && !confirm(`ห้อง ${room.number} มีผู้เข้าพักอยู่\nยืนยันมอบหมายงานทำความสะอาดให้ ${hk.name}?`)) return
+    if (room.status === 'occupied' && !(await confirm({ title: 'ห้องมีผู้เข้าพัก', message: `ห้อง ${room.number} มีผู้เข้าพักอยู่\nยืนยันมอบหมายงานทำความสะอาดให้ ${hk.name}?` }))) return
     addHousekeepingTask({
       roomId: form.roomId, roomNumber: room.number,
       assignedTo: hk.name, staffId: form.staffId,

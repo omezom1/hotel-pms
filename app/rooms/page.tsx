@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
+import { useConfirm } from '@/components/ConfirmProvider'
 import { mockDynamicPricing } from '@/lib/mock-data'
 import Header from '@/components/layout/Header'
 import { formatCurrency, formatDateTime, getRoomStatusLabel, getRoomTypeLabel } from '@/lib/utils'
@@ -32,6 +33,7 @@ const roomTypeStats = (rooms: ReturnType<typeof useHotelStore.getState>['rooms']
 export default function RoomsPage() {
   const { rooms, updateRoomStatus, bookingAddOns, addOnItems, bookings, fulfillAddOn, cancelAddOn } = useHotelStore()
   const { user } = useAuthStore()
+  const confirm = useConfirm()
   const [activeTab, setActiveTab] = useState<'rooms' | 'pricing' | 'addon'>('rooms')
   const pendingAddOns = bookingAddOns.filter((a) => a.status === 'requested')
   const [filterType, setFilterType] = useState<RoomType | 'all'>('all')
@@ -151,13 +153,11 @@ export default function RoomsPage() {
                           <select
                             value={room.status === 'occupied' ? '' : room.status}
                             disabled={room.status === 'occupied'}
-                            onChange={(e) => {
+                            onChange={async (e) => {
                               const next = e.target.value as RoomStatus
-                              if (
-                                next === 'available' &&
-                                room.status === 'cleaning' &&
-                                !confirm(`ยืนยันว่าห้อง ${room.number} ทำความสะอาดเสร็จและพร้อมรับแขกแล้วใช่หรือไม่?`)
-                              ) return
+                              if (next === 'available' && room.status === 'cleaning') {
+                                if (!(await confirm({ message: `ยืนยันว่าห้อง ${room.number} ทำความสะอาดเสร็จและพร้อมรับแขกแล้วใช่หรือไม่?`, confirmText: 'พร้อมรับแขก' }))) return
+                              }
                               updateRoomStatus(room.id, next)
                             }}
                             className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none bg-white disabled:bg-slate-100 disabled:text-slate-400"
@@ -249,8 +249,8 @@ export default function RoomsPage() {
                                 จัดการแล้ว
                               </button>
                               <button
-                                onClick={() => {
-                                  if (!confirm(`ยกเลิก add-on "${item?.name ?? 'รายการนี้'}"?\nรายได้ ${formatCurrency(ao.totalPrice)} จะหายไปจากบิล`)) return
+                                onClick={async () => {
+                                  if (!(await confirm({ title: 'ยกเลิก Add-on?', message: `ยกเลิก add-on "${item?.name ?? 'รายการนี้'}"?\nรายได้ ${formatCurrency(ao.totalPrice)} จะหายไปจากบิล`, danger: true }))) return
                                   cancelAddOn(ao.id)
                                   toast.info('ยกเลิก Add-on แล้ว')
                                 }}
