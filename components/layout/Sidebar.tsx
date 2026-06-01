@@ -13,6 +13,7 @@ import { useHotelStore } from '@/lib/store'
 import type { StaffPermissions } from '@/types'
 import { toast } from 'sonner'
 import ThemeToggle from './ThemeToggle'
+import ChangePasswordButton from '@/components/ChangePasswordButton'
 
 type NavItem = {
   href: string
@@ -184,6 +185,7 @@ export default function Sidebar() {
             </button>
           </>
         )}
+        <ChangePasswordButton />
         <ThemeToggle />
         <button
           onClick={handleLogout}

@@ -3,16 +3,18 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
 import { formatCurrency } from '@/lib/utils'
-import { Search, UserPlus, X } from 'lucide-react'
+import { Search, UserPlus, X, Pencil } from 'lucide-react'
 import Link from 'next/link'
 import { toast } from 'sonner'
+import type { Guest } from '@/types'
 
 const emptyGuestForm = { name: '', phone: '', email: '', idNumber: '' }
 
 export default function GuestsPage() {
-  const { guests, addGuest, logAudit } = useHotelStore()
+  const { guests, addGuest, updateGuest, logAudit } = useHotelStore()
   const [search, setSearch] = useState('')
   const [showForm, setShowForm] = useState(false)
+  const [editId, setEditId] = useState<string | null>(null)
   const [form, setForm] = useState(emptyGuestForm)
 
   const filtered = guests.filter((g) =>
@@ -22,22 +24,41 @@ export default function GuestsPage() {
     g.phone.includes(search)
   )
 
-  function handleAddGuest() {
-    if (!form.name.trim()) return
-    addGuest({
-      name: form.name.trim(),
-      email: form.email.trim(),
-      phone: form.phone.trim(),
-      nationality: 'ไทย',
-      idNumber: form.idNumber.trim(),
-      preferences: { pillow: null, floor: null, foodAllergies: [], specialRequests: [], smokingRoom: false, bedType: null },
-      totalStays: 0,
-      totalSpend: 0,
-      joinedAt: new Date().toISOString(),
-    })
-    logAudit({ category: 'guest', action: 'add', summary: `เพิ่มลูกค้า "${form.name.trim()}"` })
-    toast.success(`เพิ่มลูกค้า "${form.name.trim()}" แล้ว`)
+  function openAdd() {
+    setEditId(null)
     setForm(emptyGuestForm)
+    setShowForm(true)
+  }
+  function openEdit(g: Guest) {
+    setEditId(g.id)
+    setForm({ name: g.name, phone: g.phone, email: g.email, idNumber: g.idNumber })
+    setShowForm(true)
+  }
+
+  function handleSave() {
+    const name = form.name.trim()
+    if (!name) return
+    if (editId) {
+      updateGuest(editId, { name, email: form.email.trim(), phone: form.phone.trim(), idNumber: form.idNumber.trim() })
+      logAudit({ category: 'guest', action: 'edit', summary: `แก้ไขข้อมูลลูกค้า "${name}"`, entityId: editId })
+      toast.success(`บันทึกข้อมูล "${name}" แล้ว`)
+    } else {
+      addGuest({
+        name,
+        email: form.email.trim(),
+        phone: form.phone.trim(),
+        nationality: 'ไทย',
+        idNumber: form.idNumber.trim(),
+        preferences: { pillow: null, floor: null, foodAllergies: [], specialRequests: [], smokingRoom: false, bedType: null },
+        totalStays: 0,
+        totalSpend: 0,
+        joinedAt: new Date().toISOString(),
+      })
+      logAudit({ category: 'guest', action: 'add', summary: `เพิ่มลูกค้า "${name}"` })
+      toast.success(`เพิ่มลูกค้า "${name}" แล้ว`)
+    }
+    setForm(emptyGuestForm)
+    setEditId(null)
     setShowForm(false)
   }
 
@@ -55,7 +76,7 @@ export default function GuestsPage() {
             />
           </div>
           <button
-            onClick={() => { setForm(emptyGuestForm); setShowForm(true) }}
+            onClick={openAdd}
             className="shrink-0 flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium transition-colors"
           >
             <UserPlus size={16} /> เพิ่มข้อมูลลูกค้า
@@ -71,10 +92,17 @@ export default function GuestsPage() {
                     <div className="w-11 h-11 rounded-full bg-slate-200 flex items-center justify-center font-bold text-slate-600 text-lg">
                       {guest.name.charAt(0)}
                     </div>
-                    <div>
+                    <div className="flex-1 min-w-0">
                       <div className="font-semibold text-slate-800">{guest.name}</div>
                       <div className="text-xs text-slate-500">{guest.nationality}</div>
                     </div>
+                    <button
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); openEdit(guest) }}
+                      title="แก้ไขข้อมูล"
+                      className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-amber-600 transition-colors"
+                    >
+                      <Pencil size={15} />
+                    </button>
                   </div>
                   <div className="space-y-1.5 text-sm text-slate-600 mb-3">
                     <div>{guest.email}</div>
@@ -106,7 +134,7 @@ export default function GuestsPage() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
-              <h2 className="font-semibold text-slate-800">เพิ่มข้อมูลลูกค้า</h2>
+              <h2 className="font-semibold text-slate-800">{editId ? 'แก้ไขข้อมูลลูกค้า' : 'เพิ่มข้อมูลลูกค้า'}</h2>
               <button onClick={() => setShowForm(false)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
@@ -148,7 +176,7 @@ export default function GuestsPage() {
             <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100">
               <button onClick={() => setShowForm(false)} className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>
               <button
-                onClick={handleAddGuest}
+                onClick={handleSave}
                 disabled={!form.name.trim()}
                 className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors"
               >
