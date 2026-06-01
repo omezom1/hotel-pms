@@ -1,18 +1,18 @@
 'use client'
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import { supabaseStorage } from './supabase-storage'
+import { supabaseStorage, registerStateApplier } from './supabase-storage'
 import type {
   Room, Guest, Booking, Invoice, InvoiceItem, InvoiceStatus, HousekeepingTask,
   MaintenanceLog, Staff, RoomStatus, BookingStatus, HousekeepingStatus, MaintenanceStatus,
   InventoryItem, InventoryTransaction, CorporateAccount, CorporateTransaction,
-  AddOnItem, BookingAddOn, AuditLog, AuditCategory, Expense
+  AddOnItem, BookingAddOn, AuditLog, AuditCategory, Expense, User
 } from '@/types'
 import { useAuthStore } from './auth-store'
 import { calcAddOnTotal, calcOutstanding, roomHasConflict } from './utils'
 import {
   mockRooms, mockGuests, mockBookings, mockInvoices,
-  mockHousekeepingTasks, mockMaintenanceLogs, mockStaff,
+  mockHousekeepingTasks, mockMaintenanceLogs, mockStaff, mockUsers,
   mockInventoryItems, mockInventoryTransactions, mockCorporateAccounts, mockCorporateTransactions,
   mockAddOnItems, mockBookingAddOns, mockExpenses, mockDynamicPricing, shiftMockDates
 } from './mock-data'
@@ -25,6 +25,7 @@ interface HotelStore {
   housekeepingTasks: HousekeepingTask[]
   maintenanceLogs: MaintenanceLog[]
   staff: Staff[]
+  users: User[]
   inventoryItems: InventoryItem[]
   inventoryTransactions: InventoryTransaction[]
   corporateAccounts: CorporateAccount[]
@@ -44,6 +45,12 @@ interface HotelStore {
   addExpense: (expense: Omit<Expense, 'id' | 'createdAt'>) => void
   updateExpense: (id: string, updates: Partial<Omit<Expense, 'id' | 'createdAt'>>) => void
   deleteExpense: (id: string) => void
+
+  // User / account actions (บัญชีผู้ใช้เก็บบน cloud — login เช็คกับชุดนี้)
+  addUser: (user: Omit<User, 'id'>) => { ok: boolean; error?: string }
+  updateUser: (id: string, updates: Partial<Omit<User, 'id'>>) => { ok: boolean; error?: string }
+  deleteUser: (id: string) => void
+  recordLogin: (userId: string) => void
 
   // Room actions
   updateRoomStatus: (roomId: string, status: RoomStatus) => void
@@ -105,6 +112,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   housekeepingTasks: shiftMockDates(mockHousekeepingTasks),
   maintenanceLogs: shiftMockDates(mockMaintenanceLogs),
   staff: mockStaff,
+  users: mockUsers,
   inventoryItems: shiftMockDates(mockInventoryItems),
   inventoryTransactions: shiftMockDates(mockInventoryTransactions),
   corporateAccounts: mockCorporateAccounts,
@@ -823,6 +831,44 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       expenses: state.expenses.filter((e) => e.id !== id),
     })),
 
+  // ===== User / account actions =====
+  addUser: (userData) => {
+    const state = get()
+    const username = userData.username.trim()
+    if (!username) return { ok: false, error: 'ต้องระบุชื่อผู้ใช้' }
+    if (!userData.password) return { ok: false, error: 'ต้องระบุรหัสผ่าน' }
+    if (state.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
+      return { ok: false, error: 'ชื่อผู้ใช้นี้ถูกใช้แล้ว' }
+    }
+    const newUser: User = { ...userData, username, id: `u${Date.now()}` }
+    set((s) => ({ users: [...s.users, newUser] }))
+    return { ok: true }
+  },
+
+  updateUser: (id, updates) => {
+    const state = get()
+    if (updates.username !== undefined) {
+      const username = updates.username.trim()
+      if (!username) return { ok: false, error: 'ต้องระบุชื่อผู้ใช้' }
+      if (state.users.some((u) => u.id !== id && u.username.toLowerCase() === username.toLowerCase())) {
+        return { ok: false, error: 'ชื่อผู้ใช้นี้ถูกใช้แล้ว' }
+      }
+      updates = { ...updates, username }
+    }
+    set((s) => ({ users: s.users.map((u) => (u.id === id ? { ...u, ...updates } : u)) }))
+    return { ok: true }
+  },
+
+  deleteUser: (id) =>
+    set((state) => ({ users: state.users.filter((u) => u.id !== id) })),
+
+  recordLogin: (userId) =>
+    set((state) => ({
+      users: state.users.map((u) =>
+        u.id === userId ? { ...u, lastLogin: new Date().toISOString() } : u
+      ),
+    })),
+
   // สำรองข้อมูล: คืนเฉพาะ state ที่เป็นข้อมูล (ตัด function ออก)
   exportData: () => {
     const s = get() as unknown as Record<string, unknown>
@@ -1035,3 +1081,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     useHotelStore.setState({ _hasHydrated: true })
   },
 }))
+
+// ให้ adapter อัปเดต state ในเครื่องเมื่อ merge (CAS conflict) สำเร็จ
+// (ลงทะเบียนที่นี่เพื่อเลี่ยง import วนใน lib/supabase-storage)
+registerStateApplier((state) => useHotelStore.setState(state as never))

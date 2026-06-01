@@ -6,7 +6,7 @@ import GlobalSearch from '@/components/GlobalSearch'
 import { useAuthStore } from '@/lib/auth-store'
 import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
-import { CLIENT_ID, applyRemoteState } from '@/lib/supabase-storage'
+import { CLIENT_ID, applyRemoteState, setLastSeenVersion } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
 import { toast } from 'sonner'
 
@@ -33,7 +33,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'app_state', filter: `id=eq.${STORE_KEY}` },
         (payload) => {
-          const row = payload.new as { data?: Record<string, unknown> } | null
+          const row = payload.new as { data?: Record<string, unknown>; version?: number } | null
+          // อัปเดตเลข version ที่จำไว้เสมอ (รวม echo ของเราเอง) เพื่อให้ CAS ครั้งหน้าใช้ฐานล่าสุด
+          if (typeof row?.version === 'number') setLastSeenVersion(row.version)
           const data = row?.data
           // ข้าม event ที่เกิดจากการเขียนของแท็บนี้เอง (echo)
           if (!data || data._writer === CLIENT_ID) return

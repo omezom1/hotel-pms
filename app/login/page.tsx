@@ -3,6 +3,7 @@ import { Suspense, useState, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { LogIn, Eye, EyeOff, AlertCircle } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
+import { useHotelStore } from '@/lib/store'
 
 const demoAccounts = [
   { username: 'admin',      password: 'admin123',  role: 'ผู้ดูแลระบบ',     desc: 'เข้าถึงทุกเมนู' },
@@ -18,6 +19,9 @@ function LoginForm() {
   const next = searchParams.get('next') || '/dashboard'
 
   const { user, hydrated, login } = useAuthStore()
+  // บัญชีผู้ใช้อยู่บน cloud (hotel store, โหลด async) — ต้องรอ hydrate ก่อนถึงจะ login ได้
+  // ไม่งั้นจะตรวจกับ seed ชั่วคราวแล้วผลเพี้ยน
+  const accountsReady = useHotelStore((s) => s._hasHydrated)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -32,6 +36,10 @@ function LoginForm() {
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
+    if (!accountsReady) {
+      setError('กำลังโหลดข้อมูลบัญชีจากคลาวด์ กรุณารอสักครู่…')
+      return
+    }
     setSubmitting(true)
     const result = login(username, password)
     if (result.ok) {
@@ -109,11 +117,11 @@ function LoginForm() {
 
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || !accountsReady}
             className="w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:bg-amber-300 text-slate-900 font-semibold py-2.5 rounded-lg transition-colors"
           >
             <LogIn size={18} />
-            {submitting ? 'กำลังเข้าสู่ระบบ…' : 'เข้าสู่ระบบ'}
+            {!accountsReady ? 'กำลังโหลดบัญชีจากคลาวด์…' : submitting ? 'กำลังเข้าสู่ระบบ…' : 'เข้าสู่ระบบ'}
           </button>
         </form>
 
