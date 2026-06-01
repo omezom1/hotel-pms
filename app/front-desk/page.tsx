@@ -6,6 +6,7 @@ import Header from '@/components/layout/Header'
 import { formatCurrency, formatDate, getBookingSourceLabel, getRoomTypeLabel, calcBookingTotal, todayLocal, getGuestDisplayName, calcOutstanding } from '@/lib/utils'
 import type { PaymentMethod } from '@/types'
 import { BedDouble, UserPlus, CheckCircle2, Clock, AlertTriangle, LogIn, X } from 'lucide-react'
+import CheckoutConfirmDialog from '@/components/CheckoutConfirmDialog'
 import { toast } from 'sonner'
 
 export default function FrontDeskPage() {
@@ -22,6 +23,7 @@ export default function FrontDeskPage() {
   const [payDialog, setPayDialog] = useState<{ bookingId: string; outstanding: number } | null>(null)
   const [payAmount, setPayAmount] = useState(0)
   const [payMethod, setPayMethod] = useState<PaymentMethod>('cash')
+  const [checkoutTarget, setCheckoutTarget] = useState<{ bookingId: string; gName: string; roomNo: string; outstanding: number } | null>(null)
 
   function outstandingOf(bookingId: string) {
     const b = bookings.find((x) => x.id === bookingId)
@@ -60,14 +62,22 @@ export default function FrontDeskPage() {
   }
 
   function handleCheckOut(bookingId: string) {
-    const b = bookings.find((x) => x.id === bookingId)
-    const g = b?.guestId ? guests.find((x) => x.id === b.guestId) : null
-    const r = rooms.find((x) => x.id === b?.roomId)
     const outstanding = outstandingOf(bookingId)
     if (outstanding > 0) {
-      if (!confirm(`แขกยังค้างชำระ ${formatCurrency(outstanding)}\nยืนยันเช็คเอาต์โดยไม่เก็บเงิน?`)) return
+      // ยังค้างชำระ → เปิด modal ให้เลือก รับชำระก่อน / เช็คเอาต์ทั้งที่ค้าง
+      const b = bookings.find((x) => x.id === bookingId)
+      const gName = b ? getGuestDisplayName(b, guests) : '-'
+      const roomNo = rooms.find((x) => x.id === b?.roomId)?.number ?? '-'
+      setCheckoutTarget({ bookingId, gName, roomNo, outstanding })
+      return
     }
-    const gName = b ? getGuestDisplayName(b, guests) : (g?.name ?? '-')
+    doCheckOut(bookingId)
+  }
+
+  function doCheckOut(bookingId: string) {
+    const b = bookings.find((x) => x.id === bookingId)
+    const r = rooms.find((x) => x.id === b?.roomId)
+    const gName = b ? getGuestDisplayName(b, guests) : '-'
     updateBookingStatus(bookingId, 'checked_out')
     logAudit({ category: 'booking', action: 'check_out', summary: `เช็คเอาต์ ${gName} ห้อง ${r?.number ?? '-'}`, entityId: bookingId })
     toast.success(`เช็คเอาต์สำเร็จ — ${gName}`, {
@@ -488,6 +498,25 @@ export default function FrontDeskPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {checkoutTarget && (
+        <CheckoutConfirmDialog
+          guestName={checkoutTarget.gName}
+          roomNumber={checkoutTarget.roomNo}
+          outstanding={checkoutTarget.outstanding}
+          onClose={() => setCheckoutTarget(null)}
+          onPayFirst={() => {
+            setPayDialog({ bookingId: checkoutTarget.bookingId, outstanding: checkoutTarget.outstanding })
+            setPayAmount(checkoutTarget.outstanding)
+            setPayMethod('cash')
+            setCheckoutTarget(null)
+          }}
+          onProceed={() => {
+            doCheckOut(checkoutTarget.bookingId)
+            setCheckoutTarget(null)
+          }}
+        />
       )}
     </div>
   )

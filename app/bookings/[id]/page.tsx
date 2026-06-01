@@ -8,6 +8,7 @@ import { formatCurrency, formatDate, formatDateTime, getBookingStatusLabel, getB
 import type { BookingStatus, PaymentMethod } from '@/types'
 import Link from 'next/link'
 import { ArrowLeft, User, BedDouble, CalendarDays, CreditCard, MessageSquare, ShoppingBag, Plus, X, Ban, Banknote } from 'lucide-react'
+import CheckoutConfirmDialog from '@/components/CheckoutConfirmDialog'
 import { toast } from 'sonner'
 
 const statusColors: Record<BookingStatus, string> = {
@@ -40,6 +41,7 @@ export default function BookingDetailPage() {
   const [newRoomId, setNewRoomId] = useState('')
   const [editDialog, setEditDialog] = useState(false)
   const [editForm, setEditForm] = useState({ adults: 1, children: 0, source: 'direct' as import('@/types').BookingSource, specialRequests: '' })
+  const [checkoutConfirm, setCheckoutConfirm] = useState(false)
 
   const booking = bookings.find((b) => b.id === id)
   if (!booking) return <div className="p-8 text-slate-500">ไม่พบข้อมูลการจอง</div>
@@ -87,11 +89,25 @@ export default function BookingDetailPage() {
     const result = extendBooking(id, nights)
     if (result.ok) {
       logAudit({ category: 'booking', action: 'extend', summary: `ขยายการเข้าพักอีก ${nights} คืน`, entityId: id })
-      toast.success(`ขยายการเข้าพักอีก ${nights} คืน`, { description: 'อัพเดทยอดอัตโนมัติ' })
+      // ขยายแล้ว totalAmount เพิ่มแต่ paidAmount เท่าเดิม → เตือนว่าเกิดยอดค้างชำระ
+      const fresh = useHotelStore.getState()
+      const fb = fresh.bookings.find((b) => b.id === id)
+      const out = fb ? fb.totalAmount + calcAddOnTotal(id, fresh.bookingAddOns) - fb.paidAmount : 0
+      toast.success(`ขยายการเข้าพักอีก ${nights} คืน`, {
+        description: out > 0
+          ? `ค่าห้องเพิ่ม → ยอดค้างชำระตอนนี้ ${formatCurrency(out)} อย่าลืมเก็บส่วนต่าง`
+          : 'อัพเดทยอดอัตโนมัติ',
+      })
       setExtendNights(null)
     } else {
       toast.error(result.error ?? 'ขยายไม่สำเร็จ')
     }
+  }
+
+  function doCheckOut() {
+    updateBookingStatus(booking!.id, 'checked_out')
+    logAudit({ category: 'booking', action: 'check_out', summary: `เช็คเอาต์ ${guestDisplayName} ห้อง ${room?.number ?? '-'}`, entityId: booking!.id })
+    toast.success('เช็คเอาต์สำเร็จ', { description: 'สร้างใบแจ้งหนี้ + งานทำความสะอาดอัตโนมัติแล้ว' })
   }
 
   function handleMove() {
@@ -164,11 +180,7 @@ export default function BookingDetailPage() {
                     </button>
                   )}
                   {booking.status === 'checked_in' && (
-                    <button onClick={() => {
-                      updateBookingStatus(booking.id, 'checked_out')
-                      logAudit({ category: 'booking', action: 'check_out', summary: `เช็คเอาต์ ${guestDisplayName} ห้อง ${room?.number ?? '-'}`, entityId: booking.id })
-                      toast.success('เช็คเอาต์สำเร็จ', { description: 'สร้างใบแจ้งหนี้ + งานทำความสะอาดอัตโนมัติแล้ว' })
-                    }}
+                    <button onClick={() => { if (outstanding > 0) setCheckoutConfirm(true); else doCheckOut() }}
                       className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-sm font-medium transition-colors">
                       เช็คเอาต์
                     </button>
@@ -645,6 +657,17 @@ export default function BookingDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {checkoutConfirm && (
+        <CheckoutConfirmDialog
+          guestName={guestDisplayName}
+          roomNumber={room?.number ?? '-'}
+          outstanding={outstanding}
+          onClose={() => setCheckoutConfirm(false)}
+          onPayFirst={() => { setPayForm({ amount: outstanding, method: 'cash' }); setShowPayDialog(true); setCheckoutConfirm(false) }}
+          onProceed={() => { doCheckOut(); setCheckoutConfirm(false) }}
+        />
       )}
     </div>
   )
