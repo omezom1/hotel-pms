@@ -4,11 +4,12 @@ import { useParams } from 'next/navigation'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getBookingStatusLabel, getBookingSourceLabel, getPaymentMethodLabel, getRoomTypeLabel, getGuestDisplayName, roomHasConflict, calcAddOnTotal } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime, getBookingStatusLabel, getBookingSourceLabel, getPaymentMethodLabel, getRoomTypeLabel, getGuestDisplayName, roomHasConflict, calcAddOnTotal, calcOutstanding, todayLocal } from '@/lib/utils'
 import type { BookingStatus, PaymentMethod } from '@/types'
 import Link from 'next/link'
 import { ArrowLeft, User, BedDouble, CalendarDays, CreditCard, MessageSquare, ShoppingBag, Plus, X, Ban, Banknote } from 'lucide-react'
 import CheckoutConfirmDialog from '@/components/CheckoutConfirmDialog'
+import EarlyCheckoutDialog from '@/components/EarlyCheckoutDialog'
 import { toast } from 'sonner'
 
 const statusColors: Record<BookingStatus, string> = {
@@ -30,7 +31,7 @@ const addOnStatusLabels: Record<string, string> = {
 
 export default function BookingDetailPage() {
   const { id } = useParams<{ id: string }>()
-  const { bookings, rooms, guests, addOnItems, bookingAddOns, invoices, updateBookingStatus, cancelBooking, requestAddOn, cancelAddOn, recordPayment, extendBooking, moveBooking, updateBooking, logAudit } = useHotelStore()
+  const { bookings, rooms, guests, addOnItems, bookingAddOns, invoices, updateBookingStatus, cancelBooking, requestAddOn, cancelAddOn, recordPayment, extendBooking, moveBooking, updateBooking, adjustForEarlyCheckout, logAudit } = useHotelStore()
   const { user } = useAuthStore()
   const [showAddOnDialog, setShowAddOnDialog] = useState(false)
   const [addOnForm, setAddOnForm] = useState({ addOnItemId: '', quantity: 1, notes: '' })
@@ -42,6 +43,7 @@ export default function BookingDetailPage() {
   const [editDialog, setEditDialog] = useState(false)
   const [editForm, setEditForm] = useState({ adults: 1, children: 0, source: 'direct' as import('@/types').BookingSource, specialRequests: '' })
   const [checkoutConfirm, setCheckoutConfirm] = useState(false)
+  const [earlyConfirm, setEarlyConfirm] = useState(false)
 
   const booking = bookings.find((b) => b.id === id)
   if (!booking) return <div className="p-8 text-slate-500">ไม่พบข้อมูลการจอง</div>
@@ -67,6 +69,10 @@ export default function BookingDetailPage() {
 
   const selectedAddOnItem = addOnItems.find((a) => a.id === addOnForm.addOnItemId)
   const outstanding = booking.totalAmount + addOnTotal - booking.paidAmount
+  const isEarly = booking.status === 'checked_in' && todayLocal() < booking.checkOut.split('T')[0]
+  const remainingNights = isEarly
+    ? Math.max(1, Math.round((new Date(booking.checkOut.split('T')[0]).getTime() - new Date(todayLocal()).getTime()) / 86400000))
+    : 0
 
   function handleRecordPayment() {
     if (payForm.amount <= 0 || !booking || !user) return
@@ -108,6 +114,32 @@ export default function BookingDetailPage() {
     updateBookingStatus(booking!.id, 'checked_out')
     logAudit({ category: 'booking', action: 'check_out', summary: `เช็คเอาต์ ${guestDisplayName} ห้อง ${room?.number ?? '-'}`, entityId: booking!.id })
     toast.success('เช็คเอาต์สำเร็จ', { description: 'สร้างใบแจ้งหนี้ + งานทำความสะอาดอัตโนมัติแล้ว' })
+  }
+
+  function handleCheckoutClick() {
+    if (isEarly) { setEarlyConfirm(true); return }
+    proceedCheckout()
+  }
+
+  function proceedCheckout() {
+    // อ่าน state สดเสมอ (เผื่อเพิ่งปรับยอดออกก่อนกำหนด)
+    const st = useHotelStore.getState()
+    const fb = st.bookings.find((b) => b.id === id)
+    const out = fb ? calcOutstanding(fb, st.bookingAddOns) : 0
+    if (out > 0) { setCheckoutConfirm(true); return }
+    doCheckOut()
+  }
+
+  function handleEarlyAdjust() {
+    const res = adjustForEarlyCheckout(id)
+    if (res.ok) {
+      logAudit({ category: 'booking', action: 'early_checkout', summary: `ออกก่อนกำหนด — ปรับเป็น ${res.newNights} คืน`, entityId: id })
+      toast.success(`ปรับเป็น ${res.newNights} คืน${res.refunded ? ` · คืนเงิน ${formatCurrency(res.refunded)}` : ''}`)
+    } else {
+      toast.error(res.error ?? 'ปรับยอดไม่สำเร็จ')
+    }
+    setEarlyConfirm(false)
+    proceedCheckout()
   }
 
   function handleMove() {
@@ -180,9 +212,9 @@ export default function BookingDetailPage() {
                     </button>
                   )}
                   {booking.status === 'checked_in' && (
-                    <button onClick={() => { if (outstanding > 0) setCheckoutConfirm(true); else doCheckOut() }}
+                    <button onClick={handleCheckoutClick}
                       className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-sm font-medium transition-colors">
-                      เช็คเอาต์
+                      เช็คเอาต์{isEarly ? ' (ก่อนกำหนด)' : ''}
                     </button>
                   )}
                   {(booking.status === 'confirmed' || booking.status === 'checked_in') && (
@@ -657,6 +689,17 @@ export default function BookingDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {earlyConfirm && (
+        <EarlyCheckoutDialog
+          guestName={guestDisplayName}
+          roomNumber={room?.number ?? '-'}
+          remainingNights={remainingNights}
+          onClose={() => setEarlyConfirm(false)}
+          onAdjust={handleEarlyAdjust}
+          onKeepFull={() => { setEarlyConfirm(false); proceedCheckout() }}
+        />
       )}
 
       {checkoutConfirm && (

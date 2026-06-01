@@ -7,16 +7,18 @@ import { formatCurrency, formatDate, getBookingSourceLabel, getRoomTypeLabel, ca
 import type { PaymentMethod } from '@/types'
 import { BedDouble, UserPlus, CheckCircle2, Clock, AlertTriangle, LogIn, X } from 'lucide-react'
 import CheckoutConfirmDialog from '@/components/CheckoutConfirmDialog'
+import EarlyCheckoutDialog from '@/components/EarlyCheckoutDialog'
 import { toast } from 'sonner'
 
 export default function FrontDeskPage() {
-  const { rooms, guests, bookings, bookingAddOns, updateBookingStatus, createBooking, addGuest, recordPayment, logAudit } = useHotelStore()
+  const { rooms, guests, bookings, bookingAddOns, updateBookingStatus, createBooking, addGuest, recordPayment, adjustForEarlyCheckout, logAudit } = useHotelStore()
   const { user } = useAuthStore()
 
   const [walkInRoomId, setWalkInRoomId] = useState<string | null>(null)
   const [form, setForm] = useState({
     guestId: '', nights: 1, adults: 1, children: 0,
     paymentMethod: 'cash' as PaymentMethod,
+    payMode: 'full' as 'full' | 'deposit', deposit: 0,
   })
   const [newGuestMode, setNewGuestMode] = useState(false)
   const [newGuest, setNewGuest] = useState({ name: '', phone: '', nationality: 'ไทย' })
@@ -24,6 +26,7 @@ export default function FrontDeskPage() {
   const [payAmount, setPayAmount] = useState(0)
   const [payMethod, setPayMethod] = useState<PaymentMethod>('cash')
   const [checkoutTarget, setCheckoutTarget] = useState<{ bookingId: string; gName: string; roomNo: string; outstanding: number } | null>(null)
+  const [earlyTarget, setEarlyTarget] = useState<{ bookingId: string; gName: string; roomNo: string; remaining: number } | null>(null)
 
   function outstandingOf(bookingId: string) {
     const b = bookings.find((x) => x.id === bookingId)
@@ -62,16 +65,42 @@ export default function FrontDeskPage() {
   }
 
   function handleCheckOut(bookingId: string) {
-    const outstanding = outstandingOf(bookingId)
+    const b = bookings.find((x) => x.id === bookingId)
+    // ออกก่อนกำหนด (วันนี้ < วันเช็คเอาต์เดิม) → ถามปรับยอดก่อน
+    if (b && b.status === 'checked_in' && today < b.checkOut.split('T')[0]) {
+      const remaining = Math.max(1, Math.round((new Date(b.checkOut.split('T')[0]).getTime() - new Date(today).getTime()) / 86400000))
+      setEarlyTarget({ bookingId, gName: getGuestDisplayName(b, guests), roomNo: rooms.find((x) => x.id === b.roomId)?.number ?? '-', remaining })
+      return
+    }
+    proceedCheckOut(bookingId)
+  }
+
+  function proceedCheckOut(bookingId: string) {
+    // อ่าน state สดเสมอ (เผื่อเพิ่งปรับยอดออกก่อนกำหนด) เพื่อคำนวณยอดค้างให้ตรง
+    const st = useHotelStore.getState()
+    const b = st.bookings.find((x) => x.id === bookingId)
+    const outstanding = b ? calcOutstanding(b, st.bookingAddOns) : 0
     if (outstanding > 0) {
-      // ยังค้างชำระ → เปิด modal ให้เลือก รับชำระก่อน / เช็คเอาต์ทั้งที่ค้าง
-      const b = bookings.find((x) => x.id === bookingId)
       const gName = b ? getGuestDisplayName(b, guests) : '-'
       const roomNo = rooms.find((x) => x.id === b?.roomId)?.number ?? '-'
       setCheckoutTarget({ bookingId, gName, roomNo, outstanding })
       return
     }
     doCheckOut(bookingId)
+  }
+
+  function handleEarlyAdjust() {
+    if (!earlyTarget) return
+    const res = adjustForEarlyCheckout(earlyTarget.bookingId)
+    if (res.ok) {
+      logAudit({ category: 'booking', action: 'early_checkout', summary: `ออกก่อนกำหนด — ปรับเป็น ${res.newNights} คืน`, entityId: earlyTarget.bookingId })
+      toast.success(`ปรับเป็น ${res.newNights} คืน${res.refunded ? ` · คืนเงิน ${formatCurrency(res.refunded)}` : ''}`)
+    } else {
+      toast.error(res.error ?? 'ปรับยอดไม่สำเร็จ')
+    }
+    const id = earlyTarget.bookingId
+    setEarlyTarget(null)
+    proceedCheckOut(id)
   }
 
   function doCheckOut(bookingId: string) {
@@ -136,6 +165,8 @@ export default function FrontDeskPage() {
     const checkIn = new Date().toISOString()
     const checkOut = new Date(Date.now() + form.nights * 86400000).toISOString()
     const total = calcBookingTotal(room.type, checkIn, checkOut, room.pricePerNight)
+    // ชำระเต็ม หรือ มัดจำ (ระบุยอด, clamp ไม่ให้เกินยอดรวม/ติดลบ) — ที่เหลือเป็นยอดค้างชำระ
+    const paid = form.payMode === 'deposit' ? Math.min(Math.max(0, form.deposit), total) : total
     const result = createBooking({
       roomId: walkInRoomId,
       guestId,
@@ -145,7 +176,7 @@ export default function FrontDeskPage() {
       status: 'checked_in',
       source: 'walk_in',
       totalAmount: total,
-      paidAmount: total,
+      paidAmount: paid,
       adults: form.adults,
       children: form.children,
       specialRequests: '',
@@ -156,7 +187,7 @@ export default function FrontDeskPage() {
       return
     }
     setWalkInRoomId(null)
-    setForm({ guestId: '', nights: 1, adults: 1, children: 0, paymentMethod: 'cash' })
+    setForm({ guestId: '', nights: 1, adults: 1, children: 0, paymentMethod: 'cash', payMode: 'full', deposit: 0 })
     setNewGuestMode(false)
     setNewGuest({ name: '', phone: '', nationality: 'ไทย' })
     const guestName = guests.find((x) => x.id === guestId)?.name ?? newGuest.name ?? '-'
@@ -341,7 +372,7 @@ export default function FrontDeskPage() {
                                 setWalkInRoomId(null)
                               } else {
                                 setWalkInRoomId(room.id)
-                                setForm({ guestId: '', nights: 1, adults: 1, children: 0, paymentMethod: 'cash' })
+                                setForm({ guestId: '', nights: 1, adults: 1, children: 0, paymentMethod: 'cash', payMode: 'full', deposit: 0 })
                                 setNewGuestMode(true)
                                 setNewGuest({ name: '', phone: '', nationality: 'ไทย' })
                               }
@@ -430,12 +461,47 @@ export default function FrontDeskPage() {
                                 <option value="bank_transfer">โอน</option>
                               </select>
                             </div>
-                            <div className="flex items-center justify-between bg-amber-100 rounded-lg px-3 py-2">
-                              <span className="text-xs text-amber-700">รวม {form.nights} คืน</span>
-                              <span className="font-bold text-amber-800">
-                                {formatCurrency(calcBookingTotal(room.type, new Date().toISOString(), new Date(Date.now() + form.nights * 86400000).toISOString(), room.pricePerNight))}
-                              </span>
-                            </div>
+                            {(() => {
+                              const total = calcBookingTotal(room.type, new Date().toISOString(), new Date(Date.now() + form.nights * 86400000).toISOString(), room.pricePerNight)
+                              const paid = form.payMode === 'deposit' ? Math.min(Math.max(0, form.deposit), total) : total
+                              const due = total - paid
+                              return (
+                                <>
+                                  <div>
+                                    <label className="block text-[11px] text-slate-500 mb-0.5">การชำระ</label>
+                                    <div className="flex gap-1 bg-slate-100 p-1 rounded-lg">
+                                      {([['full', 'ชำระเต็ม'], ['deposit', 'มัดจำ']] as const).map(([mode, label]) => (
+                                        <button key={mode} type="button"
+                                          onClick={() => setForm({ ...form, payMode: mode, deposit: mode === 'deposit' ? form.deposit : 0 })}
+                                          className={`flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${form.payMode === mode ? 'bg-white shadow-sm text-slate-800' : 'text-slate-500'}`}>
+                                          {label}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                  {form.payMode === 'deposit' && (
+                                    <div>
+                                      <label className="block text-[11px] text-slate-500 mb-0.5">เงินมัดจำ (บาท)</label>
+                                      <input type="number" min={0} max={total} value={form.deposit || ''}
+                                        onChange={(e) => setForm({ ...form, deposit: Math.max(0, +e.target.value) })}
+                                        placeholder="0" className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
+                                    </div>
+                                  )}
+                                  <div className="bg-amber-100 rounded-lg px-3 py-2 space-y-0.5">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-xs text-amber-700">รวม {form.nights} คืน</span>
+                                      <span className="font-bold text-amber-800">{formatCurrency(total)}</span>
+                                    </div>
+                                    {form.payMode === 'deposit' && (
+                                      <div className="flex items-center justify-between text-xs">
+                                        <span className="text-amber-700">ค้างชำระหลังมัดจำ</span>
+                                        <span className="font-semibold text-amber-800">{formatCurrency(due)}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </>
+                              )
+                            })()}
                             <button
                               onClick={handleWalkIn}
                               disabled={(newGuestMode ? !newGuest.name : !form.guestId) || form.adults + form.children > room.maxGuests}
@@ -498,6 +564,17 @@ export default function FrontDeskPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {earlyTarget && (
+        <EarlyCheckoutDialog
+          guestName={earlyTarget.gName}
+          roomNumber={earlyTarget.roomNo}
+          remainingNights={earlyTarget.remaining}
+          onClose={() => setEarlyTarget(null)}
+          onAdjust={handleEarlyAdjust}
+          onKeepFull={() => { const id = earlyTarget.bookingId; setEarlyTarget(null); proceedCheckOut(id) }}
+        />
       )}
 
       {checkoutTarget && (

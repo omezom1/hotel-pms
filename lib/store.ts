@@ -9,7 +9,7 @@ import type {
   AddOnItem, BookingAddOn, AuditLog, AuditCategory, Expense, User
 } from '@/types'
 import { useAuthStore } from './auth-store'
-import { calcAddOnTotal, calcOutstanding, roomHasConflict } from './utils'
+import { calcAddOnTotal, calcOutstanding, roomHasConflict, todayLocal } from './utils'
 import {
   mockRooms, mockGuests, mockBookings, mockInvoices,
   mockHousekeepingTasks, mockMaintenanceLogs, mockStaff, mockUsers,
@@ -67,6 +67,7 @@ interface HotelStore {
   updateBooking: (bookingId: string, updates: Partial<Pick<Booking, 'adults' | 'children' | 'source' | 'specialRequests' | 'paymentMethod'>>) => void
   extendBooking: (bookingId: string, additionalNights: number) => { ok: boolean; error?: string }
   moveBooking: (bookingId: string, newRoomId: string) => { ok: boolean; error?: string }
+  adjustForEarlyCheckout: (bookingId: string) => { ok: boolean; error?: string; newNights?: number; newTotal?: number; refunded?: number }
 
   // Data backup / restore
   exportData: () => Record<string, unknown>
@@ -560,6 +561,43 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       housekeepingTasks: newTask ? [...s.housekeepingTasks, newTask] : s.housekeepingTasks,
     }))
     return { ok: true }
+  },
+
+  adjustForEarlyCheckout: (bookingId) => {
+    const state = get()
+    const b = state.bookings.find((x) => x.id === bookingId)
+    if (!b) return { ok: false, error: 'ไม่พบการจอง' }
+    if (b.status !== 'checked_in') return { ok: false, error: 'ปรับยอดได้เฉพาะการจองที่เช็คอินอยู่' }
+    // จำนวนคืนจริง = วันนี้ − วันเช็คอิน (อย่างน้อย 1 คืน)
+    const checkInKey = b.checkIn.split('T')[0]
+    const ms = new Date(todayLocal()).getTime() - new Date(checkInKey).getTime()
+    const actualNights = Math.max(1, Math.round(ms / 86400000))
+    if (actualNights >= b.nights) return { ok: false, error: 'ยังไม่ถึงกำหนด — ไม่ใช่การออกก่อนกำหนด' }
+
+    const avgNightly = b.nights > 0 ? b.totalAmount / b.nights : b.totalAmount
+    const newTotal = Math.round(avgNightly * actualNights)
+    const now = new Date().toISOString()
+    // จ่ายมาเกินยอดใหม่ → คืนเงินส่วนเกิน (บันทึก payment ติดลบ เหมือน flow ยกเลิก)
+    const overpaid = Math.max(0, b.paidAmount - newTotal)
+    const refundPayment: import('@/types').Payment | null = overpaid > 0
+      ? { id: `pay${Date.now()}`, amount: -overpaid, method: b.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการออกก่อนกำหนด' }
+      : null
+
+    set((s) => ({
+      bookings: s.bookings.map((x) =>
+        x.id === bookingId
+          ? {
+              ...x,
+              nights: actualNights,
+              checkOut: now,
+              totalAmount: newTotal,
+              paidAmount: Math.min(x.paidAmount, newTotal),
+              payments: refundPayment ? [...(x.payments ?? []), refundPayment] : x.payments,
+            }
+          : x
+      ),
+    }))
+    return { ok: true, newNights: actualNights, newTotal, refunded: overpaid }
   },
 
   addGuest: (guestData) => {
