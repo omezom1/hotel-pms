@@ -55,11 +55,12 @@ export default function Sidebar() {
     router.replace('/login')
   }
 
-  function handleReset() {
-    if (!confirm('ล้างข้อมูลทั้งหมดและโหลดข้อมูลตัวอย่างใหม่?\n(การกระทำนี้ย้อนกลับไม่ได้)')) return
-    localStorage.removeItem('hotel-pms-storage')
+  async function handleReset() {
+    if (!confirm('ล้างข้อมูลทั้งหมดบนคลาวด์และโหลดข้อมูลตัวอย่างใหม่?\n(ย้อนกลับไม่ได้ และมีผลกับทุกเครื่องที่ใช้ระบบนี้)')) return
+    // ข้อมูลอยู่บน Supabase แล้ว — ต้องลบแถว state บนคลาวด์ (ไม่ใช่ localStorage ที่เลิกใช้)
+    await useHotelStore.persist.clearStorage()
     toast.success('ล้างข้อมูลแล้ว กำลังโหลดใหม่...')
-    setTimeout(() => window.location.reload(), 500)
+    setTimeout(() => window.location.reload(), 600)
   }
 
   // สำรองข้อมูลทั้งระบบเป็นไฟล์ JSON

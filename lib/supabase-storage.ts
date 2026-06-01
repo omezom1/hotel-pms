@@ -76,6 +76,20 @@ export function registerStateApplier(fn: StateApplier) {
   stateApplier = fn
 }
 
+/**
+ * แจ้งเตือนเมื่อเขียนขึ้น cloud ไม่สำเร็จ (เน็ตหลุด/ชน version แก้ไม่ได้)
+ * AppShell ลงทะเบียน handler ที่ขึ้น toast ให้ผู้ใช้รู้ว่างานยังไม่ถูกบันทึก
+ */
+type SaveErrorHandler = (message: string) => void
+let saveErrorHandler: SaveErrorHandler | null = null
+export function registerSaveErrorHandler(fn: SaveErrorHandler) {
+  saveErrorHandler = fn
+}
+function reportSaveError(context: string, message: string) {
+  console.error(`[supabaseStorage] ${context}:`, message)
+  saveErrorHandler?.(message)
+}
+
 /** envelope ที่ zustand persist เก็บ: { state, version } (version นี้คือของ zustand migration ไม่ใช่ของแถว) */
 type Envelope = { state?: Record<string, unknown>; version?: number; _writer?: string }
 
@@ -161,7 +175,7 @@ export const supabaseStorage: StateStorage = {
       const { error } = await supabase
         .from(TABLE)
         .upsert({ id: name, data: row, updated_at: now })
-      if (error) console.error('[supabaseStorage] setItem (legacy):', error.message)
+      if (error) reportSaveError('setItem (legacy)', error.message)
       return
     }
 
@@ -176,7 +190,7 @@ export const supabaseStorage: StateStorage = {
       }
       // 23505 = unique violation → มีคนสร้างแถวไปแล้ว ถือเป็น conflict
       if (error.code !== '23505') {
-        console.error('[supabaseStorage] setItem insert:', error.message)
+        reportSaveError('setItem insert', error.message)
         return
       }
     } else {
@@ -190,7 +204,7 @@ export const supabaseStorage: StateStorage = {
         .eq('version', expected)
         .select('version')
       if (error) {
-        console.error('[supabaseStorage] setItem update:', error.message)
+        reportSaveError('setItem update', error.message)
         return
       }
       if (data && data.length > 0) {
@@ -209,7 +223,7 @@ export const supabaseStorage: StateStorage = {
         .eq('id', name)
         .maybeSingle()
       if (fetchErr || !latest) {
-        console.error('[supabaseStorage] setItem merge-fetch:', fetchErr?.message)
+        reportSaveError('setItem merge-fetch', fetchErr?.message ?? 'ไม่พบข้อมูลล่าสุด')
         return
       }
       const remoteEnvelope = (latest.data ?? {}) as Envelope
@@ -227,7 +241,7 @@ export const supabaseStorage: StateStorage = {
         .eq('version', remoteVersion)
         .select('version')
       if (writeErr) {
-        console.error('[supabaseStorage] setItem merge-write:', writeErr.message)
+        reportSaveError('setItem merge-write', writeErr.message)
         return
       }
       if (wrote && wrote.length > 0) {
@@ -238,7 +252,7 @@ export const supabaseStorage: StateStorage = {
       }
       // ยังชนอีก (มีคนเขียนแซงระหว่าง merge) → วนใหม่
     }
-    console.warn('[supabaseStorage] setItem: merge ไม่สำเร็จหลังลอง', MAX_MERGE_RETRY, 'รอบ')
+    reportSaveError('setItem merge', `ชนกันต่อเนื่องเกิน ${MAX_MERGE_RETRY} รอบ — ยังบันทึกไม่สำเร็จ`)
   },
 
   removeItem: async (name) => {

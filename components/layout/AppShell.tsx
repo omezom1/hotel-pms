@@ -1,12 +1,12 @@
 'use client'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import Sidebar from './Sidebar'
 import GlobalSearch from '@/components/GlobalSearch'
 import { useAuthStore } from '@/lib/auth-store'
 import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
-import { CLIENT_ID, applyRemoteState, setLastSeenVersion } from '@/lib/supabase-storage'
+import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
 import { toast } from 'sonner'
 
@@ -18,6 +18,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const { user, hydrated } = useAuthStore()
   // hotel store ใช้ Supabase storage (async) + skipHydration → ต้องสั่ง rehydrate เอง
   const hotelHydrated = useHotelStore((s) => s._hasHydrated)
+  const [loadTimedOut, setLoadTimedOut] = useState(false)
 
   const isAuthRoute = pathname?.startsWith('/login')
 
@@ -26,6 +27,14 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   // (ลดความเสี่ยง last-write-wins ที่งานของกันและกันหายเมื่อเปิดหลายที่พร้อมกัน)
   useEffect(() => {
     useHotelStore.persist.rehydrate()
+
+    // เขียนขึ้น cloud ไม่สำเร็จ → เตือนผู้ใช้ (ไม่งั้นงานหายเงียบ ๆ)
+    registerSaveErrorHandler((msg) =>
+      toast.error('บันทึกขึ้นคลาวด์ไม่สำเร็จ', {
+        description: `${msg} — ข้อมูลล่าสุดอาจยังไม่ถูกบันทึก ลองทำรายการอีกครั้ง`,
+        duration: 7000,
+      })
+    )
 
     const channel = supabase
       .channel('app_state-sync')
@@ -52,6 +61,13 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(channel)
     }
   }, [])
+
+  // ถ้าโหลดข้อมูลคลาวด์นานผิดปกติ (เน็ตหลุด/Supabase ล่ม) → แสดงปุ่มลองใหม่ ไม่ค้างถาวร
+  useEffect(() => {
+    if (hotelHydrated) { setLoadTimedOut(false); return }
+    const t = setTimeout(() => setLoadTimedOut(true), 12000)
+    return () => clearTimeout(t)
+  }, [hotelHydrated])
 
   // AuthGuard: redirect ไป /login ถ้ายังไม่ login
   useEffect(() => {
@@ -81,8 +97,19 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   // ต้องรอ cloud ให้เสร็จก่อน ไม่งั้น component จะเห็น mock state แล้ว action จะเขียนทับ cloud
   if (!hydrated || !hotelHydrated) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+      <div className="min-h-screen flex flex-col items-center justify-center gap-3 bg-slate-50">
         <div className="text-slate-500 text-sm">กำลังโหลดข้อมูลจากคลาวด์…</div>
+        {loadTimedOut && (
+          <div className="text-center">
+            <div className="text-xs text-slate-400 mb-2">ใช้เวลานานผิดปกติ — อาจเชื่อมต่อคลาวด์ไม่ได้</div>
+            <button
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-slate-900 text-sm font-medium rounded-lg"
+            >
+              ลองใหม่
+            </button>
+          </div>
+        )}
       </div>
     )
   }
