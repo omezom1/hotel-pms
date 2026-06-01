@@ -52,6 +52,9 @@ interface HotelStore {
   deleteUser: (id: string) => void
   recordLogin: (userId: string) => void
 
+  // Staff actions
+  updateStaff: (id: string, updates: Partial<Omit<Staff, 'id'>>) => void
+
   // Room actions
   updateRoomStatus: (roomId: string, status: RoomStatus) => void
 
@@ -869,17 +872,37 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       ),
     })),
 
+  updateStaff: (id, updates) =>
+    set((state) => ({
+      staff: state.staff.map((s) => (s.id === id ? { ...s, ...updates } : s)),
+    })),
+
   // สำรองข้อมูล: คืนเฉพาะ state ที่เป็นข้อมูล (ตัด function ออก)
+  // หมายเหตุ: ตัดรหัสผ่านออกจาก users — ไฟล์ backup ไม่ควรมี plaintext password
   exportData: () => {
     const s = get() as unknown as Record<string, unknown>
     const data: Record<string, unknown> = {}
     for (const k of Object.keys(s)) {
       if (typeof s[k] !== 'function') data[k] = s[k]
     }
+    if (Array.isArray(data.users)) {
+      data.users = (data.users as User[]).map(({ password, ...rest }) => rest)
+    }
     return data
   },
   // กู้คืนข้อมูล: เขียนทับ state ด้วยข้อมูลจากไฟล์ (เก็บ function เดิมไว้)
-  importData: (data) => set(() => ({ ...(data as Partial<HotelStore>) })),
+  // users ในไฟล์ไม่มี password (ถูกตัดตอน export) → คงรหัสเดิมของ id ที่ตรงกันไว้
+  // (restore บนเครื่องเดิม login ต่อได้; ถ้า restore ขึ้น env ใหม่ admin ต้องตั้งรหัสใหม่)
+  importData: (data) =>
+    set((state) => {
+      const incoming = data as Partial<HotelStore>
+      if (Array.isArray(incoming.users)) {
+        incoming.users = incoming.users.map((u) =>
+          u.password ? u : { ...u, password: state.users.find((c) => c.id === u.id)?.password ?? '' }
+        )
+      }
+      return { ...incoming }
+    }),
 
   recordPayment: (bookingId, amount, method, staffId, notes) => {
     const state = get()

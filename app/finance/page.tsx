@@ -44,6 +44,8 @@ const emptyCorpForm = {
 export default function FinancePage() {
   const { invoices, bookings, guests, corporateAccounts, corporateTransactions, bookingAddOns, addCorporateAccount, depositToAccount, logAudit } = useHotelStore()
   const { user } = useAuthStore()
+  // หน้านี้เข้าได้ด้วย canViewFinance แต่ "จัดการ" (เพิ่มบัญชี/ฝากเงิน) ต้องมี canManageFinance
+  const canManageFinance = user?.staff.permissions.canManageFinance ?? false
   const [activeTab, setActiveTab] = useState<'overview' | 'invoices' | 'corporate'>('overview')
   // ช่วงวันที่สำหรับกรองตอนส่งออกใบแจ้งหนี้ (ตามวันที่ออกใบ)
   const [exportFrom, setExportFrom] = useState('')
@@ -317,14 +319,16 @@ export default function FinancePage() {
             </div>
 
             {/* Table + add button */}
-            <div className="flex justify-end">
-              <button
-                onClick={() => { setCorpForm(emptyCorpForm); setShowCorpForm(true) }}
-                className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium transition-colors"
-              >
-                <Plus size={16} /> เพิ่มบัญชีองค์กร
-              </button>
-            </div>
+            {canManageFinance && (
+              <div className="flex justify-end">
+                <button
+                  onClick={() => { setCorpForm(emptyCorpForm); setShowCorpForm(true) }}
+                  className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium transition-colors"
+                >
+                  <Plus size={16} /> เพิ่มบัญชีองค์กร
+                </button>
+              </div>
+            )}
 
             <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
               <div className="overflow-x-auto">
@@ -364,12 +368,14 @@ export default function FinancePage() {
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-1">
-                              <button
-                                onClick={() => { setDepositDialog(acc); setDepositAmount(0); setDepositNote('') }}
-                                className="px-2.5 py-1.5 text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg font-medium transition-colors"
-                              >
-                                ฝากเงิน
-                              </button>
+                              {canManageFinance && (
+                                <button
+                                  onClick={() => { setDepositDialog(acc); setDepositAmount(0); setDepositNote('') }}
+                                  className="px-2.5 py-1.5 text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg font-medium transition-colors"
+                                >
+                                  ฝากเงิน
+                                </button>
+                              )}
                               <button
                                 onClick={() => setHistoryAccount(acc)}
                                 title="ประวัติธุรกรรม"

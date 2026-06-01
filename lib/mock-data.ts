@@ -212,7 +212,7 @@ export const mockStaff: Staff[] = [
   {
     id: 's002', name: 'นภา พนักงานต้อนรับ', role: 'receptionist', email: 'napa@hotel.com', phone: '0892345678',
     hireDate: '2021-05-15', isActive: true,
-    permissions: { canViewDashboard: true, canManageBookings: true, canManageGuests: true, canViewFinance: false, canManageFinance: false, canManageRooms: false, canManageStaff: false, canViewReports: false, canManageHousekeeping: false, canManageMaintenance: false, canManageInventory: false, canManageCorporate: true }
+    permissions: { canViewDashboard: true, canManageBookings: true, canManageGuests: true, canViewFinance: false, canManageFinance: false, canManageRooms: false, canManageStaff: false, canViewReports: false, canManageHousekeeping: false, canManageMaintenance: true, canManageInventory: false, canManageCorporate: true }
   },
   {
     id: 's003', name: 'วรรณา นักบัญชี', role: 'accountant', email: 'wanna@hotel.com', phone: '0893456789',

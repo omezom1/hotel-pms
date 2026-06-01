@@ -5,6 +5,7 @@ import Header from '@/components/layout/Header'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import type { Expense, ExpenseCategory } from '@/types'
 import { Plus, X, Pencil, Trash2, AlertTriangle, Receipt } from 'lucide-react'
+import { useAuthStore } from '@/lib/auth-store'
 import { toast } from 'sonner'
 
 const categoryLabels: Record<ExpenseCategory, string> = {
@@ -53,6 +54,8 @@ const emptyForm = {
 
 export default function ExpensesPage() {
   const { expenses, addExpense, updateExpense, deleteExpense, logAudit } = useHotelStore()
+  // ดูได้ด้วย canViewFinance แต่ "จัดการ" (เพิ่ม/แก้/ลบ) ต้องมี canManageFinance
+  const canManage = useAuthStore((s) => s.user?.staff.permissions.canManageFinance ?? false)
   const [month, setMonth] = useState(now.getMonth() + 1)
   const [year, setYear] = useState(now.getFullYear())
   const [showForm, setShowForm] = useState(false)
@@ -146,10 +149,12 @@ export default function ExpensesPage() {
               className="px-3 py-2.5 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-500">
               {years.map((y) => <option key={y} value={y}>{y}</option>)}
             </select>
-            <button onClick={openAdd}
-              className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium transition-colors shrink-0">
-              <Plus size={16} /> เพิ่มรายจ่าย
-            </button>
+            {canManage && (
+              <button onClick={openAdd}
+                className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium transition-colors shrink-0">
+                <Plus size={16} /> เพิ่มรายจ่าย
+              </button>
+            )}
           </div>
         </div>
 
@@ -180,10 +185,14 @@ export default function ExpensesPage() {
                       <td className="px-4 py-3 text-slate-500 text-xs">{e.payee || '-'}</td>
                       <td className="px-4 py-3 font-semibold text-red-600 whitespace-nowrap">{formatCurrency(e.amount)}</td>
                       <td className="px-4 py-3">
-                        <div className="flex items-center gap-1">
-                          <button onClick={() => openEdit(e)} title="แก้ไข" className="p-1.5 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors"><Pencil size={14} /></button>
-                          <button onClick={() => setDeleteTarget(e)} title="ลบ" className="p-1.5 rounded hover:bg-red-50 text-slate-400 hover:text-red-600 transition-colors"><Trash2 size={14} /></button>
-                        </div>
+                        {canManage ? (
+                          <div className="flex items-center gap-1">
+                            <button onClick={() => openEdit(e)} title="แก้ไข" className="p-1.5 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors"><Pencil size={14} /></button>
+                            <button onClick={() => setDeleteTarget(e)} title="ลบ" className="p-1.5 rounded hover:bg-red-50 text-slate-400 hover:text-red-600 transition-colors"><Trash2 size={14} /></button>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-slate-300">—</span>
+                        )}
                       </td>
                     </tr>
                   ))}

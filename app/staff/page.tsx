@@ -4,7 +4,7 @@ import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
 import { formatDate, getStaffRoleLabel } from '@/lib/utils'
-import type { StaffRole } from '@/types'
+import type { StaffRole, StaffPermissions, Staff } from '@/types'
 import { CheckCircle2, XCircle, KeyRound, UserPlus, Trash2, Eye, EyeOff, Save, X, Pencil } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -27,6 +27,8 @@ const permissionLabels: [keyof ReturnType<typeof useHotelStore.getState>['staff'
   ['canViewReports', 'ดูรายงาน'],
   ['canManageHousekeeping', 'จัดการแม่บ้าน'],
   ['canManageMaintenance', 'จัดการซ่อมบำรุง'],
+  ['canManageInventory', 'จัดการคลังสินค้า'],
+  ['canManageCorporate', 'จัดการเครดิตองค์กร'],
 ]
 
 // ===== จัดการบัญชีผู้ใช้ (เก็บบน cloud — แก้ได้ทุกเครื่อง) =====
@@ -207,9 +209,68 @@ function AccountsManager() {
   )
 }
 
+function PermissionEditor({ member, canManageStaff, isSelf }: { member: Staff; canManageStaff: boolean; isSelf: boolean }) {
+  const updateStaff = useHotelStore((s) => s.updateStaff)
+  const logAudit = useHotelStore((s) => s.logAudit)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<StaffPermissions>(member.permissions)
+
+  function start() { setDraft({ ...member.permissions }); setEditing(true) }
+  function toggle(key: keyof StaffPermissions) { setDraft((d) => ({ ...d, [key]: !d[key] })) }
+  function save() {
+    // กันล็อกตัวเอง: ห้ามปิดสิทธิ์จัดการพนักงานของบัญชีตัวเอง (ไม่งั้นเข้าหน้านี้ไม่ได้อีก)
+    if (isSelf && !draft.canManageStaff) {
+      toast.error('ปิดสิทธิ์ "จัดการพนักงาน" ของตัวเองไม่ได้ (จะเข้าหน้านี้ไม่ได้)')
+      return
+    }
+    updateStaff(member.id, { permissions: draft })
+    logAudit({ category: 'auth', action: 'update_permissions', summary: `แก้สิทธิ์ของ ${member.name}`, entityId: member.id })
+    toast.success(`บันทึกสิทธิ์ของ ${member.name} แล้ว`)
+    setEditing(false)
+  }
+
+  return (
+    <div className="border-t border-slate-100 pt-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs font-medium text-slate-500">สิทธิ์การเข้าถึง</div>
+        {canManageStaff && (
+          editing ? (
+            <div className="flex items-center gap-2">
+              <button onClick={save} className="flex items-center gap-1 text-xs bg-emerald-500 hover:bg-emerald-600 text-white px-2.5 py-1 rounded-md"><Save size={12} /> บันทึก</button>
+              <button onClick={() => setEditing(false)} className="text-slate-400 hover:text-slate-600"><X size={15} /></button>
+            </div>
+          ) : (
+            <button onClick={start} className="flex items-center gap-1 text-xs text-amber-600 hover:underline"><Pencil size={12} /> แก้สิทธิ์</button>
+          )
+        )}
+      </div>
+      <div className="grid grid-cols-2 gap-1">
+        {permissionLabels.map(([key, label]) => {
+          const on = editing ? draft[key] : member.permissions[key]
+          const Icon = on ? CheckCircle2 : XCircle
+          const iconCls = on ? 'text-emerald-500 shrink-0' : 'text-slate-300 shrink-0'
+          const textCls = on ? 'text-slate-700' : 'text-slate-400'
+          return editing ? (
+            <button key={key} onClick={() => toggle(key)} className="flex items-center gap-1.5 text-xs text-left hover:bg-slate-50 rounded px-1 py-0.5 -mx-1">
+              <Icon size={12} className={iconCls} />
+              <span className={textCls}>{label}</span>
+            </button>
+          ) : (
+            <div key={key} className="flex items-center gap-1.5 text-xs">
+              <Icon size={12} className={iconCls} />
+              <span className={textCls}>{label}</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 export default function StaffPage() {
   const { staff } = useHotelStore()
   const canManageStaff = useAuthStore((s) => s.user?.staff.permissions.canManageStaff ?? false)
+  const currentStaffId = useAuthStore((s) => s.user?.staff.id)
 
   return (
     <div className="flex flex-col h-screen">
@@ -254,19 +315,7 @@ export default function StaffPage() {
               <div className="text-xs text-slate-400 mb-3">
                 โทร: {member.phone} · เริ่มงาน: {formatDate(member.hireDate)}
               </div>
-              <div className="border-t border-slate-100 pt-3">
-                <div className="text-xs font-medium text-slate-500 mb-2">สิทธิ์การเข้าถึง</div>
-                <div className="grid grid-cols-2 gap-1">
-                  {permissionLabels.map(([key, label]) => (
-                    <div key={key} className="flex items-center gap-1.5 text-xs">
-                      {member.permissions[key]
-                        ? <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />
-                        : <XCircle size={12} className="text-slate-300 shrink-0" />}
-                      <span className={member.permissions[key] ? 'text-slate-700' : 'text-slate-400'}>{label}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <PermissionEditor member={member} canManageStaff={canManageStaff} isSelf={member.id === currentStaffId} />
             </div>
           ))}
         </div>
