@@ -60,6 +60,20 @@
 - `004_app_state_version.sql` — เพิ่มคอลัมน์ `version` (optimistic concurrency) — ✅ รันแล้ว (2026-06-01)
 > DDL รันผ่าน anon key ไม่ได้ ต้องทำใน Dashboard เท่านั้น
 
+## 4b. Deployment (Vercel) — ⚠️ ตั้งค่าครั้งเดียว อย่าลืม
+- โปรเจกต์ Vercel: **hotel-pms** (org "Wasin's projects") → domain `hotel-pms-henna.vercel.app`
+- **Production track branch `main`** → push main = auto-deploy production
+- **ต้องตั้ง Environment Variables ใน Vercel** (Settings → Environments → Production):
+  - `NEXT_PUBLIC_SUPABASE_URL`
+  - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+  - ค่าอยู่ในไฟล์ `.env.local` (gitignore — ไม่ขึ้น GitHub) ต้องใส่มือใน Vercel
+- **บั๊กที่เคยเจอ (2026-06-01):** ถ้า env var หาย build จะ **error ตอน prerender**
+  `Error: supabaseUrl is required` เพราะ `lib/supabase.ts` สร้าง client ตอน build time
+  (หน้าเป็น static) → แก้โดยใส่ env var แล้ว **Redeploy** (NEXT_PUBLIC ฝังตอน build เท่านั้น)
+- git push: เครื่องนี้ตั้ง credential.helper ชี้ Windows GCM แล้ว (`git config --global`
+  `credential.helper '!"/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe"'`)
+  — เครื่องใหม่ (notebook) ต้องตั้งเอง + ก๊อป `.env.local` มาด้วยมือ
+
 ## 5. ✅ ทำเสร็จแล้ว
 ### 2026-05-31
 - ย้าย store หลักจาก localStorage → Supabase cloud (commit `c2cc40b`)
