@@ -53,7 +53,9 @@ interface HotelStore {
   recordLogin: (userId: string) => void
 
   // Staff actions
+  addStaff: (staff: Omit<Staff, 'id'>) => string
   updateStaff: (id: string, updates: Partial<Omit<Staff, 'id'>>) => void
+  deleteStaff: (id: string) => void
 
   // Room actions
   updateRoomStatus: (roomId: string, status: RoomStatus) => void
@@ -872,10 +874,19 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       ),
     })),
 
+  addStaff: (staffData) => {
+    const id = `s${Date.now()}`
+    set((state) => ({ staff: [...state.staff, { ...staffData, id }] }))
+    return id
+  },
+
   updateStaff: (id, updates) =>
     set((state) => ({
       staff: state.staff.map((s) => (s.id === id ? { ...s, ...updates } : s)),
     })),
+
+  deleteStaff: (id) =>
+    set((state) => ({ staff: state.staff.filter((s) => s.id !== id) })),
 
   // สำรองข้อมูล: คืนเฉพาะ state ที่เป็นข้อมูล (ตัด function ออก)
   // หมายเหตุ: ตัดรหัสผ่านออกจาก users — ไฟล์ backup ไม่ควรมี plaintext password

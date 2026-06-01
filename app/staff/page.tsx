@@ -31,6 +31,108 @@ const permissionLabels: [keyof ReturnType<typeof useHotelStore.getState>['staff'
   ['canManageCorporate', 'จัดการเครดิตองค์กร'],
 ]
 
+const ALL_PERMS = permissionLabels.map(([k]) => k)
+function perms(on: (keyof StaffPermissions)[]): StaffPermissions {
+  const base = Object.fromEntries(ALL_PERMS.map((k) => [k, false])) as unknown as StaffPermissions
+  on.forEach((k) => { base[k] = true })
+  return base
+}
+// สิทธิ์เริ่มต้นตามตำแหน่ง (ใช้ตอนเพิ่มพนักงานใหม่ — ปรับเพิ่มเองได้ภายหลัง)
+const ROLE_DEFAULT_PERMISSIONS: Record<StaffRole, StaffPermissions> = {
+  admin: perms(ALL_PERMS),
+  receptionist: perms(['canViewDashboard', 'canManageBookings', 'canManageGuests', 'canManageMaintenance', 'canManageCorporate']),
+  accountant: perms(['canViewDashboard', 'canViewFinance', 'canManageFinance', 'canViewReports', 'canManageCorporate']),
+  housekeeper: perms(['canManageHousekeeping', 'canManageInventory']),
+  maintenance: perms(['canManageMaintenance', 'canManageInventory']),
+}
+const ROLES: StaffRole[] = ['admin', 'receptionist', 'accountant', 'housekeeper', 'maintenance']
+
+// ===== ฟอร์มเพิ่ม/แก้ไขข้อมูลพนักงาน =====
+function StaffFormDialog({ editing, onClose }: { editing: Staff | null; onClose: () => void }) {
+  const addStaff = useHotelStore((s) => s.addStaff)
+  const updateStaff = useHotelStore((s) => s.updateStaff)
+  const logAudit = useHotelStore((s) => s.logAudit)
+  const [form, setForm] = useState({
+    name: editing?.name ?? '',
+    role: editing?.role ?? ('receptionist' as StaffRole),
+    email: editing?.email ?? '',
+    phone: editing?.phone ?? '',
+    hireDate: (editing?.hireDate ?? new Date().toISOString()).split('T')[0],
+    isActive: editing?.isActive ?? true,
+  })
+
+  function save() {
+    const name = form.name.trim()
+    if (!name) { toast.error('กรุณาระบุชื่อ'); return }
+    const common = { name, role: form.role, email: form.email.trim(), phone: form.phone.trim(), hireDate: form.hireDate, isActive: form.isActive }
+    if (editing) {
+      updateStaff(editing.id, common) // หมายเหตุ: ไม่แตะ permissions (แก้ผ่าน "แก้สิทธิ์")
+      logAudit({ category: 'auth', action: 'update_staff', summary: `แก้ไขข้อมูลพนักงาน ${name}`, entityId: editing.id })
+      toast.success('บันทึกข้อมูลพนักงานแล้ว')
+    } else {
+      const id = addStaff({ ...common, permissions: ROLE_DEFAULT_PERMISSIONS[form.role] })
+      logAudit({ category: 'auth', action: 'add_staff', summary: `เพิ่มพนักงาน ${name} (${getStaffRoleLabel(form.role)})`, entityId: id })
+      toast.success('เพิ่มพนักงานแล้ว — ตั้งสิทธิ์เริ่มต้นตามตำแหน่งให้อัตโนมัติ')
+    }
+    onClose()
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between p-5 border-b border-slate-100">
+          <h2 className="font-semibold text-slate-800">{editing ? 'แก้ไขข้อมูลพนักงาน' : 'เพิ่มพนักงาน'}</h2>
+          <button onClick={onClose} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
+        </div>
+        <div className="p-5 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1.5">ชื่อ-นามสกุล *</label>
+            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus
+              className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">ตำแหน่ง</label>
+              <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as StaffRole })}
+                className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
+                {ROLES.map((r) => <option key={r} value={r}>{getStaffRoleLabel(r)}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">วันเริ่มงาน</label>
+              <input type="date" value={form.hireDate} onChange={(e) => setForm({ ...form, hireDate: e.target.value })}
+                className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">อีเมล</label>
+              <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })}
+                className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">เบอร์โทร</label>
+              <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
+            </div>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" checked={form.isActive} onChange={(e) => setForm({ ...form, isActive: e.target.checked })} className="rounded" />
+            เปิดใช้งานบัญชี (ปิด = login ไม่ได้)
+          </label>
+          {!editing && (
+            <p className="text-xs text-slate-400">สิทธิ์เริ่มต้นจะตั้งตามตำแหน่ง — ปรับเพิ่ม/ลดได้ที่ปุ่ม “แก้สิทธิ์” บนการ์ดพนักงาน</p>
+          )}
+        </div>
+        <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100">
+          <button onClick={onClose} className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>
+          <button onClick={save} className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-medium">บันทึก</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ===== จัดการบัญชีผู้ใช้ (เก็บบน cloud — แก้ได้ทุกเครื่อง) =====
 function AccountsManager() {
   const users = useHotelStore((s) => s.users)
@@ -268,9 +370,28 @@ function PermissionEditor({ member, canManageStaff, isSelf }: { member: Staff; c
 }
 
 export default function StaffPage() {
-  const { staff } = useHotelStore()
+  const { staff, users, deleteStaff, logAudit } = useHotelStore()
   const canManageStaff = useAuthStore((s) => s.user?.staff.permissions.canManageStaff ?? false)
   const currentStaffId = useAuthStore((s) => s.user?.staff.id)
+  const [staffForm, setStaffForm] = useState<{ editing: Staff | null } | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<Staff | null>(null)
+
+  function confirmDelete() {
+    if (!deleteTarget) return
+    deleteStaff(deleteTarget.id)
+    logAudit({ category: 'auth', action: 'delete_staff', summary: `ลบพนักงาน ${deleteTarget.name}`, entityId: deleteTarget.id })
+    toast.success(`ลบพนักงาน ${deleteTarget.name} แล้ว`)
+    setDeleteTarget(null)
+  }
+
+  function tryDelete(member: Staff) {
+    if (member.id === currentStaffId) { toast.error('ลบบัญชีพนักงานของตัวเองไม่ได้'); return }
+    if (users.some((u) => u.staffId === member.id)) {
+      toast.error('มีบัญชีผู้ใช้ผูกกับพนักงานนี้ — ลบบัญชีผู้ใช้ก่อน (ในส่วน “บัญชีผู้ใช้งานระบบ”)')
+      return
+    }
+    setDeleteTarget(member)
+  }
 
   return (
     <div className="flex flex-col h-screen">
@@ -294,23 +415,45 @@ export default function StaffPage() {
         {/* บัญชีผู้ใช้งาน — เฉพาะผู้มีสิทธิ์จัดการพนักงาน */}
         {canManageStaff && <AccountsManager />}
 
+        {/* Staff header + add */}
+        <div className="flex items-center justify-between">
+          <h2 className="font-semibold text-slate-800">พนักงานทั้งหมด <span className="text-xs font-normal text-slate-400">({staff.length} คน)</span></h2>
+          {canManageStaff && (
+            <button onClick={() => setStaffForm({ editing: null })}
+              className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
+              <UserPlus size={16} /> เพิ่มพนักงาน
+            </button>
+          )}
+        </div>
+
         {/* Staff Cards */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           {staff.map((member) => (
-            <div key={member.id} className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
+            <div key={member.id} className={`bg-white rounded-xl shadow-sm border p-5 ${member.isActive ? 'border-slate-100' : 'border-slate-200 opacity-70'}`}>
               <div className="flex items-start justify-between mb-4">
                 <div className="flex items-center gap-3">
                   <div className="w-11 h-11 rounded-full bg-slate-200 flex items-center justify-center font-bold text-slate-600">
                     {member.name.charAt(0)}
                   </div>
                   <div>
-                    <div className="font-semibold text-slate-800">{member.name}</div>
+                    <div className="font-semibold text-slate-800 flex items-center gap-2">
+                      {member.name}
+                      {!member.isActive && <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">ปิดใช้งาน</span>}
+                    </div>
                     <div className="text-sm text-slate-500">{member.email}</div>
                   </div>
                 </div>
-                <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${roleColors[member.role]}`}>
-                  {getStaffRoleLabel(member.role)}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${roleColors[member.role]}`}>
+                    {getStaffRoleLabel(member.role)}
+                  </span>
+                  {canManageStaff && (
+                    <>
+                      <button onClick={() => setStaffForm({ editing: member })} title="แก้ไขข้อมูล" className="p-1.5 rounded text-slate-400 hover:bg-slate-100 hover:text-amber-600 transition-colors"><Pencil size={14} /></button>
+                      <button onClick={() => tryDelete(member)} title="ลบพนักงาน" disabled={member.id === currentStaffId} className="p-1.5 rounded text-slate-400 hover:bg-red-50 hover:text-red-600 transition-colors disabled:opacity-30"><Trash2 size={14} /></button>
+                    </>
+                  )}
+                </div>
               </div>
               <div className="text-xs text-slate-400 mb-3">
                 โทร: {member.phone} · เริ่มงาน: {formatDate(member.hireDate)}
@@ -320,6 +463,25 @@ export default function StaffPage() {
           ))}
         </div>
       </div>
+
+      {staffForm && (
+        <StaffFormDialog editing={staffForm.editing} onClose={() => setStaffForm(null)} />
+      )}
+
+      {deleteTarget && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDeleteTarget(null)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="p-5 border-b border-slate-100">
+              <div className="flex items-center gap-2 text-red-600 mb-1"><Trash2 size={18} /><h2 className="font-semibold">ยืนยันการลบ</h2></div>
+              <p className="text-sm text-slate-600 mt-2">ลบพนักงาน <span className="font-semibold">{deleteTarget.name}</span> ออกจากระบบ?</p>
+            </div>
+            <div className="flex justify-end gap-3 p-4">
+              <button onClick={() => setDeleteTarget(null)} className="px-4 py-2 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>
+              <button onClick={confirmDelete} className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm font-medium">ลบ</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
