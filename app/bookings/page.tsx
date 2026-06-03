@@ -4,7 +4,7 @@ import { useHotelStore } from '@/lib/store'
 import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
 import {
-  formatCurrency, formatDate, getBookingStatusLabel, getBookingSourceLabel, calcBookingTotal, calcNights, getGuestDisplayName, getRoomTypeLabel, calcOutstanding, roomHasConflict
+  formatCurrency, formatDate, getBookingStatusLabel, getBookingSourceLabel, calcBookingTotal, calcNights, getGuestDisplayName, getRoomTypeLabel, calcOutstanding, roomHasConflict, calendarDateToISO
 } from '@/lib/utils'
 import type { BookingStatus, BookingSource, PaymentMethod } from '@/types'
 import { Plus, Search, X, Eye, Ban } from 'lucide-react'
@@ -387,8 +387,8 @@ export default function BookingsPage() {
                         setDateRange([{ startDate: sel.startDate ?? new Date(), endDate: sel.endDate ?? new Date(), key: 'selection' }])
                         setForm({
                           ...form,
-                          checkIn: sel.startDate ? sel.startDate.toISOString() : '',
-                          checkOut: sel.endDate ? sel.endDate.toISOString() : '',
+                          checkIn: sel.startDate ? calendarDateToISO(sel.startDate) : '',
+                          checkOut: sel.endDate ? calendarDateToISO(sel.endDate) : '',
                         })
                       }}
                       months={2}
@@ -410,7 +410,7 @@ export default function BookingsPage() {
                         onChange={(e) => {
                           const d = new Date(e.target.value)
                           setDateRange([{ startDate: d, endDate: dateRange[0].endDate, key: 'selection' }])
-                          setForm({ ...form, checkIn: e.target.value ? d.toISOString() : '' })
+                          setForm({ ...form, checkIn: e.target.value ? `${e.target.value}T00:00:00.000Z` : '' })
                         }}
                         className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                       />
@@ -424,7 +424,7 @@ export default function BookingsPage() {
                         onChange={(e) => {
                           const d = new Date(e.target.value)
                           setDateRange([{ startDate: dateRange[0].startDate, endDate: d, key: 'selection' }])
-                          setForm({ ...form, checkOut: e.target.value ? d.toISOString() : '' })
+                          setForm({ ...form, checkOut: e.target.value ? `${e.target.value}T00:00:00.000Z` : '' })
                         }}
                         className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                       />
