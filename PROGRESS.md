@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-06-01
+> อัปเดตล่าสุด: 2026-06-03
 
 ---
 
@@ -105,6 +105,16 @@
   (store.adjustForEarlyCheckout, EarlyCheckoutDialog ใช้ทั้ง front-desk + booking detail)
 - **ConfirmProvider/useConfirm**: confirm modal กลาง (Esc/aria-modal) แทน window.confirm ทั้งแอป
 - commit: 2b59348, 2b3de5a, 5b2153f, 478f63e, 2687f93, e0c6848, b9eb6e2, ea65e47 (ยังไม่ push)
+
+### 2026-06-03
+- **แก้บั๊ก timezone off-by-one ของ date-picker:** react-date-range/native date input ให้ `Date`
+  เป็น "เที่ยงคืนเวลาท้องถิ่น"; เรียก `.toISOString()` ตรง ๆ ใน TZ +07 จะเลื่อนวันถอย 1
+  (3 มิ.ย. 00:00 +07 → 2 มิ.ย. 17:00 UTC) ทำให้ `split('T')[0]` อ่านผิดวัน
+  → เพิ่ม `calendarDateToISO()` ใน `lib/utils.ts` (อ่าน Y/M/D ท้องถิ่นแล้วตรึงเป็น UTC-midnight)
+  ใช้ใน `app/bookings/page.tsx` (DateRange + native date inputs) และ walk-in ใน `app/front-desk/page.tsx`
+- **กันจำนวนคืน walk-in ชนการจองถัดไป:** เพิ่ม `maxNightsBeforeConflict()` ใน `lib/utils.ts`
+  → ที่ front-desk โชว์เตือน (ชนวันที่ไหน/สูงสุดกี่คืน) + disable ปุ่ม "ยืนยัน Walk-in" เมื่อเกิน
+- หมายเหตุ: `store.extendBooking` / `bookings/[id]:599` บวกวันบนค่า UTC-midnight อยู่แล้ว → ไม่เพี้ยน
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)

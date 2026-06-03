@@ -94,6 +94,41 @@ export function roomHasConflict(
   )
 }
 
+// จำนวนคืนสูงสุดที่จองห้องนี้ได้ตั้งแต่ checkIn โดยไม่ชนการจอง active อื่น
+// maxNights = null → ไม่มีการจองข้างหน้า (จองได้ไม่จำกัดตามด่านนี้)
+// maxNights = 0 → มีการจองคร่อม checkIn อยู่แล้ว (จองไม่ได้เลย)
+// conflictDate = checkIn ของการจองตัวถัดไปที่กั้นอยู่ (ISO) สำหรับโชว์เตือน
+export function maxNightsBeforeConflict(
+  bookings: Booking[], roomId: string, checkIn: string, excludeBookingId?: string
+): { maxNights: number | null; conflictDate: string | null } {
+  const inDay = day(checkIn)
+  const blocking = bookings.filter(
+    (b) =>
+      b.id !== excludeBookingId &&
+      b.roomId === roomId &&
+      isActiveReservation(b.status) &&
+      day(b.checkOut) > inDay
+  )
+  if (blocking.length === 0) return { maxNights: null, conflictDate: null }
+  const next = blocking.reduce((earliest, b) => (day(b.checkIn) < day(earliest.checkIn) ? b : earliest))
+  // back-to-back วันเดียวกันถือว่าจองได้ (checkOut ของเราเท่ากับ checkIn ของเขา) → diff = คืนสูงสุด
+  const diffDays = Math.round(
+    (new Date(day(next.checkIn)).getTime() - new Date(inDay).getTime()) / 86400000
+  )
+  return { maxNights: Math.max(0, diffDays), conflictDate: next.checkIn }
+}
+
+// แปลง Date จาก date-picker → ISO ที่ "วัน" ตรงกับวันบนปฏิทินเสมอ
+// react-date-range ให้ Date เป็นเที่ยงคืน "เวลาท้องถิ่น"; เรียก .toISOString() ตรงๆ ใน TZ บวก (เช่นไทย +07)
+// จะเลื่อนวันถอยหลัง 1 วัน (3 มิ.ย. 00:00 +07 → 2 มิ.ย. 17:00 UTC) ทำให้ split('T')[0] อ่านได้ผิดวัน
+// ฟังก์ชันนี้อ่านวัน/เดือน/ปี "ท้องถิ่น" แล้วตรึงเป็น UTC-midnight ให้ทั้งระบบอ่านวันได้ถูกตลอด
+export function calendarDateToISO(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${dd}T00:00:00.000Z`
+}
+
 export function formatCurrency(amount: number): string {
   return new Intl.NumberFormat('th-TH', {
     style: 'currency',

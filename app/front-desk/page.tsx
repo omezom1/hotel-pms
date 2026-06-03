@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, getBookingSourceLabel, getRoomTypeLabel, calcBookingTotal, todayLocal, getGuestDisplayName, calcOutstanding } from '@/lib/utils'
+import { formatCurrency, formatDate, getBookingSourceLabel, getRoomTypeLabel, calcBookingTotal, todayLocal, getGuestDisplayName, calcOutstanding, maxNightsBeforeConflict, calendarDateToISO } from '@/lib/utils'
 import type { PaymentMethod } from '@/types'
 import { BedDouble, UserPlus, CheckCircle2, Clock, AlertTriangle, LogIn, X } from 'lucide-react'
 import CheckoutConfirmDialog from '@/components/CheckoutConfirmDialog'
@@ -162,8 +162,13 @@ export default function FrontDeskPage() {
 
     if (!guestId) return
 
-    const checkIn = new Date().toISOString()
-    const checkOut = new Date(Date.now() + form.nights * 86400000).toISOString()
+    // ตรึงเป็น "วันปฏิทิน" (UTC-midnight) เหมือน create-booking — กัน timezone off-by-one
+    // (เวลาเช็คอินจริงยังอยู่ใน audit log + payment record)
+    const checkInDate = new Date()
+    const checkIn = calendarDateToISO(checkInDate)
+    const checkOutDate = new Date(checkInDate)
+    checkOutDate.setDate(checkOutDate.getDate() + form.nights)
+    const checkOut = calendarDateToISO(checkOutDate)
     const total = calcBookingTotal(room.type, checkIn, checkOut, room.pricePerNight)
     // ชำระเต็ม หรือ มัดจำ (ระบุยอด, clamp ไม่ให้เกินยอดรวม/ติดลบ) — ที่เหลือเป็นยอดค้างชำระ
     const paid = form.payMode === 'deposit' ? Math.min(Math.max(0, form.deposit), total) : total
@@ -448,6 +453,20 @@ export default function FrontDeskPage() {
                               เข้าพัก {form.adults + form.children} คน · ความจุห้อง {room.maxGuests} คน
                               {form.adults + form.children > room.maxGuests && ' — เกินความจุ'}
                             </div>
+                            {(() => {
+                              const { maxNights, conflictDate } = maxNightsBeforeConflict(bookings, room.id, calendarDateToISO(new Date()))
+                              if (maxNights === null || form.nights <= maxNights) return null
+                              return (
+                                <div className="flex items-start gap-1.5 text-[11px] text-red-600 font-medium bg-red-50 border border-red-100 rounded-lg px-2.5 py-1.5">
+                                  <AlertTriangle size={13} className="mt-px shrink-0" />
+                                  <span>
+                                    {maxNights === 0
+                                      ? `ห้องนี้มีการจองคร่อมวันนี้ (เริ่ม ${formatDate(conflictDate!)}) — walk-in ไม่ได้`
+                                      : `ชนการจองวันที่ ${formatDate(conflictDate!)} — เลือกได้สูงสุด ${maxNights} คืน`}
+                                  </span>
+                                </div>
+                              )
+                            })()}
                             <div>
                               <label className="block text-[11px] text-slate-500 mb-0.5">ชำระ</label>
                               <select
@@ -462,7 +481,9 @@ export default function FrontDeskPage() {
                               </select>
                             </div>
                             {(() => {
-                              const total = calcBookingTotal(room.type, new Date().toISOString(), new Date(Date.now() + form.nights * 86400000).toISOString(), room.pricePerNight)
+                              const ci = calendarDateToISO(new Date())
+                              const coDate = new Date(); coDate.setDate(coDate.getDate() + form.nights)
+                              const total = calcBookingTotal(room.type, ci, calendarDateToISO(coDate), room.pricePerNight)
                               const paid = form.payMode === 'deposit' ? Math.min(Math.max(0, form.deposit), total) : total
                               const due = total - paid
                               return (
@@ -502,14 +523,21 @@ export default function FrontDeskPage() {
                                 </>
                               )
                             })()}
-                            <button
-                              onClick={handleWalkIn}
-                              disabled={(newGuestMode ? !newGuest.name : !form.guestId) || form.adults + form.children > room.maxGuests}
-                              title={form.adults + form.children > room.maxGuests ? 'จำนวนผู้เข้าพักเกินความจุห้อง' : undefined}
-                              className="w-full px-4 py-2.5 min-h-[44px] bg-amber-500 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
-                            >
-                              ยืนยัน Walk-in
-                            </button>
+                            {(() => {
+                              const { maxNights } = maxNightsBeforeConflict(bookings, room.id, calendarDateToISO(new Date()))
+                              const hasConflict = maxNights !== null && form.nights > maxNights
+                              const overCapacity = form.adults + form.children > room.maxGuests
+                              return (
+                                <button
+                                  onClick={handleWalkIn}
+                                  disabled={(newGuestMode ? !newGuest.name : !form.guestId) || overCapacity || hasConflict}
+                                  title={overCapacity ? 'จำนวนผู้เข้าพักเกินความจุห้อง' : hasConflict ? 'จำนวนคืนชนกับการจองอื่น' : undefined}
+                                  className="w-full px-4 py-2.5 min-h-[44px] bg-amber-500 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+                                >
+                                  ยืนยัน Walk-in
+                                </button>
+                              )
+                            })()}
                           </div>
                         )}
                       </div>
