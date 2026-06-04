@@ -1,5 +1,5 @@
 'use client'
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
@@ -30,6 +30,7 @@ export default function BookingsPage() {
   const [filterStatus, setFilterStatus] = useState<BookingStatus | 'all'>('all')
   const [showModal, setShowModal] = useState(false)
   const [dateRange, setDateRange] = useState([{ startDate: new Date(), endDate: new Date(), key: 'selection' }])
+  const createBusy = useRef(false) // กัน double-submit สร้างการจอง
   const [guestMode, setGuestMode] = useState<'existing' | 'new'>('existing')
   const [guestSearch, setGuestSearch] = useState('')
   const [guestOpen, setGuestOpen] = useState(false)
@@ -76,6 +77,7 @@ export default function BookingsPage() {
   }
 
   function handleCreate() {
+    if (createBusy.current) return // กดซ้ำระหว่างทำรายการ → ข้าม (กันจอง/toast ซ้ำ)
     if (!form.roomId || !form.checkIn || !form.checkOut) return
     if (guestMode === 'new' && !form.snapName.trim()) {
       toast.error('กรุณาระบุชื่อแขก')
@@ -85,6 +87,8 @@ export default function BookingsPage() {
       toast.error('จำนวนผู้เข้าพักเกินความจุห้อง')
       return
     }
+    createBusy.current = true
+    try {
     const nights = calcNights(form.checkIn, form.checkOut)
     const total = calcTotal()
     const guestSnapshot = guestMode === 'new' ? {
@@ -116,6 +120,9 @@ export default function BookingsPage() {
     const guestName = guestMode === 'existing' ? (guests.find((g) => g.id === form.guestId)?.name ?? 'walk-in') : form.snapName
     logAudit({ category: 'booking', action: 'create', summary: `สร้างการจอง ${guestName} ห้อง ${room?.number ?? '-'} ${nights} คืน · ${total.toLocaleString()} บาท` })
     toast.success('สร้างการจองสำเร็จ', { description: `${nights} คืน · ${total.toLocaleString()} บาท` })
+    } finally {
+      createBusy.current = false
+    }
   }
 
   // ห้องที่ใช้จองได้ในช่วงวันที่เลือก: ไม่ปิดปรับปรุง + ไม่มี booking active ทับช่วง

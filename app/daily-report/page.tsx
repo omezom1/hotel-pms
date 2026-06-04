@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, getBookingSourceLabel, todayLocal, getGuestDisplayName, calcAddOnTotal, bookingOccupiesDay, bookingRevenue } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, getBookingSourceLabel, todayLocal, getGuestDisplayName, calcAddOnTotal, bookingOccupiesDay, bookingRevenue, sumRealizedRevenue } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-excel'
 import { Printer, Calendar, LogIn, LogOut, DollarSign, ShoppingBag, Wrench, Hotel as HotelIcon, UserPlus, FileSpreadsheet } from 'lucide-react'
 import { toast } from 'sonner'
@@ -26,9 +26,9 @@ export default function DailyReportPage() {
     ['checked_in', 'checked_out'].includes(b.status) && onDate(b.checkIn)
   )
 
-  // Check-outs ที่เกิดวันนี้ (checked_out + checkOut ตรงวัน)
+  // Check-outs ที่เกิดวันนี้ (checked_out + checkOut ตรงวัน) — รายได้รับรู้จริง
   const checkOutsToday = bookings.filter((b) => b.status === 'checked_out' && onDate(b.checkOut))
-  const checkOutRevenue = checkOutsToday.reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
+  const checkOutRevenue = sumRealizedRevenue(checkOutsToday, bookingAddOns)
 
   // Walk-ins (source walk_in + createdAt วันนี้)
   const walkInsToday = bookings.filter((b) => b.source === 'walk_in' && onDate(b.createdAt))

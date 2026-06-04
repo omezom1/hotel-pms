@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, toLocalDateKey, bookingRevenue } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, toLocalDateKey, sumRealizedRevenue } from '@/lib/utils'
 import { downloadExcel, dateStamp } from '@/lib/export-excel'
 import type { InvoiceStatus, CorporateAccount } from '@/types'
 import {
@@ -73,9 +73,7 @@ export default function FinancePage() {
     const d = new Date()
     d.setDate(d.getDate() - (6 - i))
     const day = toLocalDateKey(d)
-    const revenue = bookings
-      .filter((b) => b.status === 'checked_out' && b.checkOut.startsWith(day))
-      .reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
+    const revenue = sumRealizedRevenue(bookings, bookingAddOns, (b) => b.checkOut.startsWith(day))
     return { date: format(parseISO(day), 'dd MMM', { locale: th }), รายได้: revenue }
   })
 

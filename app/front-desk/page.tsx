@@ -1,5 +1,5 @@
 'use client'
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
@@ -15,6 +15,7 @@ export default function FrontDeskPage() {
   const { user } = useAuthStore()
 
   const [walkInRoomId, setWalkInRoomId] = useState<string | null>(null)
+  const walkInBusy = useRef(false) // กัน double-submit walk-in (สร้าง guest/booking ซ้ำ)
   const [form, setForm] = useState({
     guestId: '', nights: 1, adults: 1, children: 0,
     paymentMethod: 'cash' as PaymentMethod,
@@ -134,6 +135,7 @@ export default function FrontDeskPage() {
   }
 
   function handleWalkIn() {
+    if (walkInBusy.current) return // กดซ้ำระหว่างทำรายการ → ข้าม (กัน guest/booking ซ้ำ)
     if (!walkInRoomId || !user) return
     const room = rooms.find((r) => r.id === walkInRoomId)
     if (!room) return
@@ -141,11 +143,14 @@ export default function FrontDeskPage() {
       toast.error('จำนวนผู้เข้าพักเกินความจุห้อง')
       return
     }
+    if (newGuestMode && !newGuest.name) return
+    if (!newGuestMode && !form.guestId) return
 
+    walkInBusy.current = true
+    try {
     // ถ้าโหมดเพิ่มลูกค้าใหม่ → สร้าง guest ก่อน
     let guestId = form.guestId
     if (newGuestMode) {
-      if (!newGuest.name) return
       guestId = addGuest({
         name: newGuest.name,
         email: '',
@@ -198,6 +203,9 @@ export default function FrontDeskPage() {
     const guestName = guests.find((x) => x.id === guestId)?.name ?? newGuest.name ?? '-'
     logAudit({ category: 'booking', action: 'walk_in', summary: `Walk-in ${guestName} ห้อง ${room.number} ${form.nights} คืน` })
     toast.success(`Walk-in สำเร็จ ห้อง ${room.number}`)
+    } finally {
+      walkInBusy.current = false
+    }
   }
 
   return (

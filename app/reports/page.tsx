@@ -1,7 +1,7 @@
 'use client'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, todayLocal, toLocalDateKey, bookingOccupiesDay, bookingRevenue } from '@/lib/utils'
+import { formatCurrency, todayLocal, toLocalDateKey, bookingOccupiesDay, sumRealizedRevenue } from '@/lib/utils'
 import type { Booking, BookingAddOn } from '@/types'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -19,9 +19,7 @@ function buildDailyStats(bookings: Booking[], addOns: BookingAddOn[], totalRooms
     const d = new Date(today)
     d.setDate(d.getDate() - (days - 1 - i))
     const day = toLocalDateKey(d)
-    const revenue = bookings
-      .filter((b) => b.status === 'checked_out' && b.checkOut.startsWith(day))
-      .reduce((s, b) => s + bookingRevenue(b, addOns), 0)
+    const revenue = sumRealizedRevenue(bookings, addOns, (b) => b.checkOut.startsWith(day))
     const occupied = bookings.filter((b) => bookingOccupiesDay(b, day)).length
     const occupancy = totalRooms > 0 ? Math.round((occupied / totalRooms) * 100) : 0
     const revpar = totalRooms > 0 ? Math.round(revenue / totalRooms) : 0
@@ -34,12 +32,14 @@ export default function ReportsPage() {
 
   const revenueByType = ['single', 'double', 'triple'].map((type) => {
     const typeRooms = rooms.filter((r) => r.type === type)
+    // นับเฉพาะ booking ที่ยังไม่ถูกยกเลิก สำหรับ "จำนวนการจอง" (ปริมาณงานที่รับเข้ามา)
     const typeBookings = bookings.filter((b) =>
       typeRooms.some((r) => r.id === b.roomId) && b.status !== 'cancelled'
     )
     return {
       type: { single: 'เตียงเดี่ยว', double: 'เตียงคู่', triple: '3 เตียง' }[type],
-      รายได้: typeBookings.reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0),
+      // รายได้ = เฉพาะที่รับรู้แล้ว (เช็คเอาท์) ให้ตรงกับ Dashboard/Finance/Daily-report
+      รายได้: sumRealizedRevenue(typeBookings, bookingAddOns),
       จำนวนการจอง: typeBookings.length,
     }
   }).filter((d) => d.จำนวนการจอง > 0)
@@ -65,13 +65,10 @@ export default function ReportsPage() {
     .sort((a, b) => b.totalSpend - a.totalSpend)
     .slice(0, 5)
 
-  // KPI จากข้อมูลจริง (booking ที่ไม่ถูกยกเลิก)
+  // KPI — รายได้ใช้เกณฑ์ "รับรู้แล้ว" (เช็คเอาท์) ให้ตรงกับทุกหน้า
   const today = todayLocal()
-  const activeBookings = bookings.filter((b) => b.status !== 'cancelled')
-  const totalRevenue = activeBookings.reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
-  const todayRevenue = bookings
-    .filter((b) => b.status === 'checked_out' && b.checkOut.startsWith(today))
-    .reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
+  const totalRevenue = sumRealizedRevenue(bookings, bookingAddOns)
+  const todayRevenue = sumRealizedRevenue(bookings, bookingAddOns, (b) => b.checkOut.startsWith(today))
   const occupancyNow = rooms.length > 0
     ? (rooms.filter((r) => r.status === 'occupied').length / rooms.length) * 100
     : 0

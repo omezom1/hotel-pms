@@ -154,19 +154,22 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     })),
 
   createBooking: (bookingData) => {
-    // ด่านสุดท้ายกันจองซ้ำ: ห้ามมี booking active อื่นในห้องเดียวกันที่ช่วงวันคร่อมกัน
-    const state = get()
-    if (roomHasConflict(state.bookings, bookingData.roomId, bookingData.checkIn, bookingData.checkOut)) {
-      return { ok: false, error: 'ห้องนี้มีการจองอื่นทับช่วงวันที่เลือกแล้ว' }
-    }
-
+    // ด่านสุดท้ายกันจองซ้ำ + กัน double-submit race: ตรวจ conflict และ insert ใน set() เดียว
+    // (atomic) — ถ้าแยก get()→ตรวจ แล้วค่อย set() สอง submit เร็ว ๆ จะผ่าน conflict ทั้งคู่ = overbooking
+    let result: { ok: true } | { ok: false; error: string } = { ok: true }
     set((state) => {
+      if (roomHasConflict(state.bookings, bookingData.roomId, bookingData.checkIn, bookingData.checkOut)) {
+        result = { ok: false, error: 'ห้องนี้มีการจองอื่นทับช่วงวันที่เลือกแล้ว' }
+        return {}
+      }
       const now = new Date().toISOString()
-      const bookingId = `b${Date.now()}`
+      // id ผูก random กัน Date.now() ชนกันเมื่อสร้างสอง booking ในมิลลิวินาทีเดียว
+      const uid = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+      const bookingId = `b${uid}`
       // ถ้าจ่ายเงินมาตั้งแต่ตอนสร้าง (walk-in หรือ confirmed ที่จ่ายเต็ม) → push เข้า payments[]
       const initialPayment: import('@/types').Payment | null = bookingData.paidAmount > 0
         ? {
-            id: `pay${Date.now()}`,
+            id: `pay${uid}`,
             amount: bookingData.paidAmount,
             method: bookingData.paymentMethod ?? 'cash',
             date: now,
@@ -193,7 +196,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         rooms: updatedRooms,
       }
     })
-    return { ok: true }
+    return result
   },
 
   updateBookingStatus: (bookingId, status) =>

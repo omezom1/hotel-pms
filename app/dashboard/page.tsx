@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, getRoomStatusLabel, getRoomTypeLabel, todayLocal, toLocalDateKey, getGuestDisplayName, bookingOccupiesDay, bookingActiveOnDay, bookingRevenue } from '@/lib/utils'
+import { formatCurrency, formatDate, getRoomStatusLabel, getRoomTypeLabel, todayLocal, toLocalDateKey, getGuestDisplayName, bookingOccupiesDay, bookingActiveOnDay, sumRealizedRevenue } from '@/lib/utils'
 import type { RoomStatus } from '@/types'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
@@ -31,9 +31,7 @@ export default function DashboardPage() {
   const checkOutToday = bookings.filter((b) => b.status === 'checked_in' && b.checkOut.startsWith(today)).length
   const occupancyRate = stats.total > 0 ? Math.round((stats.occupied / stats.total) * 100) : 0
   // รายได้วันนี้ = ยอดรวมของ booking ที่ check-out วันนี้ (ค่าห้อง + add-on)
-  const todayRevenue = bookings
-    .filter((b) => b.status === 'checked_out' && b.checkOut.startsWith(today))
-    .reduce((sum, b) => sum + bookingRevenue(b, bookingAddOns), 0)
+  const todayRevenue = sumRealizedRevenue(bookings, bookingAddOns, (b) => b.checkOut.startsWith(today))
   // RevPAR (มาตรฐาน) = รายได้วันนี้ ÷ ห้องทั้งหมด
   const revpar = stats.total > 0 ? Math.round(todayRevenue / stats.total) : 0
 

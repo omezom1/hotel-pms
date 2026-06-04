@@ -68,6 +68,36 @@ export function bookingRevenue(booking: Booking, addOns: BookingAddOn[]): number
   return booking.totalAmount + calcAddOnTotal(booking.id, addOns)
 }
 
+// === รายได้ที่ "รับรู้แล้ว" (single source of truth) ===
+// กฎธุรกิจ: รับรู้รายได้เมื่อแขกเช็คเอาท์ (status === 'checked_out') เท่านั้น
+// booking ที่ยัง pending/confirmed/checked_in = ยอดจองในมือ ยังไม่ใช่รายได้จริง
+// ⚠️ ทุกหน้าที่รวม "รายได้" ต้องผ่าน isRealizedRevenue/sumRealizedRevenue เท่านั้น
+//    ห้าม inline `status === 'checked_out'` หรือ `status !== 'cancelled'` เองอีก (เลขจะเพี้ยนข้ามหน้า)
+export function isRealizedRevenue(b: Booking): boolean {
+  switch (b.status) {
+    case 'checked_out':
+      return true
+    case 'pending':
+    case 'confirmed':
+    case 'checked_in':
+    case 'cancelled':
+      return false
+    default: {
+      const _exhaustive: never = b.status
+      return _exhaustive
+    }
+  }
+}
+
+// รวมรายได้รับรู้ของชุด booking; ส่ง predicate เพิ่ม (เช่นกรองตามวัน) ผ่าน extra ได้
+export function sumRealizedRevenue(
+  bookings: Booking[], addOns: BookingAddOn[], extra?: (b: Booking) => boolean
+): number {
+  return bookings
+    .filter((b) => isRealizedRevenue(b) && (extra ? extra(b) : true))
+    .reduce((s, b) => s + bookingRevenue(b, addOns), 0)
+}
+
 // ===== การครอบครองห้อง / ชนกันของการจอง (single source of truth) =====
 // (display) booking นี้เป็นการจอง active บน "วัน" ที่กำหนดไหม — ใช้กับปฏิทิน/grid
 export function bookingActiveOnDay(b: Booking, dayKey: string): boolean {
