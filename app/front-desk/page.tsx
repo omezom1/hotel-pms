@@ -3,7 +3,7 @@ import { useState, useRef } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, getBookingSourceLabel, getRoomTypeLabel, calcBookingTotal, todayLocal, getGuestDisplayName, calcOutstanding, maxNightsBeforeConflict, calendarDateToISO } from '@/lib/utils'
+import { formatCurrency, formatDate, getBookingSourceLabel, getRoomTypeLabel, calcBookingTotal, todayLocal, getGuestDisplayName, calcOutstanding, maxNightsBeforeConflict, calendarDateToISO, roomHasConflict } from '@/lib/utils'
 import type { PaymentMethod } from '@/types'
 import { BedDouble, UserPlus, CheckCircle2, Clock, AlertTriangle, LogIn, X } from 'lucide-react'
 import CheckoutConfirmDialog from '@/components/CheckoutConfirmDialog'
@@ -148,6 +148,21 @@ export default function FrontDeskPage() {
 
     walkInBusy.current = true
     try {
+    // ตรึงเป็น "วันปฏิทิน" (UTC-midnight) เหมือน create-booking — กัน timezone off-by-one
+    // (เวลาเช็คอินจริงยังอยู่ใน audit log + payment record)
+    const checkInDate = new Date()
+    const checkIn = calendarDateToISO(checkInDate)
+    const checkOutDate = new Date(checkInDate)
+    checkOutDate.setDate(checkOutDate.getDate() + form.nights)
+    const checkOut = calendarDateToISO(checkOutDate)
+
+    // เช็ค conflict ก่อนสร้าง guest — กันสร้าง guest ขยะ + toast หลอกเมื่อห้องชนการจองอื่น
+    // (createBooking ยังตรวจซ้ำแบบ atomic อีกชั้นเป็น safety net)
+    if (roomHasConflict(bookings, walkInRoomId, checkIn, checkOut)) {
+      toast.error('ห้องนี้มีการจองอื่นทับช่วงวันที่เลือกแล้ว')
+      return
+    }
+
     // ถ้าโหมดเพิ่มลูกค้าใหม่ → สร้าง guest ก่อน
     let guestId = form.guestId
     if (newGuestMode) {
@@ -167,13 +182,6 @@ export default function FrontDeskPage() {
 
     if (!guestId) return
 
-    // ตรึงเป็น "วันปฏิทิน" (UTC-midnight) เหมือน create-booking — กัน timezone off-by-one
-    // (เวลาเช็คอินจริงยังอยู่ใน audit log + payment record)
-    const checkInDate = new Date()
-    const checkIn = calendarDateToISO(checkInDate)
-    const checkOutDate = new Date(checkInDate)
-    checkOutDate.setDate(checkOutDate.getDate() + form.nights)
-    const checkOut = calendarDateToISO(checkOutDate)
     const total = calcBookingTotal(room.type, checkIn, checkOut, room.pricePerNight)
     // ชำระเต็ม หรือ มัดจำ (ระบุยอด, clamp ไม่ให้เกินยอดรวม/ติดลบ) — ที่เหลือเป็นยอดค้างชำระ
     const paid = form.payMode === 'deposit' ? Math.min(Math.max(0, form.deposit), total) : total

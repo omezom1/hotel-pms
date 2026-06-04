@@ -30,8 +30,10 @@ export default function DailyReportPage() {
   const checkOutsToday = bookings.filter((b) => b.status === 'checked_out' && onDate(b.checkOut))
   const checkOutRevenue = sumRealizedRevenue(checkOutsToday, bookingAddOns)
 
-  // Walk-ins (source walk_in + createdAt วันนี้)
-  const walkInsToday = bookings.filter((b) => b.source === 'walk_in' && onDate(b.createdAt))
+  // Walk-ins (source walk_in + createdAt วันนี้) — ตัด cancelled ออก (ไม่นับเป็นรายได้ walk-in)
+  // หมายเหตุ: ตั้งใจใช้ bookingRevenue (ไม่ใช่ sumRealizedRevenue) เพราะ walk-in รับเงินตอนเข้าพัก
+  // (checked_in ก็นับ) = คนละแนวคิดกับ "รายได้รับรู้ตอนเช็คเอาท์"
+  const walkInsToday = bookings.filter((b) => b.source === 'walk_in' && b.status !== 'cancelled' && onDate(b.createdAt))
   const walkInRevenue = walkInsToday.reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
 
   // Payments received วันนี้
