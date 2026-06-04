@@ -80,7 +80,7 @@ export default function MaintenancePage() {
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
 
         {/* Stats */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {[
             { label: 'รอดำเนินการ', count: stats.open, icon: <AlertCircle size={20} className="text-red-500" />, color: 'text-red-600' },
             { label: 'กำลังซ่อม', count: stats.in_progress, icon: <Clock size={20} className="text-amber-500" />, color: 'text-amber-600' },

@@ -2,7 +2,7 @@
 import { useMemo, useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate } from '@/lib/utils'
+import { formatCurrency, formatDate, todayLocal } from '@/lib/utils'
 import type { Expense, ExpenseCategory } from '@/types'
 import { Plus, X, Pencil, Trash2, AlertTriangle, Receipt } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
@@ -44,7 +44,7 @@ const TH_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.�
 const now = new Date()
 const ymKey = (iso: string) => iso.slice(0, 7) // YYYY-MM
 const emptyForm = {
-  date: new Date().toISOString().split('T')[0],
+  date: todayLocal(),
   category: 'other' as ExpenseCategory,
   description: '',
   payee: '',

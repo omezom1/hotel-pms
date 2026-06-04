@@ -192,7 +192,7 @@ export default function DailyReportPage() {
           {[
             { label: 'เช็คอินวันนี้', value: checkInsToday.length, icon: <LogIn size={18} className="text-emerald-600" />, bg: 'bg-emerald-50 border-emerald-100' },
             { label: 'เช็คเอาต์วันนี้', value: checkOutsToday.length, icon: <LogOut size={18} className="text-amber-600" />, bg: 'bg-amber-50 border-amber-100' },
-            { label: 'ยอดรับเงินวันนี้', value: formatCurrency(totalPaymentsReceived), icon: <DollarSign size={18} className="text-blue-600" />, bg: 'bg-blue-50 border-blue-100', isString: true },
+            { label: 'ยอดรับเงินสุทธิวันนี้', value: formatCurrency(totalPaymentsReceived), icon: <DollarSign size={18} className="text-blue-600" />, bg: 'bg-blue-50 border-blue-100', isString: true },
             { label: 'ห้องเข้าพักอยู่', value: `${occupied}/${total}`, icon: <HotelIcon size={18} className="text-purple-600" />, bg: 'bg-purple-50 border-purple-100', isString: true },
           ].map((kpi) => (
             <div key={kpi.label} className={`${kpi.bg} rounded-xl p-4 border print-color`}>
@@ -270,7 +270,7 @@ export default function DailyReportPage() {
         </ReportSection>
 
         {/* Payments */}
-        <ReportSection title="ประวัติการรับชำระเงิน" icon={<DollarSign size={16} className="text-blue-500" />} count={payments.length} extra={`รวม ${formatCurrency(totalPaymentsReceived)}`}>
+        <ReportSection title="ประวัติการรับชำระเงิน" icon={<DollarSign size={16} className="text-blue-500" />} count={payments.length} extra={`สุทธิ ${formatCurrency(totalPaymentsReceived)}`}>
           {payments.length === 0 ? (
             <Empty text="ไม่มีการรับชำระเงินวันนี้" />
           ) : (
@@ -280,8 +280,8 @@ export default function DailyReportPage() {
                   <td className="px-3 py-2 text-slate-500 text-xs">{formatDateTime(p.time)}</td>
                   <td className="px-3 py-2 font-medium">{p.guestName}</td>
                   <td className="px-3 py-2 font-mono text-xs text-slate-500">{p.bookingId}</td>
-                  <td className="px-3 py-2 text-slate-600">{getPaymentMethodLabel(p.method)}</td>
-                  <td className="px-3 py-2 font-semibold text-emerald-600">{formatCurrency(p.amount)}</td>
+                  <td className="px-3 py-2 text-slate-600">{p.amount < 0 ? `${getPaymentMethodLabel(p.method)} (คืนเงิน)` : getPaymentMethodLabel(p.method)}</td>
+                  <td className={`px-3 py-2 font-semibold ${p.amount < 0 ? 'text-red-600' : 'text-emerald-600'}`}>{formatCurrency(p.amount)}</td>
                 </tr>
               ))}
             </ReportTable>

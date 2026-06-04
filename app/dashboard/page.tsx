@@ -268,7 +268,7 @@ export default function DashboardPage() {
                     <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
                       <div
                         className={`h-full rounded-full ${color} transition-all`}
-                        style={{ width: `${(count / stats.total) * 100}%` }}
+                        style={{ width: `${stats.total > 0 ? (count / stats.total) * 100 : 0}%` }}
                       />
                     </div>
                   </div>

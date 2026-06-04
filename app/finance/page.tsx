@@ -59,7 +59,9 @@ export default function FinancePage() {
   const [depositNote, setDepositNote] = useState('')
   const [historyAccount, setHistoryAccount] = useState<CorporateAccount | null>(null)
 
-  const totalRevenue = invoices.filter((i) => i.status === 'paid').reduce((s, i) => s + i.total, 0)
+  // รายได้รับรู้ทั้งหมด — เกณฑ์เดียวกับ dashboard/reports/daily-report และกราฟ 7 วันด้านล่าง
+  // (รับรู้ตอนเช็คเอาท์) เพื่อไม่ให้เลข "รายได้" ในหน้าเดียวขัดกันเอง
+  const totalRevenue = sumRealizedRevenue(bookings, bookingAddOns)
   // รอชำระ = เฉพาะส่วนที่ยังไม่จ่ายของแต่ละใบ (ยอดใบ − ยอดที่จ่ายของ booking นั้น) ไม่ใช่ยอดเต็มใบ
   const pendingAmount = invoices
     .filter((i) => i.status !== 'paid' && i.status !== 'refunded')
@@ -181,9 +183,9 @@ export default function FinancePage() {
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
 
         {/* KPI Cards */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
-            <div className="text-sm text-slate-500 mb-2">รายได้ที่ชำระแล้ว</div>
+            <div className="text-sm text-slate-500 mb-2">รายได้รับรู้ทั้งหมด</div>
             <div className="text-2xl font-bold text-emerald-600">{formatCurrency(totalRevenue)}</div>
           </div>
           <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
@@ -301,7 +303,7 @@ export default function FinancePage() {
         {activeTab === 'corporate' && (
           <div className="space-y-5">
             {/* KPI */}
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
                 <div className="text-sm text-slate-500 mb-2">บัญชีที่ใช้งาน</div>
                 <div className="text-2xl font-bold text-slate-800">{corporateAccounts.filter((a) => a.status === 'active').length}</div>

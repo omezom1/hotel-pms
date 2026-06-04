@@ -80,7 +80,7 @@ export default function ReportsPage() {
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
 
         {/* KPI Summary */}
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
             { label: 'รายได้สะสมทั้งหมด', value: formatCurrency(totalRevenue), icon: <DollarSign size={18} className="text-emerald-600" />, bg: 'bg-emerald-100' },
             { label: 'Occupancy ตอนนี้', value: `${occupancyNow.toFixed(1)}%`, icon: <BarChart2 size={18} className="text-blue-600" />, bg: 'bg-blue-100' },

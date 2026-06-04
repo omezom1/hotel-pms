@@ -4,7 +4,7 @@ import { useHotelStore } from '@/lib/store'
 import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
 import {
-  formatCurrency, formatDate, getBookingStatusLabel, getBookingSourceLabel, calcBookingTotal, calcNights, getGuestDisplayName, getRoomTypeLabel, calcOutstanding, roomHasConflict, calendarDateToISO
+  formatCurrency, formatDate, getBookingStatusLabel, getBookingSourceLabel, calcBookingTotal, calcNights, getGuestDisplayName, getRoomTypeLabel, calcOutstanding, roomHasConflict, calendarDateToISO, todayLocal
 } from '@/lib/utils'
 import type { BookingStatus, BookingSource, PaymentMethod } from '@/types'
 import { Plus, Search, X, Eye, Ban } from 'lucide-react'
@@ -413,7 +413,7 @@ export default function BookingsPage() {
                       <input
                         type="date"
                         value={form.checkIn ? form.checkIn.split('T')[0] : ''}
-                        min={new Date().toISOString().split('T')[0]}
+                        min={todayLocal()}
                         onChange={(e) => {
                           const d = new Date(e.target.value)
                           setDateRange([{ startDate: d, endDate: dateRange[0].endDate, key: 'selection' }])
@@ -427,7 +427,7 @@ export default function BookingsPage() {
                       <input
                         type="date"
                         value={form.checkOut ? form.checkOut.split('T')[0] : ''}
-                        min={form.checkIn ? form.checkIn.split('T')[0] : new Date().toISOString().split('T')[0]}
+                        min={form.checkIn ? form.checkIn.split('T')[0] : todayLocal()}
                         onChange={(e) => {
                           const d = new Date(e.target.value)
                           setDateRange([{ startDate: dateRange[0].startDate, endDate: d, key: 'selection' }])
