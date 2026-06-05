@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation'
 import { useHotelStore } from '@/lib/store'
 import { Search, BedDouble, User, CalendarDays, X } from 'lucide-react'
 import { formatDate, getRoomTypeLabel, getBookingStatusLabel } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 
 type Result =
   | { type: 'guest'; id: string; title: string; subtitle: string; href: string }
@@ -16,6 +17,8 @@ export default function GlobalSearch() {
   const [activeIdx, setActiveIdx] = useState(0)
   const router = useRouter()
   const { guests, rooms, bookings } = useHotelStore()
+  // Esc/arrow จัดการเองด้านล่างแล้ว — hook นี้ขัง Tab ไว้ใน palette + คืนโฟกัสตอนปิด
+  const trapRef = useFocusTrap<HTMLDivElement>(open)
 
   // เปิด/ปิดด้วย Ctrl+K หรือ Cmd+K
   useEffect(() => {
@@ -113,7 +116,7 @@ export default function GlobalSearch() {
 
   return (
     <div className="fixed inset-0 z-[100] bg-black/40 backdrop-blur-sm flex items-start justify-center pt-24 px-4" onClick={() => setOpen(false)}>
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+      <div ref={trapRef} role="dialog" aria-modal="true" aria-label="ค้นหา" tabIndex={-1} className="bg-white rounded-xl shadow-2xl w-full max-w-xl overflow-hidden focus:outline-none" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-100">
           <Search size={18} className="text-slate-400" />
           <input

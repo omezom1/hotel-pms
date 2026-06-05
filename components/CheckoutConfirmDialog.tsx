@@ -1,6 +1,7 @@
 'use client'
 import { AlertTriangle, X } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 
 // Modal ยืนยันเช็คเอาต์เมื่อยังค้างชำระ — ใช้ร่วมหน้า front-desk และหน้ารายละเอียดการจอง
 // เลือกได้: รับชำระก่อน / เช็คเอาต์ทั้งที่ค้าง (ออกใบแจ้งหนี้สถานะค้างชำระ)
@@ -19,9 +20,10 @@ export default function CheckoutConfirmDialog({
   onProceed: () => void
   onClose: () => void
 }) {
+  const trapRef = useFocusTrap<HTMLDivElement>(true, onClose)
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+      <div ref={trapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md focus:outline-none" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between p-5 border-b border-slate-100">
           <div className="flex items-center gap-2 text-amber-600">
             <AlertTriangle size={18} />

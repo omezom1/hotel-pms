@@ -1,5 +1,6 @@
 'use client'
 import { CalendarClock, X } from 'lucide-react'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 
 // ถามเมื่อเช็คเอาต์ก่อนวันกำหนด — จะปรับยอดตามจำนวนคืนจริงหรือคิดตามยอดเดิม
 export default function EarlyCheckoutDialog({
@@ -17,9 +18,10 @@ export default function EarlyCheckoutDialog({
   onKeepFull: () => void
   onClose: () => void
 }) {
+  const trapRef = useFocusTrap<HTMLDivElement>(true, onClose)
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+      <div ref={trapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md focus:outline-none" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between p-5 border-b border-slate-100">
           <div className="flex items-center gap-2 text-blue-600">
             <CalendarClock size={18} />

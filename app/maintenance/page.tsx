@@ -5,6 +5,7 @@ import { useAuthStore } from '@/lib/auth-store'
 import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
 import { formatDateTime, getPriorityLabel, getRoomStatusLabel } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { MaintenanceStatus } from '@/types'
 import { Plus, X, CheckCircle2, Clock, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
@@ -29,6 +30,7 @@ export default function MaintenancePage() {
   const [showModal, setShowModal] = useState(false)
   const [showAllTasks, setShowAllTasks] = useState(false)
   const [form, setForm] = useState({ roomId: '', issue: '', description: '', priority: 'normal', reportedBy: '' })
+  const trapRef = useFocusTrap<HTMLDivElement>(showModal, () => setShowModal(false))
 
   const isMaintenance = user?.staff.role === 'maintenance'
 
@@ -211,8 +213,8 @@ export default function MaintenancePage() {
 
       {/* Add Modal */}
       {showModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowModal(false)}>
+          <div ref={trapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">แจ้งซ่อมบำรุง</h2>
               <button onClick={() => setShowModal(false)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
@@ -220,8 +222,8 @@ export default function MaintenancePage() {
             <div className="p-5 space-y-4">
               {/* Fix C: dropdown แสดงสถานะห้อง + warning occupied */}
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ห้อง *</label>
-                <select
+                <label htmlFor="mt-room" className="block text-sm font-medium text-slate-700 mb-1.5">ห้อง *</label>
+                <select id="mt-room"
                   value={form.roomId}
                   onChange={(e) => setForm({ ...form, roomId: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -240,8 +242,8 @@ export default function MaintenancePage() {
                 )}
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ปัญหา *</label>
-                <input
+                <label htmlFor="mt-issue" className="block text-sm font-medium text-slate-700 mb-1.5">ปัญหา *</label>
+                <input id="mt-issue"
                   value={form.issue}
                   onChange={(e) => setForm({ ...form, issue: e.target.value })}
                   placeholder="เช่น เครื่องปรับอากาศขัดข้อง"
@@ -249,8 +251,8 @@ export default function MaintenancePage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">รายละเอียด</label>
-                <textarea
+                <label htmlFor="mt-desc" className="block text-sm font-medium text-slate-700 mb-1.5">รายละเอียด</label>
+                <textarea id="mt-desc"
                   value={form.description}
                   onChange={(e) => setForm({ ...form, description: e.target.value })}
                   rows={2}
@@ -258,8 +260,8 @@ export default function MaintenancePage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ความสำคัญ</label>
-                <select
+                <label htmlFor="mt-priority" className="block text-sm font-medium text-slate-700 mb-1.5">ความสำคัญ</label>
+                <select id="mt-priority"
                   value={form.priority}
                   onChange={(e) => setForm({ ...form, priority: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none"
@@ -271,8 +273,8 @@ export default function MaintenancePage() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ผู้แจ้ง</label>
-                <input
+                <label htmlFor="mt-reporter" className="block text-sm font-medium text-slate-700 mb-1.5">ผู้แจ้ง</label>
+                <input id="mt-reporter"
                   value={form.reportedBy}
                   onChange={(e) => setForm({ ...form, reportedBy: e.target.value })}
                   placeholder={user?.staff.name ?? 'ชื่อผู้แจ้ง'}

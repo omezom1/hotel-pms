@@ -6,6 +6,7 @@ import Header from '@/components/layout/Header'
 import {
   formatCurrency, formatDate, getBookingStatusLabel, getBookingSourceLabel, calcBookingTotal, calcNights, getGuestDisplayName, getRoomTypeLabel, calcOutstanding, roomHasConflict, calendarDateToISO, todayLocal
 } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { BookingStatus, BookingSource, PaymentMethod } from '@/types'
 import { Plus, Search, X, Eye, Ban } from 'lucide-react'
 import { toast } from 'sonner'
@@ -75,6 +76,7 @@ export default function BookingsPage() {
     setShowModal(false)
     resetForm()
   }
+  const trapRef = useFocusTrap<HTMLDivElement>(showModal, closeModal)
 
   function handleCreate() {
     if (createBusy.current) return // กดซ้ำระหว่างทำรายการ → ข้าม (กันจอง/toast ซ้ำ)
@@ -258,8 +260,8 @@ export default function BookingsPage() {
 
       {/* Create Booking Modal */}
       {showModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={closeModal}>
+          <div ref={trapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100 shrink-0">
               <h2 className="font-semibold text-slate-800">สร้างการจองใหม่</h2>
               <button onClick={closeModal} className="p-2 rounded-lg hover:bg-slate-100 transition-colors">
@@ -268,8 +270,8 @@ export default function BookingsPage() {
             </div>
             <div className="p-5 space-y-4 overflow-y-auto flex-1">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ห้องพัก *</label>
-                <select
+                <label htmlFor="bk-room" className="block text-sm font-medium text-slate-700 mb-1.5">ห้องพัก *</label>
+                <select id="bk-room"
                   value={form.roomId} onChange={(e) => setForm({ ...form, roomId: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
@@ -352,8 +354,8 @@ export default function BookingsPage() {
                   <div className="space-y-2.5 border border-slate-200 rounded-lg p-3 bg-slate-50">
                     <p className="text-xs text-slate-500">ข้อมูลจะแสดงในประวัติการจองเท่านั้น ไม่บันทึกเป็นลูกค้าประจำ</p>
                     <div>
-                      <label className="block text-xs text-slate-500 mb-1">ชื่อ-นามสกุล *</label>
-                      <input
+                      <label htmlFor="bk-snap-name" className="block text-xs text-slate-500 mb-1">ชื่อ-นามสกุล *</label>
+                      <input id="bk-snap-name"
                         type="text"
                         value={form.snapName} onChange={(e) => setForm({ ...form, snapName: e.target.value })}
                         placeholder="เช่น สมชาย ใจดี"
@@ -362,8 +364,8 @@ export default function BookingsPage() {
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       <div>
-                        <label className="block text-xs text-slate-500 mb-1">เบอร์โทร</label>
-                        <input
+                        <label htmlFor="bk-snap-phone" className="block text-xs text-slate-500 mb-1">เบอร์โทร</label>
+                        <input id="bk-snap-phone"
                           type="text"
                           value={form.snapPhone} onChange={(e) => setForm({ ...form, snapPhone: e.target.value })}
                           placeholder="0812345678"
@@ -372,8 +374,8 @@ export default function BookingsPage() {
                       </div>
                     </div>
                     <div>
-                      <label className="block text-xs text-slate-500 mb-1">เลขบัตร / Passport</label>
-                      <input
+                      <label htmlFor="bk-snap-id" className="block text-xs text-slate-500 mb-1">เลขบัตร / Passport</label>
+                      <input id="bk-snap-id"
                         type="text"
                         value={form.snapIdNumber} onChange={(e) => setForm({ ...form, snapIdNumber: e.target.value })}
                         placeholder="1234567890123"
@@ -409,8 +411,8 @@ export default function BookingsPage() {
                   </div>
                   <div className="md:hidden grid grid-cols-2 gap-2 p-3">
                     <div>
-                      <label className="block text-xs text-slate-500 mb-1">เช็คอิน</label>
-                      <input
+                      <label htmlFor="bk-checkin" className="block text-xs text-slate-500 mb-1">เช็คอิน</label>
+                      <input id="bk-checkin"
                         type="date"
                         value={form.checkIn ? form.checkIn.split('T')[0] : ''}
                         min={todayLocal()}
@@ -423,8 +425,8 @@ export default function BookingsPage() {
                       />
                     </div>
                     <div>
-                      <label className="block text-xs text-slate-500 mb-1">เช็คเอาต์</label>
-                      <input
+                      <label htmlFor="bk-checkout" className="block text-xs text-slate-500 mb-1">เช็คเอาต์</label>
+                      <input id="bk-checkout"
                         type="date"
                         value={form.checkOut ? form.checkOut.split('T')[0] : ''}
                         min={form.checkIn ? form.checkIn.split('T')[0] : todayLocal()}
@@ -454,18 +456,18 @@ export default function BookingsPage() {
               </div>
               <div className="grid grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ผู้ใหญ่</label>
-                  <input type="number" min={1} max={4} value={form.adults} onChange={(e) => setForm({ ...form, adults: +e.target.value })}
+                  <label htmlFor="bk-adults" className="block text-sm font-medium text-slate-700 mb-1.5">ผู้ใหญ่</label>
+                  <input id="bk-adults" type="number" min={1} max={4} value={form.adults} onChange={(e) => setForm({ ...form, adults: +e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">เด็ก</label>
-                  <input type="number" min={0} max={4} value={form.children} onChange={(e) => setForm({ ...form, children: +e.target.value })}
+                  <label htmlFor="bk-children" className="block text-sm font-medium text-slate-700 mb-1.5">เด็ก</label>
+                  <input id="bk-children" type="number" min={0} max={4} value={form.children} onChange={(e) => setForm({ ...form, children: +e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทาง</label>
-                  <select value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value as BookingSource })}
+                  <label htmlFor="bk-source" className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทาง</label>
+                  <select id="bk-source" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value as BookingSource })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                     <option value="direct">จองตรง</option>
                     <option value="walk_in">Walk-in</option>
@@ -485,8 +487,8 @@ export default function BookingsPage() {
                 )
               })()}
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">บัญชีองค์กร (ถ้ามี)</label>
-                <select
+                <label htmlFor="bk-corporate" className="block text-sm font-medium text-slate-700 mb-1.5">บัญชีองค์กร (ถ้ามี)</label>
+                <select id="bk-corporate"
                   value={form.corporateAccountId}
                   onChange={(e) => setForm({ ...form, corporateAccountId: e.target.value, isCorporate: !!e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none"
@@ -498,8 +500,8 @@ export default function BookingsPage() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">วิธีชำระเงิน</label>
-                <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value as PaymentMethod })}
+                <label htmlFor="bk-payment" className="block text-sm font-medium text-slate-700 mb-1.5">วิธีชำระเงิน</label>
+                <select id="bk-payment" value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value as PaymentMethod })}
                   className={`w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none ${form.isCorporate ? 'opacity-50' : ''}`}
                   disabled={form.isCorporate}
                 >
@@ -514,8 +516,8 @@ export default function BookingsPage() {
                 {form.isCorporate && <p className="text-xs text-blue-600 mt-1">ตัดจากเครดิตองค์กรอัตโนมัติเมื่อเช็คเอาต์</p>}
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">คำขอพิเศษ</label>
-                <textarea value={form.specialRequests} onChange={(e) => setForm({ ...form, specialRequests: e.target.value })}
+                <label htmlFor="bk-special" className="block text-sm font-medium text-slate-700 mb-1.5">คำขอพิเศษ</label>
+                <textarea id="bk-special" value={form.specialRequests} onChange={(e) => setForm({ ...form, specialRequests: e.target.value })}
                   rows={2} className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none resize-none" placeholder="เช่น หมอนเพิ่ม, เตียงเสริม..." />
               </div>
               {calcTotal() > 0 && (

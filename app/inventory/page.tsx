@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
 import { formatCurrency, formatDateTime } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { InventoryCategory, InventoryItem, InventoryUnit, InventoryTransaction } from '@/types'
 import { Plus, X, AlertTriangle, RefreshCw, Minus, Edit2, Trash2, History, Search } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
@@ -61,6 +62,10 @@ export default function InventoryPage() {
   const [form, setForm] = useState(emptyForm)
   const [deleteConfirm, setDeleteConfirm] = useState<InventoryItem | null>(null)
   const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null)
+  const addTrapRef = useFocusTrap<HTMLDivElement>(showAddDialog, () => { setShowAddDialog(false); setEditItem(null) })
+  const stockTrapRef = useFocusTrap<HTMLDivElement>(!!stockDialog, () => setStockDialog(null))
+  const deleteTrapRef = useFocusTrap<HTMLDivElement>(!!deleteConfirm, () => setDeleteConfirm(null))
+  const historyTrapRef = useFocusTrap<HTMLDivElement>(!!historyItem, () => setHistoryItem(null))
   const [historyType, setHistoryType] = useState<'all' | InventoryTransaction['type']>('all')
   const [historySearch, setHistorySearch] = useState('')
 
@@ -359,22 +364,22 @@ export default function InventoryPage() {
 
       {/* Add/Edit Dialog */}
       {showAddDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { setShowAddDialog(false); setEditItem(null) }}>
+          <div ref={addTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">{editItem ? 'แก้ไขสินค้า' : 'เพิ่มสินค้าใหม่'}</h2>
               <button onClick={() => { setShowAddDialog(false); setEditItem(null) }} className="p-2 rounded-lg hover:bg-slate-100 transition-colors"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ชื่อสินค้า *</label>
-                <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
+                <label htmlFor="inv-name" className="block text-sm font-medium text-slate-700 mb-1.5">ชื่อสินค้า *</label>
+                <input id="inv-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="เช่น สบู่ก้อน" />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">หมวดหมู่</label>
-                  <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value as InventoryCategory })}
+                  <label htmlFor="inv-category" className="block text-sm font-medium text-slate-700 mb-1.5">หมวดหมู่</label>
+                  <select id="inv-category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value as InventoryCategory })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                     <option value="room_amenities">อุปกรณ์ห้องพัก</option>
                     <option value="minibar">มินิบาร์</option>
@@ -382,8 +387,8 @@ export default function InventoryPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">หน่วย</label>
-                  <select value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value as InventoryUnit })}
+                  <label htmlFor="inv-unit" className="block text-sm font-medium text-slate-700 mb-1.5">หน่วย</label>
+                  <select id="inv-unit" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value as InventoryUnit })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                     <option value="piece">ชิ้น</option>
                     <option value="bottle">ขวด</option>
@@ -396,36 +401,36 @@ export default function InventoryPage() {
               </div>
               <div className="grid grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">สต็อกปัจจุบัน</label>
-                  <input type="number" min={0} value={form.currentStock} onChange={(e) => setForm({ ...form, currentStock: +e.target.value })}
+                  <label htmlFor="inv-current" className="block text-sm font-medium text-slate-700 mb-1.5">สต็อกปัจจุบัน</label>
+                  <input id="inv-current" type="number" min={0} value={form.currentStock} onChange={(e) => setForm({ ...form, currentStock: +e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ขั้นต่ำ</label>
-                  <input type="number" min={0} value={form.minStock} onChange={(e) => setForm({ ...form, minStock: +e.target.value })}
+                  <label htmlFor="inv-min" className="block text-sm font-medium text-slate-700 mb-1.5">ขั้นต่ำ</label>
+                  <input id="inv-min" type="number" min={0} value={form.minStock} onChange={(e) => setForm({ ...form, minStock: +e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">สูงสุด</label>
-                  <input type="number" min={0} value={form.maxStock} onChange={(e) => setForm({ ...form, maxStock: +e.target.value })}
+                  <label htmlFor="inv-max" className="block text-sm font-medium text-slate-700 mb-1.5">สูงสุด</label>
+                  <input id="inv-max" type="number" min={0} value={form.maxStock} onChange={(e) => setForm({ ...form, maxStock: +e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ต้นทุน/หน่วย (บาท)</label>
-                  <input type="number" min={0} value={form.costPerUnit} onChange={(e) => setForm({ ...form, costPerUnit: +e.target.value })}
+                  <label htmlFor="inv-cost" className="block text-sm font-medium text-slate-700 mb-1.5">ต้นทุน/หน่วย (บาท)</label>
+                  <input id="inv-cost" type="number" min={0} value={form.costPerUnit} onChange={(e) => setForm({ ...form, costPerUnit: +e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ผู้จัดจำหน่าย</label>
-                  <input value={form.supplier} onChange={(e) => setForm({ ...form, supplier: e.target.value })}
+                  <label htmlFor="inv-supplier" className="block text-sm font-medium text-slate-700 mb-1.5">ผู้จัดจำหน่าย</label>
+                  <input id="inv-supplier" value={form.supplier} onChange={(e) => setForm({ ...form, supplier: e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" placeholder="ชื่อบริษัท" />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
-                <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                <label htmlFor="inv-notes" className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
+                <input id="inv-notes" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
               </div>
             </div>
@@ -439,8 +444,8 @@ export default function InventoryPage() {
 
       {/* Stock action dialog */}
       {stockDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setStockDialog(null)}>
+          <div ref={stockTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">
                 {stockDialog.mode === 'restock' ? 'เติมสต็อก' : stockDialog.mode === 'use' ? 'ใช้สต็อก' : 'ปรับสต็อก'}: {stockDialog.item.name}
@@ -453,10 +458,10 @@ export default function InventoryPage() {
                 <span className="font-semibold">{stockDialog.item.currentStock} {unitLabels[stockDialog.item.unit]}</span>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                <label htmlFor="inv-stock-qty" className="block text-sm font-medium text-slate-700 mb-1.5">
                   {stockDialog.mode === 'adjust' ? 'สต็อกใหม่' : 'จำนวน'}
                 </label>
-                <input
+                <input id="inv-stock-qty"
                   type="number"
                   min={0}
                   max={stockDialog.mode === 'use' ? stockDialog.item.currentStock : undefined}
@@ -472,8 +477,8 @@ export default function InventoryPage() {
                 )}
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
-                <input value={stockNote} onChange={(e) => setStockNote(e.target.value)}
+                <label htmlFor="inv-stock-note" className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
+                <input id="inv-stock-note" value={stockNote} onChange={(e) => setStockNote(e.target.value)}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" placeholder="ไม่บังคับ" />
               </div>
               {/* Recent transactions for this item */}
@@ -505,8 +510,8 @@ export default function InventoryPage() {
 
       {/* Delete confirm */}
       {deleteConfirm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDeleteConfirm(null)}>
+          <div ref={deleteTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="p-5 border-b border-slate-100">
               <div className="flex items-center gap-2 text-red-600 mb-1">
                 <AlertTriangle size={18} />
@@ -531,8 +536,8 @@ export default function InventoryPage() {
         const restockTotal = ledger.filter((r) => r.tx.quantity > 0).reduce((s, r) => s + r.tx.quantity, 0)
         const outTotal = ledger.filter((r) => r.tx.quantity < 0).reduce((s, r) => s + r.tx.quantity, 0)
         return (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setHistoryItem(null)}>
+            <div ref={historyTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col focus:outline-none" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between p-5 border-b border-slate-100">
                 <div>
                   <h2 className="font-semibold text-slate-800 flex items-center gap-2">

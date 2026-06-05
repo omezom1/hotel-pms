@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
 import { formatCurrency, formatDate, todayLocal } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { Expense, ExpenseCategory } from '@/types'
 import { Plus, X, Pencil, Trash2, AlertTriangle, Receipt } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
@@ -62,6 +63,8 @@ export default function ExpensesPage() {
   const [editId, setEditId] = useState<string | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [deleteTarget, setDeleteTarget] = useState<Expense | null>(null)
+  const formTrapRef = useFocusTrap<HTMLDivElement>(showForm, () => setShowForm(false))
+  const deleteTrapRef = useFocusTrap<HTMLDivElement>(!!deleteTarget, () => setDeleteTarget(null))
 
   const periodKey = `${year}-${String(month).padStart(2, '0')}`
 
@@ -237,8 +240,8 @@ export default function ExpensesPage() {
 
       {/* Add/Edit dialog */}
       {showForm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowForm(false)}>
+          <div ref={formTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">{editId ? 'แก้ไขรายจ่าย' : 'เพิ่มรายจ่าย'}</h2>
               <button onClick={() => setShowForm(false)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
@@ -246,41 +249,41 @@ export default function ExpensesPage() {
             <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">วันที่ *</label>
-                  <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })}
+                  <label htmlFor="ex-date" className="block text-sm font-medium text-slate-700 mb-1.5">วันที่ *</label>
+                  <input id="ex-date" type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">หมวด *</label>
-                  <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value as ExpenseCategory })}
+                  <label htmlFor="ex-category" className="block text-sm font-medium text-slate-700 mb-1.5">หมวด *</label>
+                  <select id="ex-category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value as ExpenseCategory })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                     {CATEGORY_ORDER.map((c) => <option key={c} value={c}>{categoryLabels[c]}</option>)}
                   </select>
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">รายการ *</label>
-                <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })}
+                <label htmlFor="ex-desc" className="block text-sm font-medium text-slate-700 mb-1.5">รายการ *</label>
+                <input id="ex-desc" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })}
                   placeholder="เช่น ค่าไฟฟ้ารวมเดือน" autoFocus
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ผู้รับเงิน</label>
-                  <input value={form.payee} onChange={(e) => setForm({ ...form, payee: e.target.value })}
+                  <label htmlFor="ex-payee" className="block text-sm font-medium text-slate-700 mb-1.5">ผู้รับเงิน</label>
+                  <input id="ex-payee" value={form.payee} onChange={(e) => setForm({ ...form, payee: e.target.value })}
                     placeholder="เช่น การไฟฟ้านครหลวง"
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนเงิน (บาท) *</label>
-                  <input type="number" min={0} step="0.01" value={form.amount || ''} onChange={(e) => setForm({ ...form, amount: +e.target.value })}
+                  <label htmlFor="ex-amount" className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนเงิน (บาท) *</label>
+                  <input id="ex-amount" type="number" min={0} step="0.01" value={form.amount || ''} onChange={(e) => setForm({ ...form, amount: +e.target.value })}
                     placeholder="0.00"
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
-                <input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })}
+                <label htmlFor="ex-note" className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
+                <input id="ex-note" value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
               </div>
             </div>
@@ -294,8 +297,8 @@ export default function ExpensesPage() {
 
       {/* Delete confirm */}
       {deleteTarget && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDeleteTarget(null)}>
+          <div ref={deleteTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="p-5 border-b border-slate-100">
               <div className="flex items-center gap-2 text-red-600 mb-1">
                 <AlertTriangle size={18} />

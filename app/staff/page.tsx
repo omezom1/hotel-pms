@@ -4,6 +4,7 @@ import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
 import { formatDate, getStaffRoleLabel } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { StaffRole, StaffPermissions, Staff } from '@/types'
 import { CheckCircle2, XCircle, KeyRound, UserPlus, Trash2, Eye, EyeOff, Save, X, Pencil } from 'lucide-react'
 import { toast } from 'sonner'
@@ -61,6 +62,7 @@ function StaffFormDialog({ editing, onClose }: { editing: Staff | null; onClose:
     hireDate: (editing?.hireDate ?? new Date().toISOString()).split('T')[0],
     isActive: editing?.isActive ?? true,
   })
+  const trapRef = useFocusTrap<HTMLDivElement>(true, onClose)
 
   function save() {
     const name = form.name.trim()
@@ -80,40 +82,40 @@ function StaffFormDialog({ editing, onClose }: { editing: Staff | null; onClose:
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+      <div ref={trapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto focus:outline-none" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between p-5 border-b border-slate-100">
           <h2 className="font-semibold text-slate-800">{editing ? 'แก้ไขข้อมูลพนักงาน' : 'เพิ่มพนักงาน'}</h2>
           <button onClick={onClose} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
         </div>
         <div className="p-5 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1.5">ชื่อ-นามสกุล *</label>
-            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus
+            <label htmlFor="staff-name" className="block text-sm font-medium text-slate-700 mb-1.5">ชื่อ-นามสกุล *</label>
+            <input id="staff-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus
               className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">ตำแหน่ง</label>
-              <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as StaffRole })}
+              <label htmlFor="staff-role" className="block text-sm font-medium text-slate-700 mb-1.5">ตำแหน่ง</label>
+              <select id="staff-role" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as StaffRole })}
                 className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                 {ROLES.map((r) => <option key={r} value={r}>{getStaffRoleLabel(r)}</option>)}
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">วันเริ่มงาน</label>
-              <input type="date" value={form.hireDate} onChange={(e) => setForm({ ...form, hireDate: e.target.value })}
+              <label htmlFor="staff-hiredate" className="block text-sm font-medium text-slate-700 mb-1.5">วันเริ่มงาน</label>
+              <input id="staff-hiredate" type="date" value={form.hireDate} onChange={(e) => setForm({ ...form, hireDate: e.target.value })}
                 className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">อีเมล</label>
-              <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })}
+              <label htmlFor="staff-email" className="block text-sm font-medium text-slate-700 mb-1.5">อีเมล</label>
+              <input id="staff-email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })}
                 className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">เบอร์โทร</label>
-              <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })}
+              <label htmlFor="staff-phone" className="block text-sm font-medium text-slate-700 mb-1.5">เบอร์โทร</label>
+              <input id="staff-phone" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })}
                 className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
             </div>
           </div>
@@ -377,6 +379,7 @@ export default function StaffPage() {
   const currentStaffId = useAuthStore((s) => s.user?.staff.id)
   const [staffForm, setStaffForm] = useState<{ editing: Staff | null } | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Staff | null>(null)
+  const deleteTrapRef = useFocusTrap<HTMLDivElement>(!!deleteTarget, () => setDeleteTarget(null))
 
   function confirmDelete() {
     if (!deleteTarget) return
@@ -472,7 +475,7 @@ export default function StaffPage() {
 
       {deleteTarget && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDeleteTarget(null)}>
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+          <div ref={deleteTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="p-5 border-b border-slate-100">
               <div className="flex items-center gap-2 text-red-600 mb-1"><Trash2 size={18} /><h2 className="font-semibold">ยืนยันการลบ</h2></div>
               <p className="text-sm text-slate-600 mt-2">ลบพนักงาน <span className="font-semibold">{deleteTarget.name}</span> ออกจากระบบ?</p>

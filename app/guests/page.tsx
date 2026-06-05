@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
 import { formatCurrency } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import { Search, UserPlus, X, Pencil } from 'lucide-react'
 import Link from 'next/link'
 import { toast } from 'sonner'
@@ -16,6 +17,7 @@ export default function GuestsPage() {
   const [showForm, setShowForm] = useState(false)
   const [editId, setEditId] = useState<string | null>(null)
   const [form, setForm] = useState(emptyGuestForm)
+  const trapRef = useFocusTrap<HTMLDivElement>(showForm, () => setShowForm(false))
 
   const filtered = guests.filter((g) =>
     !search ||
@@ -131,16 +133,16 @@ export default function GuestsPage() {
 
       {/* Add guest dialog */}
       {showForm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowForm(false)}>
+          <div ref={trapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">{editId ? 'แก้ไขข้อมูลลูกค้า' : 'เพิ่มข้อมูลลูกค้า'}</h2>
               <button onClick={() => setShowForm(false)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ชื่อ-นามสกุล *</label>
-                <input
+                <label htmlFor="guest-name" className="block text-sm font-medium text-slate-700 mb-1.5">ชื่อ-นามสกุล *</label>
+                <input id="guest-name"
                   value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
                   placeholder="เช่น สมชาย ใจดี" autoFocus
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
@@ -148,16 +150,16 @@ export default function GuestsPage() {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">เบอร์โทร</label>
-                  <input
+                  <label htmlFor="guest-phone" className="block text-sm font-medium text-slate-700 mb-1.5">เบอร์โทร</label>
+                  <input id="guest-phone"
                     value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })}
                     placeholder="08x-xxx-xxxx"
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">เลขบัตรประชาชน</label>
-                  <input
+                  <label htmlFor="guest-id" className="block text-sm font-medium text-slate-700 mb-1.5">เลขบัตรประชาชน</label>
+                  <input id="guest-id"
                     value={form.idNumber} onChange={(e) => setForm({ ...form, idNumber: e.target.value })}
                     placeholder="x-xxxx-xxxxx-xx-x"
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
@@ -165,8 +167,8 @@ export default function GuestsPage() {
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">อีเมล</label>
-                <input
+                <label htmlFor="guest-email" className="block text-sm font-medium text-slate-700 mb-1.5">อีเมล</label>
+                <input id="guest-email"
                   value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })}
                   placeholder="name@email.com"
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"

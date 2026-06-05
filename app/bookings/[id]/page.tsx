@@ -5,6 +5,7 @@ import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
 import { addNightsISO, formatCurrency, formatDate, formatDateTime, getBookingStatusLabel, getBookingSourceLabel, getPaymentMethodLabel, getRoomTypeLabel, getGuestDisplayName, roomHasConflict, calcAddOnTotal, calcOutstanding, todayLocal } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { BookingStatus, PaymentMethod } from '@/types'
 import Link from 'next/link'
 import { ArrowLeft, User, BedDouble, CalendarDays, CreditCard, MessageSquare, ShoppingBag, Plus, X, Ban, Banknote } from 'lucide-react'
@@ -44,6 +45,11 @@ export default function BookingDetailPage() {
   const [newRoomId, setNewRoomId] = useState('')
   const [editDialog, setEditDialog] = useState(false)
   const [editForm, setEditForm] = useState({ adults: 1, children: 0, source: 'direct' as import('@/types').BookingSource, specialRequests: '' })
+  const payTrapRef = useFocusTrap<HTMLDivElement>(showPayDialog, () => setShowPayDialog(false))
+  const addOnTrapRef = useFocusTrap<HTMLDivElement>(showAddOnDialog, () => setShowAddOnDialog(false))
+  const extendTrapRef = useFocusTrap<HTMLDivElement>(extendNights !== null, () => setExtendNights(null))
+  const editTrapRef = useFocusTrap<HTMLDivElement>(editDialog, () => setEditDialog(false))
+  const moveTrapRef = useFocusTrap<HTMLDivElement>(moveDialog, () => { setMoveDialog(false); setNewRoomId('') })
   const [checkoutConfirm, setCheckoutConfirm] = useState(false)
   const [earlyConfirm, setEarlyConfirm] = useState(false)
 
@@ -480,8 +486,8 @@ export default function BookingDetailPage() {
       </div>
       {/* Payment dialog */}
       {showPayDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowPayDialog(false)}>
+          <div ref={payTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">บันทึกรับชำระเงิน</h2>
               <button onClick={() => setShowPayDialog(false)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
@@ -492,16 +498,16 @@ export default function BookingDetailPage() {
                 <span className="font-bold text-red-600">{formatCurrency(outstanding)}</span>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนที่รับ (บาท)</label>
-                <input
+                <label htmlFor="bd-pay-amount" className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนที่รับ (บาท)</label>
+                <input id="bd-pay-amount"
                   type="number" min={1} max={outstanding} value={payForm.amount}
                   onChange={(e) => setPayForm({ ...payForm, amount: Math.min(outstanding, Math.max(0, +e.target.value)) })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทางชำระเงิน</label>
-                <select value={payForm.method} onChange={(e) => setPayForm({ ...payForm, method: e.target.value as PaymentMethod })}
+                <label htmlFor="bd-pay-method" className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทางชำระเงิน</label>
+                <select id="bd-pay-method" value={payForm.method} onChange={(e) => setPayForm({ ...payForm, method: e.target.value as PaymentMethod })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                   <option value="cash">เงินสด</option>
                   <option value="credit_card">บัตรเครดิต</option>
@@ -527,16 +533,16 @@ export default function BookingDetailPage() {
 
       {/* Add-on dialog */}
       {showAddOnDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowAddOnDialog(false)}>
+          <div ref={addOnTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">เพิ่ม Add-on</h2>
               <button onClick={() => setShowAddOnDialog(false)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">รายการ *</label>
-                <select
+                <label htmlFor="bd-addon-item" className="block text-sm font-medium text-slate-700 mb-1.5">รายการ *</label>
+                <select id="bd-addon-item"
                   value={addOnForm.addOnItemId}
                   onChange={(e) => setAddOnForm({ ...addOnForm, addOnItemId: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -548,16 +554,16 @@ export default function BookingDetailPage() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">จำนวน</label>
-                <input
+                <label htmlFor="bd-addon-qty" className="block text-sm font-medium text-slate-700 mb-1.5">จำนวน</label>
+                <input id="bd-addon-qty"
                   type="number" min={1} max={10} value={addOnForm.quantity}
                   onChange={(e) => setAddOnForm({ ...addOnForm, quantity: Math.max(1, +e.target.value) })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
-                <input
+                <label htmlFor="bd-addon-notes" className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
+                <input id="bd-addon-notes"
                   value={addOnForm.notes}
                   onChange={(e) => setAddOnForm({ ...addOnForm, notes: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none"
@@ -581,16 +587,16 @@ export default function BookingDetailPage() {
 
       {/* Extend stay dialog */}
       {extendNights !== null && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setExtendNights(null)}>
+          <div ref={extendTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">ขยายวันเข้าพัก</h2>
               <button onClick={() => setExtendNights(null)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">เพิ่มกี่คืน?</label>
-                <input
+                <label htmlFor="bd-extend-nights" className="block text-sm font-medium text-slate-700 mb-1.5">เพิ่มกี่คืน?</label>
+                <input id="bd-extend-nights"
                   type="number" min={1} max={30} value={extendNights}
                   onChange={(e) => setExtendNights(Math.max(1, +e.target.value))}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -610,8 +616,8 @@ export default function BookingDetailPage() {
 
       {/* Edit booking dialog */}
       {editDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setEditDialog(false)}>
+          <div ref={editTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">แก้ไขข้อมูลการจอง</h2>
               <button onClick={() => setEditDialog(false)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
@@ -619,21 +625,21 @@ export default function BookingDetailPage() {
             <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ผู้ใหญ่</label>
-                  <input type="number" min={1} max={10} value={editForm.adults}
+                  <label htmlFor="bd-edit-adults" className="block text-sm font-medium text-slate-700 mb-1.5">ผู้ใหญ่</label>
+                  <input id="bd-edit-adults" type="number" min={1} max={10} value={editForm.adults}
                     onChange={(e) => setEditForm({ ...editForm, adults: Math.max(1, +e.target.value) })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">เด็ก</label>
-                  <input type="number" min={0} max={10} value={editForm.children}
+                  <label htmlFor="bd-edit-children" className="block text-sm font-medium text-slate-700 mb-1.5">เด็ก</label>
+                  <input id="bd-edit-children" type="number" min={0} max={10} value={editForm.children}
                     onChange={(e) => setEditForm({ ...editForm, children: Math.max(0, +e.target.value) })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทางการจอง</label>
-                <select value={editForm.source}
+                <label htmlFor="bd-edit-source" className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทางการจอง</label>
+                <select id="bd-edit-source" value={editForm.source}
                   onChange={(e) => setEditForm({ ...editForm, source: e.target.value as import('@/types').BookingSource })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                   <option value="direct">จองตรง</option>
@@ -641,8 +647,8 @@ export default function BookingDetailPage() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">คำขอพิเศษ</label>
-                <textarea value={editForm.specialRequests}
+                <label htmlFor="bd-edit-special" className="block text-sm font-medium text-slate-700 mb-1.5">คำขอพิเศษ</label>
+                <textarea id="bd-edit-special" value={editForm.specialRequests}
                   onChange={(e) => setEditForm({ ...editForm, specialRequests: e.target.value })}
                   rows={3} className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none resize-none" />
               </div>
@@ -658,8 +664,8 @@ export default function BookingDetailPage() {
 
       {/* Move room dialog */}
       {moveDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { setMoveDialog(false); setNewRoomId('') }}>
+          <div ref={moveTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">ย้ายห้อง</h2>
               <button onClick={() => { setMoveDialog(false); setNewRoomId('') }} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
@@ -669,8 +675,8 @@ export default function BookingDetailPage() {
                 ห้องปัจจุบัน: <span className="font-semibold">ห้อง {room?.number} ({getRoomTypeLabel(room?.type ?? '')})</span>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ย้ายไปห้องใหม่ *</label>
-                <select value={newRoomId} onChange={(e) => setNewRoomId(e.target.value)}
+                <label htmlFor="bd-move-room" className="block text-sm font-medium text-slate-700 mb-1.5">ย้ายไปห้องใหม่ *</label>
+                <select id="bd-move-room" value={newRoomId} onChange={(e) => setNewRoomId(e.target.value)}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500">
                   <option value="">เลือกห้อง</option>
                   {moveableRooms.map((r) => (

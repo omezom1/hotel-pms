@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-06-05
+> อัปเดตล่าสุด: 2026-06-06
 
 ---
 
@@ -147,8 +147,15 @@
 3. ความปลอดภัย: RLS เป็น anon full access (ใครมี URL+key เข้าได้เต็ม) — เหมาะงานภายในเท่านั้น
 4. รหัสผ่านเก็บเป็น plaintext ใน blob (demo) — production ควร hash (bcrypt) + ไม่ส่งกลับ client
 5. **VAT 7% ในใบแจ้งหนี้** — ยังไม่ทำ (`tax: 0` ตายตัว) ผู้ใช้ขอเลื่อนไว้ก่อน
-6. **accessibility** ทำบางส่วน (confirm modal มี Esc/aria-modal แล้ว) — ยังเหลือ focus-trap
-   ใน dialog อื่น ๆ และ `<label htmlFor>` ผูก input ให้ครบ
+6. ~~**accessibility** focus-trap + `<label htmlFor>`~~ → ✅ (2026-06-06) เพิ่ม hook กลาง
+   `lib/useFocusTrap.ts` (ขัง Tab/Shift+Tab + Esc ปิด + คืนโฟกัสเดิม + เคารพ autoFocus เดิม)
+   ใช้กับ **dialog ทุกตัว** (26 modal ใน 15 ไฟล์): component (Confirm/Checkout/EarlyCheckout/
+   ChangePassword/GlobalSearch) + ทุก modal ใน app pages (bookings, bookings/[id]×5, expenses×2,
+   finance×3, front-desk, guests, housekeeping, inventory×4, maintenance, staff×2) —
+   ทุกตัวมี `role="dialog" aria-modal tabIndex={-1}` + คลิก backdrop ปิดได้
+   ผูก `<label htmlFor>` กับ input ใน dialog form ครบแล้ว (tsc เหลือ 4 error เดิม ไม่กระทบ)
+   ⏳ เหลือ label ของ inline panel (walk-in ที่ front-desk, add-user ใน staff/AccountsManager,
+   filter/search ทั่วไป) — ไม่ใช่ dialog, scope รอง
 
 ## 7. ⚠️ Gotchas
 - **อย่า `pkill -f "next dev"`** — จับ shell ของคำสั่งเองด้วย ทำให้ command ตาย

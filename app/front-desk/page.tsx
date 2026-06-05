@@ -8,6 +8,7 @@ import type { PaymentMethod } from '@/types'
 import { BedDouble, UserPlus, CheckCircle2, Clock, AlertTriangle, LogIn, X } from 'lucide-react'
 import CheckoutConfirmDialog from '@/components/CheckoutConfirmDialog'
 import EarlyCheckoutDialog from '@/components/EarlyCheckoutDialog'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import { toast } from 'sonner'
 
 export default function FrontDeskPage() {
@@ -28,6 +29,7 @@ export default function FrontDeskPage() {
   const [payMethod, setPayMethod] = useState<PaymentMethod>('cash')
   const [checkoutTarget, setCheckoutTarget] = useState<{ bookingId: string; gName: string; roomNo: string; outstanding: number } | null>(null)
   const [earlyTarget, setEarlyTarget] = useState<{ bookingId: string; gName: string; roomNo: string; remaining: number } | null>(null)
+  const payTrapRef = useFocusTrap<HTMLDivElement>(!!payDialog, () => setPayDialog(null))
 
   function outstandingOf(bookingId: string) {
     const b = bookings.find((x) => x.id === bookingId)
@@ -568,8 +570,8 @@ export default function FrontDeskPage() {
 
       {/* Quick payment dialog */}
       {payDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setPayDialog(null)}>
+          <div ref={payTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">บันทึกรับชำระเงิน</h2>
               <button onClick={() => setPayDialog(null)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
@@ -580,16 +582,16 @@ export default function FrontDeskPage() {
                 <span className="font-bold text-red-600">{formatCurrency(payDialog.outstanding)}</span>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนที่รับ (บาท)</label>
-                <input
+                <label htmlFor="fd-pay-amount" className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนที่รับ (บาท)</label>
+                <input id="fd-pay-amount"
                   type="number" min={1} max={payDialog.outstanding} value={payAmount}
                   onChange={(e) => setPayAmount(Math.min(payDialog.outstanding, Math.max(0, +e.target.value)))}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทาง</label>
-                <select value={payMethod} onChange={(e) => setPayMethod(e.target.value as PaymentMethod)}
+                <label htmlFor="fd-pay-method" className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทาง</label>
+                <select id="fd-pay-method" value={payMethod} onChange={(e) => setPayMethod(e.target.value as PaymentMethod)}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                   <option value="cash">เงินสด</option>
                   <option value="credit_card">บัตรเครดิต</option>
