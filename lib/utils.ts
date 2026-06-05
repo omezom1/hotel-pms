@@ -17,12 +17,14 @@ const day = (iso: string) => iso.split('T')[0]
 //  status ใช้ exhaustive switch: เพิ่มสถานะใหม่ใน types แล้ว build จะแตกที่นี่จุดเดียว
 // ============================================================
 
-// add-on นี้ต้องคิดเงินไหม (requested/fulfilled = คิด, cancelled = ไม่คิด)
+// add-on นี้ต้องคิดเงินไหม (fulfilled = คิด, requested/cancelled = ไม่คิด)
+// นโยบาย: คิดเงินเฉพาะ add-on ที่ "จัดให้แล้ว" (fulfilled) — ที่ลูกค้าแค่ร้องขอ (requested)
+// ยังไม่จัดให้ ยังไม่คิดเงิน เพื่อกันเก็บเกินถ้ายกเลิกภายหลัง. คุมที่จุดเดียวนี้ให้ทั้งแอปตรงกัน
 export function addOnCountsTowardCharge(status: BookingAddOn['status']): boolean {
   switch (status) {
-    case 'requested':
     case 'fulfilled':
       return true
+    case 'requested':
     case 'cancelled':
       return false
     default: {
@@ -51,7 +53,7 @@ export function isActiveReservation(status: BookingStatus): boolean {
 }
 
 // ===== ยอดค้างชำระ / add-on (single source of truth) =====
-// รวม add-on ที่ยังไม่ถูกยกเลิก (requested + fulfilled) — ใช้เกณฑ์เดียวกันทุกหน้า
+// รวมเฉพาะ add-on ที่จัดให้แล้ว (fulfilled) ตาม addOnCountsTowardCharge — ใช้เกณฑ์เดียวกันทุกหน้า
 export function calcAddOnTotal(bookingId: string, addOns: BookingAddOn[]): number {
   return addOns
     .filter((a) => a.bookingId === bookingId && addOnCountsTowardCharge(a.status))
@@ -185,6 +187,14 @@ export function formatDateTime(dateStr: string): string {
 
 export function calcNights(checkIn: string, checkOut: string): number {
   return differenceInDays(parseISO(checkOut), parseISO(checkIn))
+}
+
+// บวก n คืนเข้า "วัน" ของ ISO โดยตรึง UTC-midnight — แทน epoch math (+n*86400000) หรือ
+// local setDate() ที่เปราะข้าม timezone (จะเลื่อนวันใน TZ ติดลบ). ให้ทั้งระบบบวกวันแบบเดียวกัน
+export function addNightsISO(iso: string, nights: number): string {
+  const d = new Date(`${iso.split('T')[0]}T00:00:00.000Z`)
+  d.setUTCDate(d.getUTCDate() + nights)
+  return d.toISOString()
 }
 
 // Date object → YYYY-MM-DD ตามเวลาท้องถิ่น

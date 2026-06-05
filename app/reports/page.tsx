@@ -30,11 +30,14 @@ function buildDailyStats(bookings: Booking[], addOns: BookingAddOn[], totalRooms
 export default function ReportsPage() {
   const { rooms, guests, bookings, bookingAddOns } = useHotelStore()
 
-  const revenueByType = ['single', 'double', 'triple'].map((type) => {
-    const typeRooms = rooms.filter((r) => r.type === type)
+  // ประเภทห้องของ booking = snapshot ตอนจอง (กันรายได้เพี้ยนถ้าย้ายห้องข้ามประเภท);
+  // booking เก่าที่ไม่มี snapshot fallback เป็นประเภทห้องปัจจุบัน
+  const roomTypeOf = (b: Booking) =>
+    b.roomTypeAtBooking ?? rooms.find((r) => r.id === b.roomId)?.type
+  const revenueByType = (['single', 'double', 'triple'] as const).map((type) => {
     // นับเฉพาะ booking ที่ยังไม่ถูกยกเลิก สำหรับ "จำนวนการจอง" (ปริมาณงานที่รับเข้ามา)
     const typeBookings = bookings.filter((b) =>
-      typeRooms.some((r) => r.id === b.roomId) && b.status !== 'cancelled'
+      roomTypeOf(b) === type && b.status !== 'cancelled'
     )
     return {
       type: { single: 'เตียงเดี่ยว', double: 'เตียงคู่', triple: '3 เตียง' }[type],

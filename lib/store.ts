@@ -9,12 +9,12 @@ import type {
   AddOnItem, BookingAddOn, AuditLog, AuditCategory, Expense, User
 } from '@/types'
 import { useAuthStore } from './auth-store'
-import { calcAddOnTotal, calcOutstanding, roomHasConflict, todayLocal } from './utils'
+import { addNightsISO, addOnCountsTowardCharge, calcAddOnTotal, calcBookingTotal, calcOutstanding, roomHasConflict, todayLocal } from './utils'
 import {
   mockRooms, mockGuests, mockBookings, mockInvoices,
   mockHousekeepingTasks, mockMaintenanceLogs, mockStaff, mockUsers,
   mockInventoryItems, mockInventoryTransactions, mockCorporateAccounts, mockCorporateTransactions,
-  mockAddOnItems, mockBookingAddOns, mockExpenses, mockDynamicPricing, shiftMockDates
+  mockAddOnItems, mockBookingAddOns, mockExpenses, shiftMockDates
 } from './mock-data'
 
 interface HotelStore {
@@ -181,6 +181,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         ...bookingData,
         id: bookingId,
         createdAt: now,
+        // ตรึงประเภทห้อง ณ เวลาจอง เพื่อให้รายงานรายได้ตามประเภทถูกแม้ย้ายห้องข้ามประเภทภายหลัง
+        roomTypeAtBooking: state.rooms.find((r) => r.id === bookingData.roomId)?.type ?? bookingData.roomTypeAtBooking,
         payments: initialPayment ? [initialPayment] : undefined,
       }
       // ตั้งห้อง occupied เฉพาะเมื่อเป็น walk-in (checked_in ตั้งแต่สร้าง)
@@ -237,10 +239,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       const now = new Date().toISOString()
       const room = state.rooms.find((r) => r.id === booking.roomId)
 
-      // 1) รวมยอด add-on ที่ยังไม่ถูกยกเลิก (requested + fulfilled) เข้ายอดสุดท้าย
-      //    ใช้เกณฑ์เดียวกับยอดค้างที่แสดงหน้า front-desk เพื่อไม่ให้รายการ add-on หายจากบิล
+      // 1) รวมยอด add-on ที่คิดเงิน (เฉพาะ fulfilled ตาม addOnCountsTowardCharge) เข้ายอดสุดท้าย
+      //    ใช้เกณฑ์เดียวกับยอดค้าง/calcAddOnTotal เพื่อให้รายการในบิลตรงกับยอดรวมบิลเป๊ะ
       const chargeableAddOns = state.bookingAddOns.filter(
-        (a) => a.bookingId === bookingId && a.status !== 'cancelled'
+        (a) => a.bookingId === bookingId && addOnCountsTowardCharge(a.status)
       )
       const addOnTotal = calcAddOnTotal(bookingId, state.bookingAddOns)
       const combinedTotal = booking.totalAmount + addOnTotal
@@ -472,33 +474,17 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     }
 
     const oldCheckOut = booking.checkOut.split('T')[0]
-    const newCheckOutDate = new Date(oldCheckOut)
-    newCheckOutDate.setDate(newCheckOutDate.getDate() + additionalNights)
-    const newCheckOut = newCheckOutDate.toISOString()
+    const newCheckOut = addNightsISO(booking.checkOut, additionalNights)
 
     // เช็คชน booking อื่นในห้องเดียวกัน ช่วงระหว่าง oldCheckOut → newCheckOut (ข้ามตัวเอง)
     if (roomHasConflict(state.bookings, booking.roomId, oldCheckOut, newCheckOut, bookingId)) {
       return { ok: false, error: 'มีการจองอื่นทับช่วงวันที่ขยาย' }
     }
 
-    // คำนวณราคาเพิ่ม (dynamic pricing ของวันที่เพิ่ม)
+    // ราคาเพิ่ม = ราคารายคืนจริงของวันที่เพิ่ม (ผ่าน source เดียวกับตอนสร้าง booking)
     const room = state.rooms.find((r) => r.id === booking.roomId)
     if (!room) return { ok: false, error: 'ไม่พบห้อง' }
-    let extraPrice = 0
-    const d = new Date(oldCheckOut)
-    for (let i = 0; i < additionalNights; i++) {
-      const day = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
-      const matches = mockDynamicPricing.filter(
-        (r) => r.roomType === room.type && r.startDate <= day && r.endDate >= day
-      )
-      const sorted = [...matches].sort((a, b) => {
-        const aLen = new Date(a.endDate).getTime() - new Date(a.startDate).getTime()
-        const bLen = new Date(b.endDate).getTime() - new Date(b.startDate).getTime()
-        return aLen - bLen
-      })
-      extraPrice += sorted[0]?.price ?? room.pricePerNight
-      d.setUTCDate(d.getUTCDate() + 1)
-    }
+    const extraPrice = calcBookingTotal(room.type, oldCheckOut, newCheckOut, room.pricePerNight)
 
     set((s) => ({
       bookings: s.bookings.map((b) =>
@@ -577,8 +563,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const actualNights = Math.max(1, Math.round(ms / 86400000))
     if (actualNights >= b.nights) return { ok: false, error: 'ยังไม่ถึงกำหนด — ไม่ใช่การออกก่อนกำหนด' }
 
-    const avgNightly = b.nights > 0 ? b.totalAmount / b.nights : b.totalAmount
-    const newTotal = Math.round(avgNightly * actualNights)
+    // ยอดใหม่ = ราคารายคืนจริงของคืนที่พักจริง (checkIn → checkIn+actualNights) ผ่าน source เดียว
+    // กับตอนสร้าง/ขยาย booking — ไม่ใช้ราคาเฉลี่ย ทำให้ถูกต้องเมื่อใช้ dynamic pricing
+    const room = state.rooms.find((r) => r.id === b.roomId)
+    const actualCheckOut = addNightsISO(b.checkIn, actualNights)
+    const newTotal = room
+      ? calcBookingTotal(room.type, b.checkIn, actualCheckOut, room.pricePerNight)
+      : Math.round((b.nights > 0 ? b.totalAmount / b.nights : b.totalAmount) * actualNights)
     const now = new Date().toISOString()
     // จ่ายมาเกินยอดใหม่ → คืนเงินส่วนเกิน (บันทึก payment ติดลบ เหมือน flow ยกเลิก)
     const overpaid = Math.max(0, b.paidAmount - newTotal)
@@ -957,35 +948,48 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     }),
 
   recordPayment: (bookingId, amount, method, staffId, notes) => {
-    const state = get()
-    const booking = state.bookings.find((b) => b.id === bookingId)
-    if (!booking) return { ok: false, error: 'ไม่พบการจอง' }
     if (amount <= 0) return { ok: false, error: 'จำนวนเงินต้องมากกว่า 0' }
-    // คำนวณยอดคงค้าง (helper กลาง ใช้เกณฑ์เดียวกับทุกหน้า)
-    const outstanding = calcOutstanding(booking, state.bookingAddOns)
-    if (outstanding <= 0) return { ok: false, error: 'การจองนี้ชำระครบแล้ว' }
-    if (amount > outstanding) return { ok: false, error: `เกินยอดค้างชำระ (สูงสุด ${outstanding.toLocaleString()} บาท)` }
-
-    set((s) => ({
-      bookings: s.bookings.map((b) => {
-        if (b.id !== bookingId) return b
-        const payment: import('@/types').Payment = {
-          id: `pay${Date.now()}`,
-          amount,
-          method: method as import('@/types').PaymentMethod,
-          date: new Date().toISOString(),
-          staffId,
-          notes,
-        }
-        return {
-          ...b,
-          paidAmount: b.paidAmount + amount,
-          paymentMethod: method as import('@/types').PaymentMethod,
-          payments: [...(b.payments ?? []), payment],
-        }
-      }),
-    }))
-    return { ok: true }
+    // ตรวจ outstanding + apply ใน set() เดียว (atomic) — กัน double-submit จ่ายเกิน:
+    // ถ้าแยก get()→ตรวจ→set() สอง submit เร็ว ๆ จะผ่าน check บน outstanding ตัวเดิมทั้งคู่ → จ่ายเกิน
+    let result: { ok: true } | { ok: false; error: string } = { ok: true }
+    set((s) => {
+      const booking = s.bookings.find((b) => b.id === bookingId)
+      if (!booking) {
+        result = { ok: false, error: 'ไม่พบการจอง' }
+        return {}
+      }
+      // คำนวณยอดคงค้างจาก state ปัจจุบันใน set() (helper กลาง ใช้เกณฑ์เดียวกับทุกหน้า)
+      const outstanding = calcOutstanding(booking, s.bookingAddOns)
+      if (outstanding <= 0) {
+        result = { ok: false, error: 'การจองนี้ชำระครบแล้ว' }
+        return {}
+      }
+      if (amount > outstanding) {
+        result = { ok: false, error: `เกินยอดค้างชำระ (สูงสุด ${outstanding.toLocaleString()} บาท)` }
+        return {}
+      }
+      const payment: import('@/types').Payment = {
+        id: `pay${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        amount,
+        method: method as import('@/types').PaymentMethod,
+        date: new Date().toISOString(),
+        staffId,
+        notes,
+      }
+      return {
+        bookings: s.bookings.map((b) =>
+          b.id === bookingId
+            ? {
+                ...b,
+                paidAmount: b.paidAmount + amount,
+                paymentMethod: method as import('@/types').PaymentMethod,
+                payments: [...(b.payments ?? []), payment],
+              }
+            : b
+        ),
+      }
+    })
+    return result
   },
 
   requestAddOn: (bookingId, addOnItemId, quantity, staffId, notes) => {
@@ -1010,27 +1014,31 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   },
 
   fulfillAddOn: (addOnId, staffId) => {
-    const state = get()
-    const addOn = state.bookingAddOns.find((a) => a.id === addOnId)
-    if (!addOn) return { ok: false, error: 'ไม่พบรายการ Add-on' }
-    if (addOn.status !== 'requested') return { ok: false, error: 'รายการนี้ดำเนินการไปแล้ว' }
-    const item = state.addOnItems.find((a) => a.id === addOn.addOnItemId)
-    const now = new Date().toISOString()
-
-    // ตรวจสต็อกก่อน ถ้าไม่พอ → block
-    if (item?.inventoryItemId && item.inventoryQtyPerUnit > 0) {
-      const deduct = item.inventoryQtyPerUnit * addOn.quantity
-      const inv = state.inventoryItems.find((i) => i.id === item.inventoryItemId)
-      if (!inv || inv.currentStock < deduct) {
-        return { ok: false, error: `สต็อก "${item.name}" ไม่พอ (มี ${inv?.currentStock ?? 0} ต้องการ ${deduct})` }
-      }
-    }
-
+    // ตรวจสถานะ + สต็อก แล้วตัดสต็อก ใน set() เดียว (atomic) — กัน fulfill 2 รายการรัว ๆ
+    // ที่ดึงของชิ้นเดียวกัน: ถ้าตรวจสต็อกนอก set() ทั้งคู่ผ่าน check บน stock เดิม → ตัดเกิน stock ติดลบ
+    let result: { ok: true } | { ok: false; error: string } = { ok: true }
     set((s) => {
+      const addOn = s.bookingAddOns.find((a) => a.id === addOnId)
+      if (!addOn) {
+        result = { ok: false, error: 'ไม่พบรายการ Add-on' }
+        return {}
+      }
+      if (addOn.status !== 'requested') {
+        result = { ok: false, error: 'รายการนี้ดำเนินการไปแล้ว' }
+        return {}
+      }
+      const item = s.addOnItems.find((a) => a.id === addOn.addOnItemId)
+      const now = new Date().toISOString()
+
       let updatedItems = s.inventoryItems
       let updatedTx = s.inventoryTransactions
       if (item?.inventoryItemId && item.inventoryQtyPerUnit > 0) {
         const deduct = item.inventoryQtyPerUnit * addOn.quantity
+        const inv = s.inventoryItems.find((i) => i.id === item.inventoryItemId)
+        if (!inv || inv.currentStock < deduct) {
+          result = { ok: false, error: `สต็อก "${item.name}" ไม่พอ (มี ${inv?.currentStock ?? 0} ต้องการ ${deduct})` }
+          return {}
+        }
         const invTx: InventoryTransaction = {
           id: `itx${Date.now()}`, itemId: item.inventoryItemId, type: 'use',
           quantity: -deduct, referenceId: addOnId, performedBy: staffId, date: now,
@@ -1051,7 +1059,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         inventoryTransactions: updatedTx,
       }
     })
-    return { ok: true }
+    return result
   },
 
   cancelAddOn: (addOnId) =>
@@ -1089,7 +1097,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       let updatedCorpTx = state.corporateTransactions
       if (booking) {
         const otherAddOnTotal = state.bookingAddOns
-          .filter((a) => a.bookingId === booking.id && a.id !== addOnId && a.status !== 'cancelled')
+          .filter((a) => a.bookingId === booking.id && a.id !== addOnId && addOnCountsTowardCharge(a.status))
           .reduce((s, a) => s + a.totalPrice, 0)
         const newCharge = booking.totalAmount + otherAddOnTotal
         const overpaid = Math.max(0, booking.paidAmount - newCharge)

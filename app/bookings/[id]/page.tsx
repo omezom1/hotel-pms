@@ -4,7 +4,7 @@ import { useParams } from 'next/navigation'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getBookingStatusLabel, getBookingSourceLabel, getPaymentMethodLabel, getRoomTypeLabel, getGuestDisplayName, roomHasConflict, calcAddOnTotal, calcOutstanding, todayLocal } from '@/lib/utils'
+import { addNightsISO, formatCurrency, formatDate, formatDateTime, getBookingStatusLabel, getBookingSourceLabel, getPaymentMethodLabel, getRoomTypeLabel, getGuestDisplayName, roomHasConflict, calcAddOnTotal, calcOutstanding, todayLocal } from '@/lib/utils'
 import type { BookingStatus, PaymentMethod } from '@/types'
 import Link from 'next/link'
 import { ArrowLeft, User, BedDouble, CalendarDays, CreditCard, MessageSquare, ShoppingBag, Plus, X, Ban, Banknote } from 'lucide-react'
@@ -596,7 +596,7 @@ export default function BookingDetailPage() {
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <p className="text-xs text-slate-500 mt-1.5">
-                  เช็คเอาต์ใหม่: {formatDate(new Date(new Date(booking.checkOut).getTime() + extendNights * 86400000).toISOString())}
+                  เช็คเอาต์ใหม่: {formatDate(addNightsISO(booking.checkOut, extendNights))}
                 </p>
               </div>
             </div>
