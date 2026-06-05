@@ -213,8 +213,8 @@ function AccountsManager() {
       {adding && (
         <div className="grid sm:grid-cols-4 gap-2 items-end mb-4 p-3 bg-slate-50 rounded-lg border border-slate-200">
           <div>
-            <label className="block text-xs text-slate-500 mb-1">พนักงาน</label>
-            <select
+            <label htmlFor="acct-staff" className="block text-xs text-slate-500 mb-1">พนักงาน</label>
+            <select id="acct-staff"
               value={newStaffId}
               onChange={(e) => setNewStaffId(e.target.value)}
               className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-sm"
@@ -225,16 +225,16 @@ function AccountsManager() {
             </select>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">ชื่อผู้ใช้</label>
-            <input
+            <label htmlFor="acct-username" className="block text-xs text-slate-500 mb-1">ชื่อผู้ใช้</label>
+            <input id="acct-username"
               value={newUsername} onChange={(e) => setNewUsername(e.target.value)}
               placeholder="username" autoComplete="off"
               className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-sm"
             />
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">รหัสผ่าน</label>
-            <input
+            <label htmlFor="acct-password" className="block text-xs text-slate-500 mb-1">รหัสผ่าน</label>
+            <input id="acct-password"
               value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
               placeholder="password" autoComplete="off"
               className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-sm"

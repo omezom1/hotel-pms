@@ -421,14 +421,14 @@ export default function FrontDeskPage() {
                                 <input
                                   value={newGuest.name}
                                   onChange={(e) => setNewGuest({ ...newGuest, name: e.target.value })}
-                                  placeholder="ชื่อ-นามสกุล *"
+                                  placeholder="ชื่อ-นามสกุล *" aria-label="ชื่อ-นามสกุลลูกค้าใหม่"
                                   className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                                   autoFocus
                                 />
                                 <input
                                   value={newGuest.phone}
                                   onChange={(e) => setNewGuest({ ...newGuest, phone: e.target.value })}
-                                  placeholder="เบอร์โทร"
+                                  placeholder="เบอร์โทร" aria-label="เบอร์โทรลูกค้าใหม่"
                                   className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                                 />
                               </div>
@@ -436,6 +436,7 @@ export default function FrontDeskPage() {
                               <select
                                 value={form.guestId}
                                 onChange={(e) => setForm({ ...form, guestId: e.target.value })}
+                                aria-label="เลือกลูกค้าเดิม"
                                 className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                               >
                                 <option value="">เลือกลูกค้า</option>
@@ -446,22 +447,22 @@ export default function FrontDeskPage() {
                             )}
                             <div className="grid grid-cols-3 gap-2">
                               <div>
-                                <label className="block text-[11px] text-slate-500 mb-0.5">คืน</label>
-                                <input type="number" min={1} max={30} value={form.nights}
+                                <label htmlFor="fd-walkin-nights" className="block text-[11px] text-slate-500 mb-0.5">คืน</label>
+                                <input id="fd-walkin-nights" type="number" min={1} max={30} value={form.nights}
                                   onChange={(e) => setForm({ ...form, nights: Math.max(1, +e.target.value) })}
                                   className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
                                 />
                               </div>
                               <div>
-                                <label className="block text-[11px] text-slate-500 mb-0.5">ผู้ใหญ่</label>
-                                <input type="number" min={1} max={10} value={form.adults}
+                                <label htmlFor="fd-walkin-adults" className="block text-[11px] text-slate-500 mb-0.5">ผู้ใหญ่</label>
+                                <input id="fd-walkin-adults" type="number" min={1} max={10} value={form.adults}
                                   onChange={(e) => setForm({ ...form, adults: Math.max(1, +e.target.value) })}
                                   className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
                                 />
                               </div>
                               <div>
-                                <label className="block text-[11px] text-slate-500 mb-0.5">เด็ก</label>
-                                <input type="number" min={0} max={10} value={form.children}
+                                <label htmlFor="fd-walkin-children" className="block text-[11px] text-slate-500 mb-0.5">เด็ก</label>
+                                <input id="fd-walkin-children" type="number" min={0} max={10} value={form.children}
                                   onChange={(e) => setForm({ ...form, children: Math.max(0, +e.target.value) })}
                                   className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
                                 />
@@ -486,8 +487,8 @@ export default function FrontDeskPage() {
                               )
                             })()}
                             <div>
-                              <label className="block text-[11px] text-slate-500 mb-0.5">ชำระ</label>
-                              <select
+                              <label htmlFor="fd-walkin-method" className="block text-[11px] text-slate-500 mb-0.5">ชำระ</label>
+                              <select id="fd-walkin-method"
                                 value={form.paymentMethod}
                                 onChange={(e) => setForm({ ...form, paymentMethod: e.target.value as PaymentMethod })}
                                 className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
@@ -520,8 +521,8 @@ export default function FrontDeskPage() {
                                   </div>
                                   {form.payMode === 'deposit' && (
                                     <div>
-                                      <label className="block text-[11px] text-slate-500 mb-0.5">เงินมัดจำ (บาท)</label>
-                                      <input type="number" min={0} max={total} value={form.deposit || ''}
+                                      <label htmlFor="fd-walkin-deposit" className="block text-[11px] text-slate-500 mb-0.5">เงินมัดจำ (บาท)</label>
+                                      <input id="fd-walkin-deposit" type="number" min={0} max={total} value={form.deposit || ''}
                                         onChange={(e) => setForm({ ...form, deposit: Math.max(0, +e.target.value) })}
                                         placeholder="0" className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
                                     </div>

@@ -76,7 +76,7 @@ export default function BookingDetailPage() {
   }
 
   const selectedAddOnItem = addOnItems.find((a) => a.id === addOnForm.addOnItemId)
-  const outstanding = booking.totalAmount + addOnTotal - booking.paidAmount
+  const outstanding = calcOutstanding(booking, bookingAddOns)
   const isEarly = booking.status === 'checked_in' && todayLocal() < booking.checkOut.split('T')[0]
   const remainingNights = isEarly
     ? Math.max(1, Math.round((new Date(booking.checkOut.split('T')[0]).getTime() - new Date(todayLocal()).getTime()) / 86400000))
@@ -106,7 +106,7 @@ export default function BookingDetailPage() {
       // ขยายแล้ว totalAmount เพิ่มแต่ paidAmount เท่าเดิม → เตือนว่าเกิดยอดค้างชำระ
       const fresh = useHotelStore.getState()
       const fb = fresh.bookings.find((b) => b.id === id)
-      const out = fb ? fb.totalAmount + calcAddOnTotal(id, fresh.bookingAddOns) - fb.paidAmount : 0
+      const out = fb ? calcOutstanding(fb, fresh.bookingAddOns) : 0
       toast.success(`ขยายการเข้าพักอีก ${nights} คืน`, {
         description: out > 0
           ? `ค่าห้องเพิ่ม → ยอดค้างชำระตอนนี้ ${formatCurrency(out)} อย่าลืมเก็บส่วนต่าง`
@@ -435,10 +435,10 @@ export default function BookingDetailPage() {
                   <span className="text-slate-500">ชำระแล้ว</span>
                   <span className="font-semibold text-emerald-600">{formatCurrency(booking.paidAmount)}</span>
                 </div>
-                {(booking.totalAmount + addOnTotal) > booking.paidAmount && (
+                {outstanding > 0 && (
                   <div className="flex justify-between">
                     <span className="text-slate-500">ค้างชำระ</span>
-                    <span className="font-semibold text-red-600">{formatCurrency(booking.totalAmount + addOnTotal - booking.paidAmount)}</span>
+                    <span className="font-semibold text-red-600">{formatCurrency(outstanding)}</span>
                   </div>
                 )}
                 <div className="pt-2 border-t border-slate-100">

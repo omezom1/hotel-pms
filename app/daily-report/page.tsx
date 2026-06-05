@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, getBookingSourceLabel, todayLocal, getGuestDisplayName, calcAddOnTotal, bookingOccupiesDay, bookingRevenue, sumRealizedRevenue } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, getBookingSourceLabel, todayLocal, getGuestDisplayName, calcAddOnTotal, calcOutstanding, bookingOccupiesDay, bookingRevenue, sumRealizedRevenue } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-excel'
 import { Printer, Calendar, LogIn, LogOut, DollarSign, ShoppingBag, Wrench, Hotel as HotelIcon, UserPlus, FileSpreadsheet } from 'lucide-react'
 import { toast } from 'sonner'
@@ -91,7 +91,7 @@ export default function DailyReportPage() {
       } else if (b.paidAmount > 0) {
         if (b.paymentMethod === 'cash') cash = b.paidAmount; else transfer = b.paidAmount
       }
-      const outstanding = Math.max(0, totalCharge - b.paidAmount)
+      const outstanding = Math.max(0, calcOutstanding(b, bookingAddOns))
       const status = outstanding <= 0 ? 'ชำระแล้ว' : b.paidAmount > 0 ? 'ชำระบางส่วน' : 'ค้างชำระ'
       return {
         wing: room?.wing ?? '-', room: room?.number ?? '–', guest: getGuestDisplayName(b, guests),
