@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-06-03
+> อัปเดตล่าสุด: 2026-06-05
 
 ---
 
@@ -115,6 +115,28 @@
 - **กันจำนวนคืน walk-in ชนการจองถัดไป:** เพิ่ม `maxNightsBeforeConflict()` ใน `lib/utils.ts`
   → ที่ front-desk โชว์เตือน (ชนวันที่ไหน/สูงสุดกี่คืน) + disable ปุ่ม "ยืนยัน Walk-in" เมื่อเกิน
 - หมายเหตุ: `store.extendBooking` / `bookings/[id]:599` บวกวันบนค่า UTC-midnight อยู่แล้ว → ไม่เพี้ยน
+
+### 2026-06-04 → 06-05 (QA audit + แก้รอบใหญ่) — branch `fix/revenue-consolidation-double-submit`
+รัน `hotel-pms-qa-auditor` หลายรอบ แก้ตามที่เจอ (tsc clean เหลือ 4 pre-existing errors เดิม)
+- **revenue เป็น single source of truth** (`lib/utils.ts`): `isRealizedRevenue`/`sumRealizedRevenue`
+  — รับรู้รายได้เฉพาะตอน `checked_out`. routed dashboard/reports/finance/daily-report ผ่านตัวนี้
+- **กัน double-submit overbooking**: ย้าย `roomHasConflict` เข้าใน `set()` ของ `createBooking` (atomic)
+- **timezone**: walk-in/date-input ใช้ `calendarDateToISO`/`todayLocal`; net-payment label; responsive grids
+- **add-on charge policy** (เปลี่ยนนโยบาย): คิดเงินเฉพาะ `fulfilled` (เดิม `requested` ก็คิด) —
+  คุมที่ `addOnCountsTowardCharge` จุดเดียว + จุด inline ใน store เรียก helper เดียวกัน (บิลตรงกันเป๊ะ)
+- **`roomTypeAtBooking` snapshot** (`types/index.ts` + `createBooking`): reports แยกรายได้ตามประเภท
+  ถูกแม้ย้ายห้องข้ามประเภท (booking เก่า fallback เป็นประเภทห้องปัจจุบัน)
+- **consolidate pricing**: `extendBooking` + `adjustForEarlyCheckout` ใช้ `calcBookingTotal`
+  (ราคารายคืนจริง) แทน loop ซ้ำ/ราคาเฉลี่ย → ถูกเมื่อใช้ dynamic pricing.
+  เพิ่ม `addNightsISO()` (บวกคืนตรึง UTC-midnight) ใช้แทน epoch math/local setDate ทั้ง store + preview
+- **race guards เพิ่ม**: ย้าย validation เข้า `set()` เดียวสำหรับ `recordPayment` (กันจ่ายเกินตอนกดรัว)
+  + `fulfillAddOn` (re-check stock กันตัดเกิน stock ติดลบ) ตามแพทเทิร์น `createBooking`
+- **invoice[id] display**: clamp ยอดชำระ/ค้างให้อยู่ในกรอบ `[0,total]` (ใบที่พิมพ์สอดคล้องกันเอง
+  แม้มี add-on/refund หลังออกใบ) + แปลสถานะ `refunded` → "คืนเงินแล้ว"
+- commits: `73e7a37`, `1f8dc19`, `c318b0e` (push แล้ว), `c8733cb` (**ยังไม่ push**)
+- ⏳ **verify ผ่าน browser ยังไม่ได้ทำ**: routes ผ่าน HTTP smoke (200, ไม่มี error) แต่ flow จริง
+  (จ่ายเงินกดรัว / fulfill stock / extend / invoice display) ยังไม่ได้คลิกเช็ค —
+  กล่อง WSL ubuntu-26.04 ไม่มี headless Chrome (setup หลายขั้น); คลิกเช็คที่ localhost:3000 จาก Windows ได้
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
