@@ -141,6 +141,7 @@ export interface Expense {
   payee?: string        // ผู้รับเงิน
   amount: number
   note?: string
+  receiptPath?: string   // path ของรูปบิล/ใบเสร็จใน Supabase Storage bucket 'receipts' (optional)
   createdAt: string
 }
 

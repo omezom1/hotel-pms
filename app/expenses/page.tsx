@@ -1,13 +1,19 @@
 'use client'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useHotelStore } from '@/lib/store'
+import { supabase } from '@/lib/supabase'
 import Header from '@/components/layout/Header'
 import { formatCurrency, formatDate, todayLocal } from '@/lib/utils'
 import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { Expense, ExpenseCategory } from '@/types'
-import { Plus, X, Pencil, Trash2, AlertTriangle, Receipt } from 'lucide-react'
+import { Plus, X, Pencil, Trash2, AlertTriangle, Receipt, Paperclip, FileText, Loader2 } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
 import { toast } from 'sonner'
+
+const RECEIPT_BUCKET = 'receipts'
+// path ของรูปใน Storage → public URL สำหรับแสดง/เปิดดู
+const receiptUrl = (path: string) => supabase.storage.from(RECEIPT_BUCKET).getPublicUrl(path).data.publicUrl
+const isPdf = (path: string) => path.toLowerCase().endsWith('.pdf')
 
 const categoryLabels: Record<ExpenseCategory, string> = {
   salary: 'เงินเดือนพนักงาน',
@@ -51,6 +57,7 @@ const emptyForm = {
   payee: '',
   amount: 0,
   note: '',
+  receiptPath: '' as string,
 }
 
 export default function ExpensesPage() {
@@ -63,6 +70,8 @@ export default function ExpensesPage() {
   const [editId, setEditId] = useState<string | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [deleteTarget, setDeleteTarget] = useState<Expense | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const formTrapRef = useFocusTrap<HTMLDivElement>(showForm, () => setShowForm(false))
   const deleteTrapRef = useFocusTrap<HTMLDivElement>(!!deleteTarget, () => setDeleteTarget(null))
 
@@ -96,8 +105,26 @@ export default function ExpensesPage() {
   }
   function openEdit(e: Expense) {
     setEditId(e.id)
-    setForm({ date: e.date.split('T')[0], category: e.category, description: e.description, payee: e.payee ?? '', amount: e.amount, note: e.note ?? '' })
+    setForm({ date: e.date.split('T')[0], category: e.category, description: e.description, payee: e.payee ?? '', amount: e.amount, note: e.note ?? '', receiptPath: e.receiptPath ?? '' })
     setShowForm(true)
+  }
+
+  // อัปโหลดรูปบิล/ใบเสร็จขึ้น Supabase Storage (เก็บแค่ path ใน record ไม่ฝังลง state blob)
+  async function handleFileUpload(file: File | undefined) {
+    if (!file) return
+    if (file.size > 5 * 1024 * 1024) { toast.error('ไฟล์ใหญ่เกิน 5MB'); return }
+    setUploading(true)
+    const ext = (file.name.split('.').pop() || 'jpg').toLowerCase()
+    const path = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`
+    const { error } = await supabase.storage.from(RECEIPT_BUCKET).upload(path, file, { upsert: false })
+    setUploading(false)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    if (error) {
+      toast.error(`อัปโหลดไม่สำเร็จ: ${error.message}`)
+      return
+    }
+    setForm((f) => ({ ...f, receiptPath: path }))
+    toast.success('แนบไฟล์แล้ว')
   }
 
   function handleSave() {
@@ -110,6 +137,7 @@ export default function ExpensesPage() {
       payee: form.payee.trim() || undefined,
       amount: form.amount,
       note: form.note.trim() || undefined,
+      receiptPath: form.receiptPath || undefined,
     }
     if (editId) {
       updateExpense(editId, payload)
@@ -126,6 +154,10 @@ export default function ExpensesPage() {
 
   function handleDelete() {
     if (!deleteTarget) return
+    // ลบไฟล์แนบใน Storage ด้วย (best-effort — ถ้าพังก็ลบ record ต่อ ไม่ค้าง)
+    if (deleteTarget.receiptPath) {
+      void supabase.storage.from(RECEIPT_BUCKET).remove([deleteTarget.receiptPath])
+    }
     deleteExpense(deleteTarget.id)
     logAudit({ category: 'expense', action: 'delete', summary: `ลบรายจ่าย "${deleteTarget.description}"`, entityId: deleteTarget.id })
     toast.success('ลบรายจ่ายแล้ว')
@@ -184,6 +216,12 @@ export default function ExpensesPage() {
                       <td className="px-4 py-3 text-slate-700">
                         {e.description}
                         {e.note && <div className="text-xs text-slate-400 mt-0.5">{e.note}</div>}
+                        {e.receiptPath && (
+                          <a href={receiptUrl(e.receiptPath)} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline mt-1">
+                            {isPdf(e.receiptPath) ? <FileText size={12} /> : <Paperclip size={12} />} ดูใบเสร็จ
+                          </a>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-slate-500 text-xs">{e.payee || '-'}</td>
                       <td className="px-4 py-3 font-semibold text-red-600 whitespace-nowrap">{formatCurrency(e.amount)}</td>
@@ -285,6 +323,36 @@ export default function ExpensesPage() {
                 <label htmlFor="ex-note" className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
                 <input id="ex-note" value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
+              </div>
+              {/* แนบรูปบิล/ใบเสร็จ */}
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">รูปบิล / ใบเสร็จ <span className="font-normal text-slate-400">(ไม่บังคับ)</span></label>
+                {form.receiptPath ? (
+                  <div className="flex items-center gap-3 p-2.5 border border-slate-200 rounded-lg">
+                    {isPdf(form.receiptPath) ? (
+                      <a href={receiptUrl(form.receiptPath)} target="_blank" rel="noopener noreferrer"
+                        className="flex items-center gap-2 text-sm text-blue-600 hover:underline flex-1 min-w-0">
+                        <FileText size={18} className="shrink-0" /> <span className="truncate">เปิดไฟล์ PDF</span>
+                      </a>
+                    ) : (
+                      <a href={receiptUrl(form.receiptPath)} target="_blank" rel="noopener noreferrer" className="shrink-0">
+                        <img src={receiptUrl(form.receiptPath)} alt="ใบเสร็จ" className="h-14 w-14 object-cover rounded-md border border-slate-200" />
+                      </a>
+                    )}
+                    <span className="text-xs text-slate-500 flex-1 truncate">{!isPdf(form.receiptPath) && 'คลิกรูปเพื่อดูเต็ม'}</span>
+                    <button type="button" onClick={() => setForm({ ...form, receiptPath: '' })}
+                      className="p-1.5 rounded hover:bg-red-50 text-slate-400 hover:text-red-600 transition-colors shrink-0" title="ลบไฟล์แนบ">
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                ) : (
+                  <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploading}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2.5 border border-dashed border-slate-300 rounded-lg text-sm text-slate-500 hover:bg-slate-50 hover:border-amber-400 transition-colors disabled:opacity-60">
+                    {uploading ? <><Loader2 size={16} className="animate-spin" /> กำลังอัปโหลด…</> : <><Paperclip size={16} /> เลือกรูป/ไฟล์ (สูงสุด 5MB)</>}
+                  </button>
+                )}
+                <input ref={fileInputRef} type="file" accept="image/*,application/pdf" className="hidden"
+                  onChange={(e) => handleFileUpload(e.target.files?.[0])} />
               </div>
             </div>
             <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100">
