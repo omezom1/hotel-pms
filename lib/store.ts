@@ -1,7 +1,8 @@
 'use client'
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import { supabaseStorage, registerStateApplier } from './supabase-storage'
+import { supabaseStorage, registerStateApplier, reportSaveError, CLIENT_ID } from './supabase-storage'
+import { supabase } from './supabase'
 import type {
   Room, Guest, Booking, Invoice, InvoiceItem, InvoiceStatus, HousekeepingTask,
   MaintenanceLog, Staff, RoomStatus, BookingStatus, HousekeepingStatus, MaintenanceStatus,
@@ -134,7 +135,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   logAudit: ({ category, action, summary, entityId }) => {
     const u = useAuthStore.getState().user
     const entry: AuditLog = {
-      id: `audit${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `audit${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       timestamp: new Date().toISOString(),
       staffId: u?.staff.id ?? 'system',
       staffName: u?.staff.name ?? 'ระบบ',
@@ -144,6 +145,26 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       entityId,
     }
     set((state) => ({ auditLogs: [entry, ...state.auditLogs].slice(0, 500) }))
+    // dual-write ขึ้นตาราง audit_logs (relational migration Phase 1, strangler)
+    // blob ยังเป็นแหล่งจริงอยู่ → insert ที่ fail แค่ทำให้ตารางตกหล่น 1 แถว (rollback ฟรี)
+    // แต่ "ห้าม fire-and-forget เงียบ" — ถ้าพังต้องเตือน (กันข้อมูลหายเงียบหลัง cutover)
+    void supabase
+      .from('audit_logs')
+      .insert({
+        id: entry.id,
+        timestamp: entry.timestamp,
+        staff_id: entry.staffId,
+        staff_name: entry.staffName,
+        category: entry.category,
+        action: entry.action,
+        summary: entry.summary,
+        entity_id: entry.entityId ?? null,
+        writer_id: CLIENT_ID,
+      })
+      .then(({ error }) => {
+        // 23505 = PK ซ้ำ (id เดิมถูก insert ไปแล้วจาก echo/retry) → idempotent ไม่ใช่ความผิดพลาด
+        if (error && error.code !== '23505') reportSaveError('audit insert', error.message)
+      })
   },
 
   updateRoomStatus: (roomId, status) =>
@@ -1153,10 +1174,30 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
   // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
   skipHydration: true,
-  // เผื่อ field ใหม่ (เช่น auditLogs, payments) ที่ user เคย save ก่อนเพิ่มไว้
+  // ── relational migration: auditLogs ย้ายไปตาราง audit_logs แล้ว (Phase 1 cutover) ──
+  // partialize = ตัด auditLogs ออกจากสิ่งที่เขียนลง blob → ตาราง audit_logs เป็นเจ้าของคนเดียว
+  // (กัน app_state full-state sync มาทับสิ่งที่ audit_logs-sync เพิ่ง apply)
+  partialize: (state) => ({
+    rooms: state.rooms,
+    guests: state.guests,
+    bookings: state.bookings,
+    invoices: state.invoices,
+    housekeepingTasks: state.housekeepingTasks,
+    maintenanceLogs: state.maintenanceLogs,
+    staff: state.staff,
+    users: state.users,
+    inventoryItems: state.inventoryItems,
+    inventoryTransactions: state.inventoryTransactions,
+    corporateAccounts: state.corporateAccounts,
+    corporateTransactions: state.corporateTransactions,
+    addOnItems: state.addOnItems,
+    bookingAddOns: state.bookingAddOns,
+    expenses: state.expenses,
+  }),
+  // blob เก่าอาจยังมี auditLogs ติดมา — merge ปล่อยให้ seed จากตารางเป็นตัวเติม (ไม่ revive จาก blob)
   merge: (persisted, current) => {
     const p = (persisted ?? {}) as Partial<typeof current>
-    return { ...current, ...p, auditLogs: p.auditLogs ?? current.auditLogs ?? [] }
+    return { ...current, ...p, auditLogs: current.auditLogs ?? [] }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading
   onRehydrateStorage: () => (_state, error) => {

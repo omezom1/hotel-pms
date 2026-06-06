@@ -58,7 +58,9 @@
 - `002_app_state.sql` — สร้างตาราง `app_state` + RLS (anon full access) — ✅ รันแล้ว
 - `003_realtime_app_state.sql` — เปิด realtime publication + replica identity full — ✅ รันแล้ว
 - `004_app_state_version.sql` — เพิ่มคอลัมน์ `version` (optimistic concurrency) — ✅ รันแล้ว (2026-06-01)
-> DDL รันผ่าน anon key ไม่ได้ ต้องทำใน Dashboard เท่านั้น
+- `005_relational_prep.sql` — **Phase 0** relational migration: ตาราง `payments`+`expenses`, คอลัมน์ `bookings.room_type_at_booking`, `updated_at`/`deleted_at` + trigger `set_updated_at` บน 13 ตารางที่จะย้าย (additive ล้วน) — ⏳ **ยังไม่รัน**
+- `006_audit_logs_realtime.sql` — **Phase 1** (audit_logs entity แรก): reconcile CHECK category (union `expense`+`staff`), เพิ่ม `writer_id`, เปิด realtime publication + replica identity full — ⏳ **ยังไม่รัน**
+> DDL รันผ่าน anon key ไม่ได้ ต้องทำใน Dashboard เท่านั้น (MCP ก็ถูกบล็อกตามกฎนี้)
 
 ## 4b. Deployment (Vercel) — ⚠️ ตั้งค่าครั้งเดียว อย่าลืม
 - โปรเจกต์ Vercel: **hotel-pms** (org "Wasin's projects") → domain `hotel-pms-henna.vercel.app`
@@ -153,6 +155,17 @@
 - tsc clean (เหลือ 4 pre-existing errors เดิม); ⏳ ยังไม่ verify ผ่าน browser (click-test ที่ localhost จาก Windows)
 - หมายเหตุ QA ค้าง (MED, ข้าม): daily-report "เช็คอินวันนี้" กรองตาม `checkIn` ที่กำหนด ไม่ใช่เวลาเช็คอินจริง
   (ไม่มีฟิลด์ `checkedInAt`) — แก้ถูก 100% ต้องเพิ่มฟิลด์ใน data model
+
+### 2026-06-06 (เริ่ม Relational Migration — Phase 0 + Phase 1 audit_logs)
+เริ่มงานใหญ่ blob→relational แบบ **strangler** (อยู่ร่วมกับ blob, kill-switch ต่อ entity, dual-write = rollback ฟรี). แผนเต็ม: decisions ล็อก (pricing คำนวณ client ส่งเข้า RPC, payments แยกตาราง). **audit_logs เป็น entity แรก** (practice) เพราะ append-only + single writer/reader → blast radius เล็กสุด.
+- **DDL** `005` (Phase 0, additive) + `006` (Phase 1 audit_logs) เขียนแล้ว — ⏳ **ผู้ใช้ต้องรันใน Dashboard** (เจอ: CHECK category ของ audit_logs ใน 001 มี `'staff'` แต่ TS มี `'expense'` — 006 union ทั้งคู่ กัน `23514`)
+- **dual-write** (`lib/store.ts` `logAudit`): หลัง `set()` เดิม insert ขึ้นตาราง `audit_logs` (map cam→snake + `writer_id=CLIENT_ID`), **ไม่ silent** — fail แล้ว `reportSaveError` (export ใหม่จาก supabase-storage)
+- **hydration + per-table channel** (`AppShell.tsx`): channel `'audit_logs-sync'` (INSERT) แยกจาก `app_state-sync`; ลำดับ **subscribe→buffer→seed** (rehydrate blob เสร็จก่อนค่อย seed `select…limit 500` กัน merge clobber); `upsertAuditLogs` dedup-by-id + sort + cap 500; echo-guard `writer_id===CLIENT_ID`
+- **footer** `/audit-log`: แก้ "เก็บ 500…ลบอัตโนมัติ" → "แสดง 500 ล่าสุด (เก็บครบบนคลาวด์)" (retention DECIDED: ตารางเก็บครบ, hydrate 500)
+- ✅ **DDL 005+006 รันแล้วบน live DB + verify ครบ** (payments/expenses/writer_id/realtime/room_type_at_booking)
+- ✅ **CUTOVER เสร็จ + verify ผ่าน** (2-tab realtime ตรงกัน): พบบั๊กตอนเทสต์ — `app_state` full-state sync ส่ง `auditLogs` มาทับสิ่งที่ `audit_logs-sync` เพิ่ง apply → 2 แท็บไม่ตรงกัน. แก้ด้วยการตัด auditLogs ออกจาก blob path **3 จุด**: (1) `partialize` ใน persist (blob ไม่เก็บ auditLogs), (2) AppShell `app_state-sync` strip auditLogs จาก incoming, (3) `mergeState` `delete out.auditLogs`. ตาราง audit_logs = เจ้าของ slice นี้คนเดียวแล้ว
+- QA round-7 (agent) ผ่าน: ไม่มี HIGH/MED, แก้ LOW (logAudit id entropy 4→5 ตัว + มอง 23505 เป็น idempotent ไม่เด้ง toast). tsc clean (เหลือ 4 errors เดิม)
+- **NEXT:** Tier A ที่เหลือ (expenses/inventory/maintenance) ตามแพทเทิร์นเดียวกัน → Tier B → Tier C+RPC (bookings/invoices/payments, riskiest) → retire blob
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)

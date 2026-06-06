@@ -8,9 +8,24 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
+import type { AuditLog } from '@/types'
 import { toast } from 'sonner'
 
 const STORE_KEY = 'hotel-pms-storage'
+
+// แปลงแถว audit_logs (snake_case จาก Supabase) → AuditLog (camelCase)
+function rowToAuditLog(r: Record<string, unknown>): AuditLog {
+  return {
+    id: String(r.id),
+    timestamp: String(r.timestamp),
+    staffId: String(r.staff_id ?? ''),
+    staffName: String(r.staff_name ?? ''),
+    category: r.category as AuditLog['category'],
+    action: String(r.action ?? ''),
+    summary: String(r.summary ?? ''),
+    entityId: r.entity_id != null ? String(r.entity_id) : undefined,
+  }
+}
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
@@ -26,8 +41,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   // แล้ว subscribe Realtime: ถ้าแท็บ/เครื่องอื่นเขียนข้อมูล ให้ดึงมา sync ทันที
   // (ลดความเสี่ยง last-write-wins ที่งานของกันและกันหายเมื่อเปิดหลายที่พร้อมกัน)
   useEffect(() => {
-    useHotelStore.persist.rehydrate()
-
     // เขียนขึ้น cloud ไม่สำเร็จ → เตือนผู้ใช้ (ไม่งั้นงานหายเงียบ ๆ)
     registerSaveErrorHandler((msg) =>
       toast.error('บันทึกขึ้นคลาวด์ไม่สำเร็จ', {
@@ -51,14 +64,79 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           const { _writer, ...envelope } = data
           const incoming = (envelope as { state?: Record<string, unknown> }).state
           if (!incoming) return
+          // auditLogs ย้ายไปตาราง audit_logs แล้ว — strip ออกจาก full-state sync ของ blob
+          // (ไม่งั้นจะมาทับสิ่งที่ audit_logs-sync เพิ่ง apply → 2 แท็บไม่ตรงกัน)
+          const { auditLogs: _migratedAudit, ...rest } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
-          applyRemoteState(() => useHotelStore.setState(incoming as never))
+          applyRemoteState(() => useHotelStore.setState(rest as never))
         }
       )
       .subscribe()
 
+    // ── audit_logs relational sync (Phase 1, strangler) ─────────────────────
+    // entity แรกที่ย้ายจาก blob → ตารางจริง. ลำดับ: subscribe → buffer → seed
+    // (event ที่เข้ามาระหว่าง boot ถูก buffer ไว้ ไม่ตกหล่น) + merge แบบ dedup-by-id
+    let auditLive = false
+    const auditBuffer: AuditLog[] = []
+
+    // รวม entry ใหม่เข้ากับ auditLogs เดิมแบบ dedup ตาม id → sort เวลาใหม่→เก่า → cap 500
+    // (entry เดียวกันมาได้ทั้งจาก optimistic set, realtime echo, และ seed → กันนับซ้ำ)
+    const upsertAuditLogs = (incoming: AuditLog[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map<string, AuditLog>()
+          for (const e of [...incoming, ...s.auditLogs]) {
+            if (!byId.has(e.id)) byId.set(e.id, e)
+          }
+          const merged = Array.from(byId.values())
+            .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
+            .slice(0, 500)
+          return { auditLogs: merged }
+        })
+      )
+    }
+
+    const auditChannel = supabase
+      .channel('audit_logs-sync')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'audit_logs' },
+        (payload) => {
+          const row = payload.new as Record<string, unknown> | null
+          if (!row) return
+          // ข้าม echo ของแท็บนี้เอง (เขียนเองมีใน state แล้วผ่าน optimistic set)
+          if (row.writer_id === CLIENT_ID) return
+          const entry = rowToAuditLog(row)
+          if (!auditLive) {
+            auditBuffer.push(entry) // ยัง seed ไม่เสร็จ → พักไว้ก่อน
+            return
+          }
+          upsertAuditLogs([entry])
+        }
+      )
+      .subscribe()
+
+    // rehydrate blob ให้เสร็จก่อน แล้วค่อย seed audit จากตาราง
+    // (กัน rehydrate.merge เขียนทับ auditLogs ที่ seed มา — blob ยังพก auditLogs อยู่ช่วง dual-write)
+    Promise.resolve(useHotelStore.persist.rehydrate()).then(async () => {
+      const { data, error } = await supabase
+        .from('audit_logs')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(500)
+      if (error) {
+        console.error('[audit-sync] seed:', error.message)
+      } else {
+        const snapshot = (data ?? []).map(rowToAuditLog)
+        upsertAuditLogs([...snapshot, ...auditBuffer])
+      }
+      auditBuffer.length = 0
+      auditLive = true
+    })
+
     return () => {
       supabase.removeChannel(channel)
+      supabase.removeChannel(auditChannel)
     }
   }, [])
 

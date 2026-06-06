@@ -85,7 +85,7 @@ let saveErrorHandler: SaveErrorHandler | null = null
 export function registerSaveErrorHandler(fn: SaveErrorHandler) {
   saveErrorHandler = fn
 }
-function reportSaveError(context: string, message: string) {
+export function reportSaveError(context: string, message: string) {
   console.error(`[supabaseStorage] ${context}:`, message)
   saveErrorHandler?.(message)
 }
@@ -122,9 +122,9 @@ function mergeState(
       out[key] = mergeById(l, r)
     }
   }
-  if (Array.isArray(out.auditLogs)) {
-    out.auditLogs = (out.auditLogs as unknown[]).slice(0, 500)
-  }
+  // auditLogs ย้ายไปตาราง audit_logs แล้ว (relational migration Phase 1) —
+  // ไม่ให้ blob path (CAS merge/write-back) ยุ่งกับมัน; audit_logs-sync เป็นเจ้าของคนเดียว
+  delete out.auditLogs
   return out
 }
 
