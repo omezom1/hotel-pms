@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, toLocalDateKey, sumRealizedRevenue } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, toLocalDateKey, eventDay, sumRealizedRevenue } from '@/lib/utils'
 import { useFocusTrap } from '@/lib/useFocusTrap'
 import { downloadExcel, dateStamp } from '@/lib/export-excel'
 import type { InvoiceStatus, CorporateAccount } from '@/types'
@@ -123,7 +123,7 @@ export default function FinancePage() {
   async function exportInvoices() {
     // กรองตามช่วงวันที่ออกใบ (ถ้าระบุ)
     const filtered = invoices.filter((inv) => {
-      const day = inv.issuedAt.split('T')[0]
+      const day = eventDay(inv.issuedAt)
       if (exportFrom && day < exportFrom) return false
       if (exportTo && day > exportTo) return false
       return true

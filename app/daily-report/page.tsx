@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, getBookingSourceLabel, todayLocal, getGuestDisplayName, calcAddOnTotal, calcOutstanding, bookingOccupiesDay, bookingRevenue, sumRealizedRevenue, sellableRoomCount } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, getBookingSourceLabel, todayLocal, calendarDay, eventDay, getGuestDisplayName, calcAddOnTotal, calcOutstanding, bookingOccupiesDay, bookingRevenue, sumRealizedRevenue, sellableRoomCount } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-excel'
 import { Printer, Calendar, LogIn, LogOut, DollarSign, ShoppingBag, Wrench, Hotel as HotelIcon, UserPlus, FileSpreadsheet } from 'lucide-react'
 import { toast } from 'sonner'
@@ -19,21 +19,24 @@ export default function DailyReportPage() {
   const { bookings, guests, rooms, invoices, bookingAddOns, addOnItems, housekeepingTasks, maintenanceLogs } = useHotelStore()
   const [date, setDate] = useState(() => todayLocal())
 
-  const onDate = (iso?: string) => !!iso && iso.split('T')[0] === date
+  // checkIn/checkOut = "วันปฏิทิน" (UTC-midnight) → calendarDay
+  // timestamp จริง (createdAt/payment.date/fulfilledAt/...) → eventDay (เวลาท้องถิ่น)
+  const onCalDay = (iso?: string) => !!iso && calendarDay(iso) === date
+  const onEventDay = (iso?: string) => !!iso && eventDay(iso) === date
 
   // Check-ins ที่เช็คอินจริงในวันนั้น (status checked_in หรือ checked_out ที่ checkIn ตรงวัน)
   const checkInsToday = bookings.filter((b) =>
-    ['checked_in', 'checked_out'].includes(b.status) && onDate(b.checkIn)
+    ['checked_in', 'checked_out'].includes(b.status) && onCalDay(b.checkIn)
   )
 
   // Check-outs ที่เกิดวันนี้ (checked_out + checkOut ตรงวัน) — รายได้รับรู้จริง
-  const checkOutsToday = bookings.filter((b) => b.status === 'checked_out' && onDate(b.checkOut))
+  const checkOutsToday = bookings.filter((b) => b.status === 'checked_out' && onCalDay(b.checkOut))
   const checkOutRevenue = sumRealizedRevenue(checkOutsToday, bookingAddOns)
 
   // Walk-ins (source walk_in + createdAt วันนี้) — ตัด cancelled ออก (ไม่นับเป็นรายได้ walk-in)
   // หมายเหตุ: ตั้งใจใช้ bookingRevenue (ไม่ใช่ sumRealizedRevenue) เพราะ walk-in รับเงินตอนเข้าพัก
   // (checked_in ก็นับ) = คนละแนวคิดกับ "รายได้รับรู้ตอนเช็คเอาท์"
-  const walkInsToday = bookings.filter((b) => b.source === 'walk_in' && b.status !== 'cancelled' && onDate(b.createdAt))
+  const walkInsToday = bookings.filter((b) => b.source === 'walk_in' && b.status !== 'cancelled' && onEventDay(b.createdAt))
   const walkInRevenue = walkInsToday.reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
 
   // Payments received วันนี้
@@ -42,7 +45,7 @@ export default function DailyReportPage() {
   for (const b of bookings) {
     if (!b.payments) continue
     for (const p of b.payments) {
-      if (onDate(p.date)) {
+      if (onEventDay(p.date)) {
         payments.push({ bookingId: b.id, guestName: getGuestDisplayName(b, guests), amount: p.amount, method: p.method, time: p.date })
       }
     }
@@ -50,17 +53,17 @@ export default function DailyReportPage() {
   const totalPaymentsReceived = payments.reduce((s, p) => s + p.amount, 0)
 
   // Add-ons fulfilled วันนี้
-  const addOnsToday = bookingAddOns.filter((a) => a.status === 'fulfilled' && onDate(a.fulfilledAt))
+  const addOnsToday = bookingAddOns.filter((a) => a.status === 'fulfilled' && onEventDay(a.fulfilledAt))
   const addOnRevenue = addOnsToday.reduce((s, a) => s + a.totalPrice, 0)
 
   // Housekeeping completed วันนี้
-  const hkToday = housekeepingTasks.filter((t) => t.status === 'completed' && onDate(t.completedAt))
+  const hkToday = housekeepingTasks.filter((t) => t.status === 'completed' && onEventDay(t.completedAt))
 
   // Maintenance reported วันนี้
-  const maintToday = maintenanceLogs.filter((m) => onDate(m.reportedAt))
+  const maintToday = maintenanceLogs.filter((m) => onEventDay(m.reportedAt))
 
   // Invoices issued วันนี้
-  const invoicesToday = invoices.filter((iv) => onDate(iv.issuedAt))
+  const invoicesToday = invoices.filter((iv) => onEventDay(iv.issuedAt))
   const invoiceTotal = invoicesToday.reduce((s, iv) => s + iv.total, 0)
 
   // ห้องที่เข้าพักอยู่ในวันที่เลือก (occupancy — นับ booking ที่ครอบครองคืนนั้น)
@@ -73,8 +76,8 @@ export default function DailyReportPage() {
     // booking ที่เกี่ยวข้องกับวันนี้ (พักอยู่ + เข้า/ออกวันนี้) ไม่รวมที่ยกเลิก
     const stays = bookings.filter((b) =>
       b.status !== 'cancelled' &&
-      b.checkIn.split('T')[0] <= date &&
-      b.checkOut.split('T')[0] >= date
+      calendarDay(b.checkIn) <= date &&
+      calendarDay(b.checkOut) >= date
     )
     if (stays.length === 0) {
       toast.error('ไม่มีรายการเข้าพักในวันที่เลือก')
@@ -191,10 +194,10 @@ export default function DailyReportPage() {
         {/* KPI Summary */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
-            { label: 'เช็คอินวันนี้', value: checkInsToday.length, icon: <LogIn size={18} className="text-emerald-600" />, bg: 'bg-emerald-50 border-emerald-100' },
-            { label: 'เช็คเอาต์วันนี้', value: checkOutsToday.length, icon: <LogOut size={18} className="text-amber-600" />, bg: 'bg-amber-50 border-amber-100' },
-            { label: 'ยอดรับเงินสุทธิวันนี้', value: formatCurrency(totalPaymentsReceived), icon: <DollarSign size={18} className="text-blue-600" />, bg: 'bg-blue-50 border-blue-100', isString: true },
-            { label: 'ห้องเข้าพักอยู่', value: `${occupied}/${total}`, icon: <HotelIcon size={18} className="text-purple-600" />, bg: 'bg-purple-50 border-purple-100', isString: true },
+            { label: 'เช็คอินวันนี้', value: checkInsToday.length, icon: <LogIn size={18} className="text-emerald-600" />, bg: 'bg-emerald-50 border-emerald-100 dark:bg-emerald-950/40 dark:border-emerald-900' },
+            { label: 'เช็คเอาต์วันนี้', value: checkOutsToday.length, icon: <LogOut size={18} className="text-amber-600" />, bg: 'bg-amber-50 border-amber-100 dark:bg-amber-950/40 dark:border-amber-900' },
+            { label: 'ยอดรับเงินสุทธิวันนี้', value: formatCurrency(totalPaymentsReceived), icon: <DollarSign size={18} className="text-blue-600" />, bg: 'bg-blue-50 border-blue-100 dark:bg-blue-950/40 dark:border-blue-900', isString: true },
+            { label: 'ห้องเข้าพักอยู่', value: `${occupied}/${total}`, icon: <HotelIcon size={18} className="text-purple-600" />, bg: 'bg-purple-50 border-purple-100 dark:bg-purple-950/40 dark:border-purple-900', isString: true },
           ].map((kpi) => (
             <div key={kpi.label} className={`${kpi.bg} rounded-xl p-4 border print-color`}>
               <div className="flex items-center justify-between mb-2">

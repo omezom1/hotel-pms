@@ -217,6 +217,23 @@ export function todayLocal(): string {
   return toLocalDateKey(new Date())
 }
 
+// ====== แปลง ISO → "วัน" (YYYY-MM-DD): มี 2 ความหมายที่ต้องแยกให้ชัด ======
+// อย่า inline split('T')[0] กับ field วันที่อีก — เลือกใช้ helper ให้ถูกชนิด:
+//
+// • calendarDay  = field ที่เป็น "วันปฏิทิน" เก็บแบบ UTC-midnight (checkIn/checkOut/expense.date)
+//   อ่าน UTC ตรง ๆ ถูกต้องและไม่ขึ้นกับ timezone (คู่กับ calendarDateToISO)
+//
+// • eventDay     = timestamp "จริง" ที่เก็บด้วย new Date().toISOString()
+//   (payment.date / createdAt / fulfilledAt / completedAt / reportedAt / issuedAt)
+//   ต้องแปลงเป็นเวลาท้องถิ่นก่อน ไม่งั้นเหตุการณ์ช่วงข้ามคืนไทย (00:00–06:59) จะตกเป็น
+//   UTC ของ "เมื่อวาน" → ถูกนับผิดวัน (เช่น ยอดรับเงินสุทธิวันนี้กลายเป็น 0)
+export function calendarDay(iso: string): string {
+  return iso.split('T')[0]
+}
+export function eventDay(iso: string): string {
+  return toLocalDateKey(new Date(iso))
+}
+
 // ราคา/คืน ของ room type ในวันนั้น (เลือก rule ที่ช่วงวันสั้นที่สุด = เฉพาะเจาะจงที่สุด)
 export function getNightlyPrice(roomType: string, date: string, fallback: number): number {
   const day = date.split('T')[0]

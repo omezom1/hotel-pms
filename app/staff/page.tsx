@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
-import { formatDate, getStaffRoleLabel } from '@/lib/utils'
+import { formatDate, getStaffRoleLabel, todayLocal, calendarDay } from '@/lib/utils'
 import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { StaffRole, StaffPermissions, Staff } from '@/types'
 import { CheckCircle2, XCircle, KeyRound, UserPlus, Trash2, Eye, EyeOff, Save, X, Pencil } from 'lucide-react'
@@ -59,7 +59,7 @@ function StaffFormDialog({ editing, onClose }: { editing: Staff | null; onClose:
     role: editing?.role ?? ('receptionist' as StaffRole),
     email: editing?.email ?? '',
     phone: editing?.phone ?? '',
-    hireDate: (editing?.hireDate ?? new Date().toISOString()).split('T')[0],
+    hireDate: editing?.hireDate ? calendarDay(editing.hireDate) : todayLocal(),
     isActive: editing?.isActive ?? true,
   })
   const trapRef = useFocusTrap<HTMLDivElement>(true, onClose)

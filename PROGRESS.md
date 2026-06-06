@@ -167,6 +167,13 @@
 - QA round-7 (agent) ผ่าน: ไม่มี HIGH/MED, แก้ LOW (logAudit id entropy 4→5 ตัว + มอง 23505 เป็น idempotent ไม่เด้ง toast). tsc clean (เหลือ 4 errors เดิม)
 - **NEXT:** Tier A ที่เหลือ (expenses/inventory/maintenance) ตามแพทเทิร์นเดียวกัน → Tier B → Tier C+RPC (bookings/invoices/payments, riskiest) → retire blob
 
+### 2026-06-07 (bug fixes จาก click-test + ฟีเจอร์แนบใบเสร็จ)
+- **timezone date-bucketing** (pms-logic-guard): `onDate`/`split('T')[0]` เอา timestamp จริง (UTC) ไปเทียบวัน local → walk-in/รับเงินช่วงข้ามคืนไทย (00:00–06:59) นับวันผิด (ยอดรับเงินสุทธิ=0). consolidate เป็น 2 helper ใน `lib/utils.ts`: **`calendarDay()`** (checkIn/checkOut เก็บ UTC-midnight) vs **`eventDay()`** (timestamp จริง→local). route: daily-report ×6, finance export issuedAt, staff hireDate default. NotificationBell dedup `day`→`calendarDay`. (supabase-api.ts:336 = dead code, ไม่แตะ)
+- **dark mode**: การ์ด KPI daily-report ใช้ `bg-accent-50` (สว่าง ไม่โดน globals override) + ตัวเลข `text-slate-800` (โดน invert เป็นสว่าง) = มองไม่เห็น. เพิ่ม `dark:bg-{accent}-950/40` ให้ daily-report (4) + front-desk (3). (หน้าอื่นใช้ bg-white → globals จัดการแล้ว)
+- **walk-in guest snapshot**: walk-in ลูกค้าใหม่เดิมเรียก `addGuest` ลง CRM → รก dropdown "ลูกค้าเดิม". เปลี่ยนเป็นเก็บ `guestSnapshot` บน booking (ไม่ลง CRM) — dropdown เหลือแค่ลูกค้าประจำ. (getGuestDisplayName/checkout-stats รองรับ snapshot อยู่แล้ว)
+- **แนบรูปบิล/ใบเสร็จในรายจ่าย**: ฟิลด์ `Expense.receiptPath` + อัปโหลดเข้า **Supabase Storage bucket `receipts`** (เก็บ path ไม่ฝังลง blob). ฟอร์มมีปุ่มแนบ+thumbnail+ลบ, รายการมีลิงก์ "ดูใบเสร็จ", ลบรายจ่าย→ลบไฟล์. **DDL `007_receipts_storage.sql` รันบน Dashboard แล้ว** (bucket public + anon read/upload/delete policy)
+- ทั้งหมด tsc clean (เหลือ 4 errors เดิม)
+
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
 2. **bookings/rooms ยังเป็น blob** (ไม่ได้แยก relational ตามตั้งใจเดิม) — ถ้าจะทำ "ถูก 100%"

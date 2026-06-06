@@ -12,7 +12,7 @@ import { useFocusTrap } from '@/lib/useFocusTrap'
 import { toast } from 'sonner'
 
 export default function FrontDeskPage() {
-  const { rooms, guests, bookings, bookingAddOns, updateBookingStatus, createBooking, addGuest, recordPayment, adjustForEarlyCheckout, logAudit } = useHotelStore()
+  const { rooms, guests, bookings, bookingAddOns, updateBookingStatus, createBooking, recordPayment, adjustForEarlyCheckout, logAudit } = useHotelStore()
   const { user } = useAuthStore()
 
   const [walkInRoomId, setWalkInRoomId] = useState<string | null>(null)
@@ -165,24 +165,13 @@ export default function FrontDeskPage() {
       return
     }
 
-    // ถ้าโหมดเพิ่มลูกค้าใหม่ → สร้าง guest ก่อน
-    let guestId = form.guestId
-    if (newGuestMode) {
-      guestId = addGuest({
-        name: newGuest.name,
-        email: '',
-        phone: newGuest.phone,
-        nationality: newGuest.nationality,
-        idNumber: '',
-        preferences: { pillow: null, floor: null, foodAllergies: [], specialRequests: [], smokingRoom: false, bedType: null },
-        totalStays: 0,
-        totalSpend: 0,
-        joinedAt: new Date().toISOString(),
-      })
-      toast.success(`เพิ่มลูกค้า "${newGuest.name}" แล้ว`)
-    }
-
-    if (!guestId) return
+    // ลูกค้าใหม่ (walk-in) = แขกชั่วคราว → เก็บเป็น guestSnapshot บน booking ไม่บันทึกลง CRM
+    // (dropdown "เลือกลูกค้าเดิม" จึงมีแค่ลูกค้าประจำ — ลูกค้าประจำเพิ่มผ่านหน้าลูกค้าเอง)
+    const guestId = newGuestMode ? undefined : form.guestId
+    const guestSnapshot = newGuestMode
+      ? { name: newGuest.name, phone: newGuest.phone, nationality: newGuest.nationality }
+      : undefined
+    if (!newGuestMode && !guestId) return
 
     const total = calcBookingTotal(room.type, checkIn, checkOut, room.pricePerNight)
     // ชำระเต็ม หรือ มัดจำ (ระบุยอด, clamp ไม่ให้เกินยอดรวม/ติดลบ) — ที่เหลือเป็นยอดค้างชำระ
@@ -190,6 +179,7 @@ export default function FrontDeskPage() {
     const result = createBooking({
       roomId: walkInRoomId,
       guestId,
+      guestSnapshot,
       checkIn,
       checkOut,
       nights: form.nights,
@@ -226,9 +216,9 @@ export default function FrontDeskPage() {
         {/* KPI */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
-            { label: 'รอเช็คอิน', value: checkInsRemaining, sub: `เช็คอินไปแล้ว ${checkInsDoneToday}`, color: 'text-blue-600', bg: 'bg-blue-50 border-blue-100' },
-            { label: 'รอเช็คเอาต์', value: checkOutsRemaining, sub: `เช็คเอาต์ไปแล้ว ${checkOutsDoneToday}`, color: 'text-amber-600', bg: 'bg-amber-50 border-amber-100' },
-            { label: 'ห้องว่างตอนนี้', value: availableRooms.length, sub: 'พร้อมรับ walk-in', color: 'text-emerald-600', bg: 'bg-emerald-50 border-emerald-100' },
+            { label: 'รอเช็คอิน', value: checkInsRemaining, sub: `เช็คอินไปแล้ว ${checkInsDoneToday}`, color: 'text-blue-600', bg: 'bg-blue-50 border-blue-100 dark:bg-blue-950/40 dark:border-blue-900' },
+            { label: 'รอเช็คเอาต์', value: checkOutsRemaining, sub: `เช็คเอาต์ไปแล้ว ${checkOutsDoneToday}`, color: 'text-amber-600', bg: 'bg-amber-50 border-amber-100 dark:bg-amber-950/40 dark:border-amber-900' },
+            { label: 'ห้องว่างตอนนี้', value: availableRooms.length, sub: 'พร้อมรับ walk-in', color: 'text-emerald-600', bg: 'bg-emerald-50 border-emerald-100 dark:bg-emerald-950/40 dark:border-emerald-900' },
             { label: 'คิวรอเช็คอินทั้งหมด', value: checkInQueue.length, sub: 'รวมล่วงหน้า', color: 'text-slate-700', bg: 'bg-slate-50 border-slate-100' },
           ].map(({ label, value, sub, color, bg }) => (
             <div key={label} className={`${bg} rounded-xl p-4 border`}>

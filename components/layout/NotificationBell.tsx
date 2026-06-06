@@ -3,7 +3,7 @@ import { useState, useRef, useEffect } from 'react'
 import Link from 'next/link'
 import { Bell, LogIn, LogOut, PackageX, Wrench, Sparkles, type LucideIcon } from 'lucide-react'
 import { useHotelStore } from '@/lib/store'
-import { todayLocal } from '@/lib/utils'
+import { todayLocal, calendarDay } from '@/lib/utils'
 
 interface NotifGroup {
   key: string
@@ -13,8 +13,6 @@ interface NotifGroup {
   href: string
   tone: string // tailwind text/bg color for the icon chip
 }
-
-const day = (iso: string) => iso.split('T')[0]
 
 export default function NotificationBell() {
   const { bookings, inventoryItems, maintenanceLogs, housekeepingTasks } = useHotelStore()
@@ -41,9 +39,9 @@ export default function NotificationBell() {
   const today = todayLocal()
 
   // เช็คอินที่ยืนยันแล้วและถึง/เลยกำหนดเข้าพัก แต่ยังไม่เช็คอิน
-  const pendingCheckIns = bookings.filter((b) => b.status === 'confirmed' && day(b.checkIn) <= today).length
+  const pendingCheckIns = bookings.filter((b) => b.status === 'confirmed' && calendarDay(b.checkIn) <= today).length
   // เช็คเอาต์: แขกที่เช็คอินอยู่และถึง/เลยกำหนดออกแล้ว
-  const dueCheckOuts = bookings.filter((b) => b.status === 'checked_in' && day(b.checkOut) <= today).length
+  const dueCheckOuts = bookings.filter((b) => b.status === 'checked_in' && calendarDay(b.checkOut) <= today).length
   // สต็อกต่ำ/หมด (ถึงหรือต่ำกว่าขั้นต่ำ)
   const lowStock = inventoryItems.filter((i) => i.currentStock <= i.minStock).length
   // งานซ่อมที่ยังไม่ปิด
