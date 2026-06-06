@@ -31,7 +31,8 @@ const unitLabels: Record<InventoryUnit, string> = {
 
 function getStockLevel(item: InventoryItem): 'critical' | 'low' | 'ok' {
   if (item.currentStock <= item.minStock) return 'critical'
-  const pct = item.currentStock / item.maxStock
+  // กัน maxStock = 0/ไม่ตั้งค่า → หารไม่ลงตัว (NaN/Infinity) ถือว่าไม่มีเป้าหมายสูงสุด = ok
+  const pct = item.maxStock > 0 ? item.currentStock / item.maxStock : 1
   if (pct < 0.25) return 'low'
   return 'ok'
 }
@@ -97,6 +98,8 @@ export default function InventoryPage() {
 
   function handleSaveItem() {
     if (!form.name) return
+    if (form.maxStock <= 0) { toast.error('สต็อกสูงสุดต้องมากกว่า 0'); return }
+    if (form.minStock > form.maxStock) { toast.error('สต็อกขั้นต่ำต้องไม่เกินสต็อกสูงสุด'); return }
     if (editItem) {
       updateInventoryItem(editItem.id, form)
       toast.success('บันทึกการแก้ไขแล้ว')
@@ -211,7 +214,7 @@ export default function InventoryPage() {
                 {filtered.map((item) => {
                   const level = getStockLevel(item)
                   const colors = stockColors[level]
-                  const pct = Math.min(100, Math.round((item.currentStock / item.maxStock) * 100))
+                  const pct = item.maxStock > 0 ? Math.min(100, Math.round((item.currentStock / item.maxStock) * 100)) : 100
                   return (
                     <tr key={item.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-4 py-3">
@@ -533,8 +536,9 @@ export default function InventoryPage() {
       {/* Per-item full history ledger */}
       {historyItem && (() => {
         const ledger = itemHistory(historyItem)
-        const restockTotal = ledger.filter((r) => r.tx.quantity > 0).reduce((s, r) => s + r.tx.quantity, 0)
-        const outTotal = ledger.filter((r) => r.tx.quantity < 0).reduce((s, r) => s + r.tx.quantity, 0)
+        // แยกตามชนิดรายการ (ไม่ใช่เครื่องหมาย) — adjust = ปรับยอด reconcile ไม่นับเป็นรับเข้า/จ่ายออกจริง
+        const restockTotal = ledger.filter((r) => r.tx.type === 'restock').reduce((s, r) => s + r.tx.quantity, 0)
+        const outTotal = ledger.filter((r) => r.tx.type === 'use' || r.tx.type === 'waste').reduce((s, r) => s + r.tx.quantity, 0)
         return (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setHistoryItem(null)}>
             <div ref={historyTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col focus:outline-none" onClick={(e) => e.stopPropagation()}>

@@ -138,6 +138,22 @@
   (จ่ายเงินกดรัว / fulfill stock / extend / invoice display) ยังไม่ได้คลิกเช็ค —
   กล่อง WSL ubuntu-26.04 ไม่มี headless Chrome (setup หลายขั้น); คลิกเช็คที่ localhost:3000 จาก Windows ได้
 
+### 2026-06-06 (QA รอบ 6 — โซนที่ยังไม่ได้ตรวจ + แจ้งเตือนจริง)
+- **inventory**: กัน `maxStock=0` หารไม่ลงตัว (NaN/Infinity) ใน `getStockLevel` + แถบ % สต็อก;
+  ฟอร์มเพิ่ม/แก้ validate `maxStock>0` และ `minStock≤maxStock`; สรุป "รับเข้า/จ่ายออก" ใน modal
+  ประวัติ bucket ตาม `type` (restock vs use+waste) แทนเครื่องหมาย → `adjust` (reconcile) ไม่ปนอีก
+- **occupancy = ห้องที่ขายได้จริง**: เพิ่ม `sellableRoomCount()` (ตัดห้อง `maintenance`) ใน `lib/utils.ts`
+  เป็นตัวหารมาตรฐานเดียวกันทั้ง dashboard/reports/daily-report (เดิมหาร `rooms.length` รวมห้องปิดปรับปรุง
+  → % ต่ำเกินจริง). **ลบ RevPAR** (การ์ด KPI + กราฟ) ออกจาก dashboard+reports ตามที่ผู้ใช้เลือก
+  (reports แทนด้วยการ์ด "รายได้วันนี้"); dashboard ปรับ grid KPI เป็น 3 คอลัมน์
+- **กระดิ่งแจ้งเตือนใช้งานจริง**: เดิมเป็นของปลอม (badge "3" hardcode + ไม่มี onClick).
+  สร้าง `components/layout/NotificationBell.tsx` นับจากข้อมูลจริง 5 หมวด (รอเช็คอิน/ครบกำหนดเช็คเอาต์/
+  สต็อกต่ำ/งานซ่อมค้าง/งานแม่บ้านค้าง) → dropdown แต่ละแถวคลิกไปหน้าที่เกี่ยวข้อง, ปิดด้วย Esc/คลิกนอก,
+  badge โชว์ยอดจริง (9+). เสียบแทนใน `Header.tsx` (ใช้ร่วมทุกหน้า ไม่ต้องแตะ page)
+- tsc clean (เหลือ 4 pre-existing errors เดิม); ⏳ ยังไม่ verify ผ่าน browser (click-test ที่ localhost จาก Windows)
+- หมายเหตุ QA ค้าง (MED, ข้าม): daily-report "เช็คอินวันนี้" กรองตาม `checkIn` ที่กำหนด ไม่ใช่เวลาเช็คอินจริง
+  (ไม่มีฟิลด์ `checkedInAt`) — แก้ถูก 100% ต้องเพิ่มฟิลด์ใน data model
+
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
 2. **bookings/rooms ยังเป็น blob** (ไม่ได้แยก relational ตามตั้งใจเดิม) — ถ้าจะทำ "ถูก 100%"

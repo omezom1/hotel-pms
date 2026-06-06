@@ -1,10 +1,10 @@
 'use client'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, todayLocal, toLocalDateKey, bookingOccupiesDay, sumRealizedRevenue } from '@/lib/utils'
+import { formatCurrency, todayLocal, toLocalDateKey, bookingOccupiesDay, sumRealizedRevenue, sellableRoomCount } from '@/lib/utils'
 import type { Booking, BookingAddOn } from '@/types'
 import {
-  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area
 } from 'recharts'
 import { format, parseISO } from 'date-fns'
@@ -22,8 +22,7 @@ function buildDailyStats(bookings: Booking[], addOns: BookingAddOn[], totalRooms
     const revenue = sumRealizedRevenue(bookings, addOns, (b) => b.checkOut.startsWith(day))
     const occupied = bookings.filter((b) => bookingOccupiesDay(b, day)).length
     const occupancy = totalRooms > 0 ? Math.round((occupied / totalRooms) * 100) : 0
-    const revpar = totalRooms > 0 ? Math.round(revenue / totalRooms) : 0
-    return { date: day, revenue, occupancy, revpar }
+    return { date: day, revenue, occupancy }
   })
 }
 
@@ -52,12 +51,9 @@ export default function ReportsPage() {
     value: bookings.filter((b) => b.source === src && b.status !== 'cancelled').length,
   })).filter((d) => d.value > 0)
 
-  const dailyStats = buildDailyStats(bookings, bookingAddOns, rooms.length, 30)
-  const revparData = dailyStats.slice(-14).map((d) => ({
-    date: format(parseISO(d.date), 'dd MMM', { locale: th }),
-    RevPAR: d.revpar,
-    รายได้: Math.round(d.revenue / 1000),
-  }))
+  // occupancy หารด้วยห้องที่ขายได้จริง (ตัดห้องปิดปรับปรุงออก) — ตัวหารมาตรฐานเดียวกันทุกหน้า
+  const sellableRooms = sellableRoomCount(rooms)
+  const dailyStats = buildDailyStats(bookings, bookingAddOns, sellableRooms, 30)
 
   const occupancyData = dailyStats.map((d) => ({
     date: format(parseISO(d.date), 'dd MMM', { locale: th }),
@@ -72,10 +68,9 @@ export default function ReportsPage() {
   const today = todayLocal()
   const totalRevenue = sumRealizedRevenue(bookings, bookingAddOns)
   const todayRevenue = sumRealizedRevenue(bookings, bookingAddOns, (b) => b.checkOut.startsWith(today))
-  const occupancyNow = rooms.length > 0
-    ? (rooms.filter((r) => r.status === 'occupied').length / rooms.length) * 100
+  const occupancyNow = sellableRooms > 0
+    ? (rooms.filter((r) => r.status === 'occupied').length / sellableRooms) * 100
     : 0
-  const revparNow = rooms.length > 0 ? todayRevenue / rooms.length : 0
 
   return (
     <div className="flex flex-col h-screen">
@@ -87,7 +82,7 @@ export default function ReportsPage() {
           {[
             { label: 'รายได้สะสมทั้งหมด', value: formatCurrency(totalRevenue), icon: <DollarSign size={18} className="text-emerald-600" />, bg: 'bg-emerald-100' },
             { label: 'Occupancy ตอนนี้', value: `${occupancyNow.toFixed(1)}%`, icon: <BarChart2 size={18} className="text-blue-600" />, bg: 'bg-blue-100' },
-            { label: 'RevPAR วันนี้', value: formatCurrency(revparNow), icon: <TrendingUp size={18} className="text-amber-600" />, bg: 'bg-amber-100' },
+            { label: 'รายได้วันนี้', value: formatCurrency(todayRevenue), icon: <TrendingUp size={18} className="text-amber-600" />, bg: 'bg-amber-100' },
             { label: 'สมาชิกทั้งหมด', value: `${guests.length} ราย`, icon: <Users size={18} className="text-purple-600" />, bg: 'bg-purple-100' },
           ].map(({ label, value, icon, bg }) => (
             <div key={label} className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
@@ -101,20 +96,6 @@ export default function ReportsPage() {
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-          {/* RevPAR Trend */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
-            <h2 className="font-semibold text-slate-800 mb-4">RevPAR (14 วันย้อนหลัง)</h2>
-            <ResponsiveContainer width="100%" height={200}>
-              <LineChart data={revparData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#94a3b8' }} />
-                <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} />
-                <Tooltip contentStyle={{ borderRadius: '8px', fontSize: '12px' }} formatter={(v) => [formatCurrency(Number(v)), 'RevPAR']} />
-                <Line type="monotone" dataKey="RevPAR" stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-
           {/* Occupancy Trend */}
           <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
             <h2 className="font-semibold text-slate-800 mb-4">Occupancy Rate (30 วันย้อนหลัง)</h2>

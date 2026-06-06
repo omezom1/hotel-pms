@@ -3,12 +3,12 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, getRoomStatusLabel, getRoomTypeLabel, todayLocal, toLocalDateKey, getGuestDisplayName, bookingOccupiesDay, bookingActiveOnDay, sumRealizedRevenue } from '@/lib/utils'
+import { formatCurrency, formatDate, getRoomStatusLabel, getRoomTypeLabel, todayLocal, toLocalDateKey, getGuestDisplayName, bookingOccupiesDay, bookingActiveOnDay, sumRealizedRevenue, sellableRoomCount } from '@/lib/utils'
 import type { RoomStatus } from '@/types'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from 'recharts'
-import { TrendingUp, BedDouble, LogIn, DollarSign, CalendarSearch } from 'lucide-react'
+import { BedDouble, LogIn, DollarSign, CalendarSearch } from 'lucide-react'
 import { format, parseISO } from 'date-fns'
 import { th } from 'date-fns/locale'
 
@@ -29,11 +29,11 @@ export default function DashboardPage() {
   const today = todayLocal()
   const checkInQueue = bookings.filter((b) => b.status === 'confirmed' && b.checkIn.startsWith(today)).length
   const checkOutToday = bookings.filter((b) => b.status === 'checked_in' && b.checkOut.startsWith(today)).length
-  const occupancyRate = stats.total > 0 ? Math.round((stats.occupied / stats.total) * 100) : 0
+  // occupancy หารด้วย "ห้องที่ขายได้" (ตัดห้องปิดปรับปรุงออก) — ตัวหารมาตรฐานเดียวกันทุกหน้า
+  const sellable = sellableRoomCount(rooms)
+  const occupancyRate = sellable > 0 ? Math.round((stats.occupied / sellable) * 100) : 0
   // รายได้วันนี้ = ยอดรวมของ booking ที่ check-out วันนี้ (ค่าห้อง + add-on)
   const todayRevenue = sumRealizedRevenue(bookings, bookingAddOns, (b) => b.checkOut.startsWith(today))
-  // RevPAR (มาตรฐาน) = รายได้วันนี้ ÷ ห้องทั้งหมด
-  const revpar = stats.total > 0 ? Math.round(todayRevenue / stats.total) : 0
 
   const chartData = Array.from({ length: 14 }, (_, i) => {
     const d = new Date()
@@ -42,7 +42,7 @@ export default function DashboardPage() {
     const occupied = bookings.filter((b) => bookingOccupiesDay(b, day)).length
     return {
       dateLabel: format(parseISO(day), 'dd MMM', { locale: th }),
-      occupancy: rooms.length > 0 ? Math.round((occupied / rooms.length) * 100) : 0,
+      occupancy: sellable > 0 ? Math.round((occupied / sellable) * 100) : 0,
     }
   })
 
@@ -82,7 +82,7 @@ export default function DashboardPage() {
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
 
         {/* KPI Cards */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
           <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
             <div className="flex items-center justify-between mb-3">
               <span className="text-sm text-slate-500">อัตราการเข้าพัก</span>
@@ -91,7 +91,7 @@ export default function DashboardPage() {
               </div>
             </div>
             <div className="text-3xl font-bold text-slate-800">{occupancyRate}%</div>
-            <div className="text-xs text-slate-400 mt-1">{stats.occupied}/{stats.total} ห้อง</div>
+            <div className="text-xs text-slate-400 mt-1">{stats.occupied}/{sellable} ห้องที่ขายได้</div>
           </div>
           <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
             <div className="flex items-center justify-between mb-3">
@@ -102,16 +102,6 @@ export default function DashboardPage() {
             </div>
             <div className="text-2xl font-bold text-slate-800">{formatCurrency(todayRevenue)}</div>
             <div className="text-xs text-slate-400 mt-1">จากห้องที่เข้าพักอยู่</div>
-          </div>
-          <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-sm text-slate-500">RevPAR</span>
-              <div className="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center">
-                <TrendingUp size={18} className="text-amber-600" />
-              </div>
-            </div>
-            <div className="text-2xl font-bold text-slate-800">{formatCurrency(revpar)}</div>
-            <div className="text-xs text-slate-400 mt-1">รายได้เฉลี่ยต่อห้อง</div>
           </div>
           <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
             <div className="flex items-center justify-between mb-3">

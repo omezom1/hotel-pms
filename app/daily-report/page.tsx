@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, getBookingSourceLabel, todayLocal, getGuestDisplayName, calcAddOnTotal, calcOutstanding, bookingOccupiesDay, bookingRevenue, sumRealizedRevenue } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, getBookingSourceLabel, todayLocal, getGuestDisplayName, calcAddOnTotal, calcOutstanding, bookingOccupiesDay, bookingRevenue, sumRealizedRevenue, sellableRoomCount } from '@/lib/utils'
 import { downloadExcel } from '@/lib/export-excel'
 import { Printer, Calendar, LogIn, LogOut, DollarSign, ShoppingBag, Wrench, Hotel as HotelIcon, UserPlus, FileSpreadsheet } from 'lucide-react'
 import { toast } from 'sonner'
@@ -65,7 +65,8 @@ export default function DailyReportPage() {
 
   // ห้องที่เข้าพักอยู่ในวันที่เลือก (occupancy — นับ booking ที่ครอบครองคืนนั้น)
   const occupied = bookings.filter((b) => bookingOccupiesDay(b, date)).length
-  const total = rooms.length
+  // ตัวหาร = ห้องที่ขายได้จริง (ตัดห้องปิดปรับปรุงออก) ให้ตรงกับ dashboard/reports
+  const total = sellableRoomCount(rooms)
 
   // ===== ส่งออก Excel: รายงานเข้าพัก + การชำระเงินรายห้อง ของวันที่เลือก =====
   function exportDailyExcel() {

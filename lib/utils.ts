@@ -106,6 +106,12 @@ export function bookingActiveOnDay(b: Booking, dayKey: string): boolean {
   return isActiveReservation(b.status) && day(b.checkIn) <= dayKey && day(b.checkOut) > dayKey
 }
 
+// จำนวนห้องที่ "ขายได้จริง" = ตัดห้องปิดปรับปรุง (maintenance) ออก — ห้องปิดปรับปรุงไม่ใช่ห้องที่ขายได้
+// ใช้เป็นตัวหารมาตรฐานของ occupancy ทุกหน้า (dashboard/reports/daily-report) ให้เลขตรงกันทุกที่
+export function sellableRoomCount(rooms: { status: string }[]): number {
+  return rooms.filter((r) => r.status !== 'maintenance').length
+}
+
 // (stats) booking นี้ครอบครองคืนของ "วัน" ที่กำหนดไหม — ใช้กับ occupancy/รายงาน
 // นับ checked_out ด้วย (แขกที่เช็คเอาท์ไปแล้วก็เคยใช้ห้องคืนนั้นจริง) ไม่นับ cancelled
 export function bookingOccupiesDay(b: Booking, dayKey: string): boolean {
