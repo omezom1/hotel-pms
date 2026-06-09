@@ -18,6 +18,12 @@ import {
   mockAddOnItems, mockBookingAddOns, mockExpenses, shiftMockDates
 } from './mock-data'
 
+// dual-write helper: รายงาน error ของการเขียนตาราง expenses (relational migration Tier A)
+// 23505 = PK ซ้ำ (echo/retry) → idempotent ไม่ถือเป็นความผิดพลาด; อื่น ๆ เตือนผู้ใช้
+function reportExpenseError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('expense write', error.message)
+}
+
 interface HotelStore {
   rooms: Room[]
   guests: Guest[]
@@ -874,20 +880,54 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     }),
 
   // ===== Expense actions =====
-  addExpense: (expense) =>
-    set((state) => ({
-      expenses: [{ ...expense, id: `exp${Date.now()}`, createdAt: new Date().toISOString() }, ...state.expenses],
-    })),
+  // dual-write ขึ้นตาราง expenses (relational migration Tier A, strangler) — แพทเทิร์นเดียวกับ logAudit
+  // blob ยังเป็นแหล่งจริงช่วง dual-write → write ที่ fail แค่ทำให้ตารางคลาดเคลื่อน 1 แถว (rollback ฟรี)
+  // แต่ "ห้าม fire-and-forget เงียบ" — fail แล้วต้องเตือน (กันข้อมูลหายเงียบหลัง cutover)
+  addExpense: (expense) => {
+    const newExpense: Expense = { ...expense, id: `exp${Date.now()}`, createdAt: new Date().toISOString() }
+    set((state) => ({ expenses: [newExpense, ...state.expenses] }))
+    void supabase
+      .from('expenses')
+      .insert({
+        id: newExpense.id,
+        date: newExpense.date,
+        category: newExpense.category,
+        description: newExpense.description,
+        payee: newExpense.payee ?? null,
+        amount: newExpense.amount,
+        note: newExpense.note ?? null,
+        receipt_path: newExpense.receiptPath ?? null,
+        writer_id: CLIENT_ID,
+      })
+      .then(reportExpenseError)
+  },
 
-  updateExpense: (id, updates) =>
+  updateExpense: (id, updates) => {
     set((state) => ({
       expenses: state.expenses.map((e) => (e.id === id ? { ...e, ...updates } : e)),
-    })),
+    }))
+    // map เฉพาะฟิลด์ที่เปลี่ยน → snake_case (undefined ไม่ถูกส่ง) + writer_id เสมอ
+    const patch: Record<string, unknown> = { writer_id: CLIENT_ID }
+    if (updates.date !== undefined) patch.date = updates.date
+    if (updates.category !== undefined) patch.category = updates.category
+    if (updates.description !== undefined) patch.description = updates.description
+    if (updates.payee !== undefined) patch.payee = updates.payee ?? null
+    if (updates.amount !== undefined) patch.amount = updates.amount
+    if (updates.note !== undefined) patch.note = updates.note ?? null
+    if (updates.receiptPath !== undefined) patch.receipt_path = updates.receiptPath ?? null
+    void supabase.from('expenses').update(patch).eq('id', id).then(reportExpenseError)
+  },
 
-  deleteExpense: (id) =>
-    set((state) => ({
-      expenses: state.expenses.filter((e) => e.id !== id),
-    })),
+  deleteExpense: (id) => {
+    set((state) => ({ expenses: state.expenses.filter((e) => e.id !== id) }))
+    // soft-delete: ตั้ง deleted_at แทนลบแถวจริง → กัน §3c resurrection + เก็บ history
+    // (UI ลบออกจาก state แล้ว; hydrate/seed กรอง deleted_at IS NULL จึงไม่โผล่กลับ)
+    void supabase
+      .from('expenses')
+      .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+      .eq('id', id)
+      .then(reportExpenseError)
+  },
 
   // ===== User / account actions =====
   addUser: (userData) => {
@@ -1174,9 +1214,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
   // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
   skipHydration: true,
-  // ── relational migration: auditLogs ย้ายไปตาราง audit_logs แล้ว (Phase 1 cutover) ──
-  // partialize = ตัด auditLogs ออกจากสิ่งที่เขียนลง blob → ตาราง audit_logs เป็นเจ้าของคนเดียว
-  // (กัน app_state full-state sync มาทับสิ่งที่ audit_logs-sync เพิ่ง apply)
+  // ── relational migration: auditLogs (Phase 1) + expenses (Tier A) ย้ายไปตารางจริงแล้ว ──
+  // partialize = ตัด slice เหล่านี้ออกจากสิ่งที่เขียนลง blob → ตารางเป็นเจ้าของคนเดียว
+  // (กัน app_state full-state sync / union-merge มาทับ-หรือชุบชีวิต สิ่งที่ per-table sync เพิ่ง apply)
   partialize: (state) => ({
     rooms: state.rooms,
     guests: state.guests,
@@ -1192,12 +1232,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     corporateTransactions: state.corporateTransactions,
     addOnItems: state.addOnItems,
     bookingAddOns: state.bookingAddOns,
-    expenses: state.expenses,
   }),
-  // blob เก่าอาจยังมี auditLogs ติดมา — merge ปล่อยให้ seed จากตารางเป็นตัวเติม (ไม่ revive จาก blob)
+  // blob เก่าอาจยังพก auditLogs/expenses ติดมา — บังคับใช้ค่าใน current (ปล่อยให้ seed จากตารางเติม)
+  // ไม่งั้นแถวที่ลบไป (soft-delete) จะถูก rehydrate จาก blob เก่ามาชุบชีวิตก่อน seed ทับ
   merge: (persisted, current) => {
     const p = (persisted ?? {}) as Partial<typeof current>
-    return { ...current, ...p, auditLogs: current.auditLogs ?? [] }
+    return { ...current, ...p, auditLogs: current.auditLogs ?? [], expenses: current.expenses ?? [] }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading
   onRehydrateStorage: () => (_state, error) => {

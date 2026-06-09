@@ -122,9 +122,11 @@ function mergeState(
       out[key] = mergeById(l, r)
     }
   }
-  // auditLogs ย้ายไปตาราง audit_logs แล้ว (relational migration Phase 1) —
-  // ไม่ให้ blob path (CAS merge/write-back) ยุ่งกับมัน; audit_logs-sync เป็นเจ้าของคนเดียว
+  // auditLogs (Phase 1) + expenses (Tier A) ย้ายไปตารางจริงแล้ว — ไม่ให้ blob path
+  // (CAS union-merge/write-back) ยุ่งกับมัน; per-table sync เป็นเจ้าของ slice เหล่านี้คนเดียว
+  // (สำคัญกับ expenses เป็นพิเศษ: union-merge เคยชุบชีวิตแถวที่ soft-delete ไปแล้ว = §3c)
   delete out.auditLogs
+  delete out.expenses
   return out
 }
 

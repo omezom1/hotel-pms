@@ -59,7 +59,9 @@
 - `003_realtime_app_state.sql` — เปิด realtime publication + replica identity full — ✅ รันแล้ว
 - `004_app_state_version.sql` — เพิ่มคอลัมน์ `version` (optimistic concurrency) — ✅ รันแล้ว (2026-06-01)
 - `005_relational_prep.sql` — **Phase 0** relational migration: ตาราง `payments`+`expenses`, คอลัมน์ `bookings.room_type_at_booking`, `updated_at`/`deleted_at` + trigger `set_updated_at` บน 13 ตารางที่จะย้าย (additive ล้วน) — ⏳ **ยังไม่รัน**
-- `006_audit_logs_realtime.sql` — **Phase 1** (audit_logs entity แรก): reconcile CHECK category (union `expense`+`staff`), เพิ่ม `writer_id`, เปิด realtime publication + replica identity full — ⏳ **ยังไม่รัน**
+- `006_audit_logs_realtime.sql` — **Phase 1** (audit_logs entity แรก): reconcile CHECK category (union `expense`+`staff`), เพิ่ม `writer_id`, เปิด realtime publication + replica identity full — ✅ รันแล้ว
+- `007_receipts_storage.sql` — bucket `receipts` (แนบรูปบิล) public + anon read/upload/delete — ✅ รันแล้ว
+- `008_expenses_realtime.sql` — **Tier A** (expenses, entity แรกที่ mutable): เพิ่มคอลัมน์ `receipt_path`+`writer_id`, เปิด realtime publication + replica identity full (รองรับ UPDATE/DELETE payload) — ⏳ **ยังไม่รัน**
 > DDL รันผ่าน anon key ไม่ได้ ต้องทำใน Dashboard เท่านั้น (MCP ก็ถูกบล็อกตามกฎนี้)
 
 ## 4b. Deployment (Vercel) — ⚠️ ตั้งค่าครั้งเดียว อย่าลืม
@@ -173,6 +175,18 @@
 - **walk-in guest snapshot**: walk-in ลูกค้าใหม่เดิมเรียก `addGuest` ลง CRM → รก dropdown "ลูกค้าเดิม". เปลี่ยนเป็นเก็บ `guestSnapshot` บน booking (ไม่ลง CRM) — dropdown เหลือแค่ลูกค้าประจำ. (getGuestDisplayName/checkout-stats รองรับ snapshot อยู่แล้ว)
 - **แนบรูปบิล/ใบเสร็จในรายจ่าย**: ฟิลด์ `Expense.receiptPath` + อัปโหลดเข้า **Supabase Storage bucket `receipts`** (เก็บ path ไม่ฝังลง blob). ฟอร์มมีปุ่มแนบ+thumbnail+ลบ, รายการมีลิงก์ "ดูใบเสร็จ", ลบรายจ่าย→ลบไฟล์. **DDL `007_receipts_storage.sql` รันบน Dashboard แล้ว** (bucket public + anon read/upload/delete policy)
 - ทั้งหมด tsc clean (เหลือ 4 errors เดิม)
+
+### 2026-06-09 (Tier A เริ่ม — expenses cutover, step 1+2 จาก 3)
+ต่อจาก audit_logs (Phase 1, append-only practice) → **expenses เป็น entity แรกที่ mutable** (มี update+delete)
+- **DDL `008_expenses_realtime.sql`** เขียนแล้ว — ⏳ **ผู้ใช้ต้องรันใน Dashboard ก่อนใช้งานหน้า /expenses** (ไม่งั้น dual-write fail → toast เตือน; blob ยังเป็นแหล่งจริง ไม่หาย): เพิ่ม `receipt_path`+`writer_id`, realtime publication, replica identity full
+- **dual-write** (`lib/store.ts` expense actions): `addExpense`=insert, `updateExpense`=update (map เฉพาะฟิลด์ที่เปลี่ยน→snake), `deleteExpense`=**soft-delete** (`deleted_at=NOW()` ไม่ลบแถวจริง — กัน §3c resurrection + เก็บ history). helper `reportExpenseError` (23505 idempotent), `writer_id=CLIENT_ID`
+- **per-table realtime** (`AppShell.tsx` `expenses-sync`): ฟัง event `'*'` (ต่างจาก audit ที่ INSERT อย่างเดียว — ต้องรับ UPDATE/DELETE), `deleted_at!=null`→เอาออกจาก state, อื่นๆ→upsert by id; subscribe→buffer→seed (`is('deleted_at', null)`); echo-guard `writer_id===CLIENT_ID`; mapper `rowToExpense`
+- **backfill ครั้งเดียว**: ตาราง expenses (จาก 005) ว่าง แต่ของจริงอยู่ใน blob → ถ้า seed ได้ 0 แถว+blob มีของ → upsert ยกขึ้นตาราง (idempotent onConflict id) ก่อนถอด blob
+- **✅ DDL 008 รันแล้วบน live DB + verify** (receipt_path/writer_id/deleted_at ครบ, realtime=true, replica identity=f). **backfill verify ผ่าน** (รายจ่ายเดิมขึ้นตารางครบ, รวมอันที่แนบ receipt_path). **add/edit/soft-delete verify ผ่านฝั่งตาราง** (deleted_at ถูกตั้ง แถวไม่หาย)
+- **✅ step 3 (blob isolation) เสร็จแล้ว — 4 จุด** (เลียนแบบ auditLogs): (1) partialize ตัด expenses, (2) merge บังคับ `expenses: current.expenses ?? []` (กัน blob เก่าชุบชีวิต soft-deleted), (3) AppShell app_state-sync strip expenses จาก incoming, (4) `mergeState` `delete out.expenses`. **+ แก้ seed เป็น replace** (`setState({expenses: snapshot})` ไม่ merge ทับ mock) เพราะ initial state = mockExpenses 15 รายการ แต่ user ลบไป 9 → ถ้า merge มันจะโผล่กลับ (auditLogs ไม่เจอเพราะ initial = [])
+- **บั๊กที่เจอตอนเทสต์ = หลักฐาน §3c สดๆ:** ก่อนทำ step 3 กดเพิ่ม→แก้→ลบเร็วๆ ติดกัน → CAS union-merge ของ blob ชุบชีวิตแถวที่ soft-delete กลับเข้า UI (ตาราง deleted_at ถูกต้อง แต่ UI โชว์). step 3 แก้หาย
+- tsc clean (เหลือ 4 errors เดิม). **⚠️ ยังไม่ commit** (working tree มี: 008 sql, store.ts, AppShell.tsx, supabase-storage.ts, PROGRESS.md)
+- ⏳ **NEXT:** ผู้ใช้ hard-refresh 2 แท็บ ยืนยัน (ที่ลบหาย/mock ที่ลบไม่ฟื้น/2-tab realtime ไม่ค้าง) → commit → แล้วไล่ **inventory** (items + ledger inventory_transactions, พัวพัน checkout auto-consume) → **maintenance** (maintenance_logs, พัวพัน rooms status — ต้อง replay side-effect เพราะ rooms ยังอยู่ blob/Tier B) ด้วยแพทเทิร์นเดียวกัน
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)

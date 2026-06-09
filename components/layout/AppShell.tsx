@@ -8,7 +8,7 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog } from '@/types'
+import type { AuditLog, Expense } from '@/types'
 import { toast } from 'sonner'
 
 const STORE_KEY = 'hotel-pms-storage'
@@ -24,6 +24,21 @@ function rowToAuditLog(r: Record<string, unknown>): AuditLog {
     action: String(r.action ?? ''),
     summary: String(r.summary ?? ''),
     entityId: r.entity_id != null ? String(r.entity_id) : undefined,
+  }
+}
+
+// แปลงแถว expenses (snake_case จาก Supabase) → Expense (camelCase)
+function rowToExpense(r: Record<string, unknown>): Expense {
+  return {
+    id: String(r.id),
+    date: String(r.date),
+    category: r.category as Expense['category'],
+    description: String(r.description ?? ''),
+    payee: r.payee != null ? String(r.payee) : undefined,
+    amount: Number(r.amount ?? 0),
+    note: r.note != null ? String(r.note) : undefined,
+    receiptPath: r.receipt_path != null ? String(r.receipt_path) : undefined,
+    createdAt: String(r.created_at ?? r.date),
   }
 }
 
@@ -64,9 +79,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           const { _writer, ...envelope } = data
           const incoming = (envelope as { state?: Record<string, unknown> }).state
           if (!incoming) return
-          // auditLogs ย้ายไปตาราง audit_logs แล้ว — strip ออกจาก full-state sync ของ blob
-          // (ไม่งั้นจะมาทับสิ่งที่ audit_logs-sync เพิ่ง apply → 2 แท็บไม่ตรงกัน)
-          const { auditLogs: _migratedAudit, ...rest } = incoming
+          // auditLogs/expenses ย้ายไปตารางจริงแล้ว — strip ออกจาก full-state sync ของ blob
+          // (ไม่งั้นจะมาทับ/ชุบชีวิตสิ่งที่ per-table sync เพิ่ง apply → 2 แท็บไม่ตรงกัน)
+          const { auditLogs: _migratedAudit, expenses: _migratedExpenses, ...rest } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
           applyRemoteState(() => useHotelStore.setState(rest as never))
         }
@@ -116,8 +131,56 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
-    // rehydrate blob ให้เสร็จก่อน แล้วค่อย seed audit จากตาราง
-    // (กัน rehydrate.merge เขียนทับ auditLogs ที่ seed มา — blob ยังพก auditLogs อยู่ช่วง dual-write)
+    // ── expenses relational sync (Tier A, strangler — entity แรกที่ mutable) ──
+    // ต่างจาก audit (append-only): มี UPDATE/DELETE → ฟัง event '*' + ใช้ soft-delete
+    // (deleted_at != null = ลบ → เอาออกจาก state; อื่น ๆ = upsert by id)
+    let expensesLive = false
+    type ExpenseEvent = { id: string; deleted: boolean; expense: Expense }
+    const expensesBuffer: ExpenseEvent[] = []
+
+    // apply ชุด event ทับ state.expenses เดิม (upsert/remove by id) → sort ใหม่→เก่า
+    const applyExpenseEvents = (events: ExpenseEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.expenses.map((e) => [e.id, e]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.expense)
+          }
+          const merged = Array.from(byId.values()).sort((a, b) =>
+            a.createdAt < b.createdAt ? 1 : -1
+          )
+          return { expenses: merged }
+        })
+      )
+    }
+
+    const expensesChannel = supabase
+      .channel('expenses-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'expenses' },
+        (payload) => {
+          // soft-delete = UPDATE(deleted_at); hard DELETE (เผื่อไว้) ใช้ payload.old
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: ExpenseEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            expense: rowToExpense(row),
+          }
+          if (!expensesLive) {
+            expensesBuffer.push(ev) // ยัง seed ไม่เสร็จ → พักไว้ก่อน
+            return
+          }
+          applyExpenseEvents([ev])
+        }
+      )
+      .subscribe()
+
+    // rehydrate blob ให้เสร็จก่อน แล้วค่อย seed audit + expenses จากตาราง
+    // (กัน rehydrate.merge เขียนทับสิ่งที่ seed มา — blob ยังพก slice เหล่านี้อยู่ช่วง dual-write)
     Promise.resolve(useHotelStore.persist.rehydrate()).then(async () => {
       const { data, error } = await supabase
         .from('audit_logs')
@@ -132,11 +195,52 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       auditBuffer.length = 0
       auditLive = true
+
+      // seed expenses (กรอง soft-deleted); ถ้าตารางว่างแต่ blob มีของ → backfill ครั้งเดียว
+      const { data: expData, error: expErr } = await supabase
+        .from('expenses')
+        .select('*')
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
+      if (expErr) {
+        console.error('[expenses-sync] seed:', expErr.message)
+      } else {
+        let rows = expData ?? []
+        // backfill: ตาราง expenses (สร้างใน 005) ว่าง แต่ของจริงยังอยู่ใน blob →
+        // ยกขึ้นตารางครั้งเดียว (idempotent ด้วย upsert onConflict id) ก่อนถอด blob (step 3)
+        const local = useHotelStore.getState().expenses
+        if (rows.length === 0 && local.length > 0) {
+          const { error: bfErr } = await supabase.from('expenses').upsert(
+            local.map((e) => ({
+              id: e.id, date: e.date, category: e.category, description: e.description,
+              payee: e.payee ?? null, amount: e.amount, note: e.note ?? null,
+              receipt_path: e.receiptPath ?? null, writer_id: CLIENT_ID,
+            })),
+            { onConflict: 'id' }
+          )
+          if (bfErr) console.error('[expenses-sync] backfill:', bfErr.message)
+          else {
+            const re = await supabase
+              .from('expenses').select('*').is('deleted_at', null)
+              .order('created_at', { ascending: false })
+            rows = re.data ?? rows
+          }
+        }
+        const snapshot = rows.map(rowToExpense)
+        // seed = authoritative: แทนที่ทั้ง slice ด้วย snapshot จากตาราง (ไม่ merge ทับ initial/mock)
+        // ไม่งั้น mock row ที่ user เคยลบ (ไม่มีในตาราง) จะโผล่กลับมา — ตารางเป็นแหล่งจริงคนเดียว
+        applyRemoteState(() => useHotelStore.setState({ expenses: snapshot }))
+        // event ที่ buffer ไว้ระหว่าง boot (แท็บอื่นแก้) apply ทับ snapshot
+        if (expensesBuffer.length) applyExpenseEvents(expensesBuffer)
+      }
+      expensesBuffer.length = 0
+      expensesLive = true
     })
 
     return () => {
       supabase.removeChannel(channel)
       supabase.removeChannel(auditChannel)
+      supabase.removeChannel(expensesChannel)
     }
   }, [])
 
