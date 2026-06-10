@@ -122,11 +122,13 @@ function mergeState(
       out[key] = mergeById(l, r)
     }
   }
-  // auditLogs (Phase 1) + expenses (Tier A) ย้ายไปตารางจริงแล้ว — ไม่ให้ blob path
+  // auditLogs (Phase 1) + expenses + inventory (Tier A) ย้ายไปตารางจริงแล้ว — ไม่ให้ blob path
   // (CAS union-merge/write-back) ยุ่งกับมัน; per-table sync เป็นเจ้าของ slice เหล่านี้คนเดียว
-  // (สำคัญกับ expenses เป็นพิเศษ: union-merge เคยชุบชีวิตแถวที่ soft-delete ไปแล้ว = §3c)
+  // (สำคัญกับ mutable+soft-delete เป็นพิเศษ: union-merge เคยชุบชีวิตแถวที่ soft-delete ไปแล้ว = §3c)
   delete out.auditLogs
   delete out.expenses
+  delete out.inventoryItems
+  delete out.inventoryTransactions
   return out
 }
 

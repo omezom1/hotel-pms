@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-06-06
+> อัปเดตล่าสุด: 2026-06-10
 
 ---
 
@@ -61,7 +61,8 @@
 - `005_relational_prep.sql` — **Phase 0** relational migration: ตาราง `payments`+`expenses`, คอลัมน์ `bookings.room_type_at_booking`, `updated_at`/`deleted_at` + trigger `set_updated_at` บน 13 ตารางที่จะย้าย (additive ล้วน) — ⏳ **ยังไม่รัน**
 - `006_audit_logs_realtime.sql` — **Phase 1** (audit_logs entity แรก): reconcile CHECK category (union `expense`+`staff`), เพิ่ม `writer_id`, เปิด realtime publication + replica identity full — ✅ รันแล้ว
 - `007_receipts_storage.sql` — bucket `receipts` (แนบรูปบิล) public + anon read/upload/delete — ✅ รันแล้ว
-- `008_expenses_realtime.sql` — **Tier A** (expenses, entity แรกที่ mutable): เพิ่มคอลัมน์ `receipt_path`+`writer_id`, เปิด realtime publication + replica identity full (รองรับ UPDATE/DELETE payload) — ⏳ **ยังไม่รัน**
+- `008_expenses_realtime.sql` — **Tier A** (expenses, entity แรกที่ mutable): เพิ่มคอลัมน์ `receipt_path`+`writer_id`, เปิด realtime publication + replica identity full (รองรับ UPDATE/DELETE payload) — ✅ รันแล้ว (2026-06-09)
+- `009_inventory_realtime.sql` — **Tier A** (inventory, 2 entity): เพิ่ม `writer_id` ให้ `inventory_items` (mutable, soft-delete) + `inventory_transactions` (ledger append-only), เปิด realtime publication + replica identity full ทั้งคู่ — ⏳ **ยังไม่รัน** (ต้องรันก่อนใช้หน้า /inventory ไม่งั้น dual-write fail → toast เตือน; blob ยังเป็นแหล่งจริง ไม่หาย)
 > DDL รันผ่าน anon key ไม่ได้ ต้องทำใน Dashboard เท่านั้น (MCP ก็ถูกบล็อกตามกฎนี้)
 
 ## 4b. Deployment (Vercel) — ⚠️ ตั้งค่าครั้งเดียว อย่าลืม
@@ -185,8 +186,21 @@
 - **✅ DDL 008 รันแล้วบน live DB + verify** (receipt_path/writer_id/deleted_at ครบ, realtime=true, replica identity=f). **backfill verify ผ่าน** (รายจ่ายเดิมขึ้นตารางครบ, รวมอันที่แนบ receipt_path). **add/edit/soft-delete verify ผ่านฝั่งตาราง** (deleted_at ถูกตั้ง แถวไม่หาย)
 - **✅ step 3 (blob isolation) เสร็จแล้ว — 4 จุด** (เลียนแบบ auditLogs): (1) partialize ตัด expenses, (2) merge บังคับ `expenses: current.expenses ?? []` (กัน blob เก่าชุบชีวิต soft-deleted), (3) AppShell app_state-sync strip expenses จาก incoming, (4) `mergeState` `delete out.expenses`. **+ แก้ seed เป็น replace** (`setState({expenses: snapshot})` ไม่ merge ทับ mock) เพราะ initial state = mockExpenses 15 รายการ แต่ user ลบไป 9 → ถ้า merge มันจะโผล่กลับ (auditLogs ไม่เจอเพราะ initial = [])
 - **บั๊กที่เจอตอนเทสต์ = หลักฐาน §3c สดๆ:** ก่อนทำ step 3 กดเพิ่ม→แก้→ลบเร็วๆ ติดกัน → CAS union-merge ของ blob ชุบชีวิตแถวที่ soft-delete กลับเข้า UI (ตาราง deleted_at ถูกต้อง แต่ UI โชว์). step 3 แก้หาย
-- tsc clean (เหลือ 4 errors เดิม). **⚠️ ยังไม่ commit** (working tree มี: 008 sql, store.ts, AppShell.tsx, supabase-storage.ts, PROGRESS.md)
-- ⏳ **NEXT:** ผู้ใช้ hard-refresh 2 แท็บ ยืนยัน (ที่ลบหาย/mock ที่ลบไม่ฟื้น/2-tab realtime ไม่ค้าง) → commit → แล้วไล่ **inventory** (items + ledger inventory_transactions, พัวพัน checkout auto-consume) → **maintenance** (maintenance_logs, พัวพัน rooms status — ต้อง replay side-effect เพราะ rooms ยังอยู่ blob/Tier B) ด้วยแพทเทิร์นเดียวกัน
+- tsc clean (เหลือ 4 errors เดิม). ✅ **commit แล้ว `28ad744`** (expenses cutover); branch ยังนำ origin (ยังไม่ push ตอนนี้)
+
+### 2026-06-10 (Tier A ต่อ — inventory cutover: 2 entity, code-complete)
+ต่อจาก expenses → **inventory เป็น cutover ที่ซับซ้อนสุดของ Tier A** เพราะมี **2 entity ที่ต้องย้ายพร้อมกัน** (stock-movement แก้ทั้งคู่ในนาทีเดียว) + มี side-effect จาก checkout/add-on:
+- **2 entity:** `inventory_items` = **mutable + soft-delete** (เหมือน expenses) · `inventory_transactions` = **append-only ledger** (เหมือน audit_logs, INSERT อย่างเดียว)
+- **DDL `009_inventory_realtime.sql`** เขียนแล้ว — ⏳ **ผู้ใช้ต้องรันใน Dashboard ก่อนใช้หน้า /inventory**: เพิ่ม `writer_id` ทั้งสองตาราง, เปิด realtime + replica identity full ทั้งคู่ (ตารางสร้างใน 001 แล้ว; `deleted_at`/trigger ของ items มาจาก 005)
+- **dual-write** (`lib/store.ts`): helper `reportInventoryError`(23505 idempotent) + `inventoryItemRow`/`pushInventoryStock`(update current_stock+last_restocked)/`pushInventoryTx`(insert ledger). wire ทุกจุดที่แตะสต็อก:
+  - items CRUD: `addInventoryItem`=insert, `updateInventoryItem`=patch เฉพาะฟิลด์เปลี่ยน, `deleteInventoryItem`=**soft-delete**
+  - stock-movement: `restockItem`/`useInventoryItem`/`adjustStock` → push stock + push tx (restructure ให้ compute ก่อน set แล้ว dual-write หลัง)
+  - **side-effect จาก add-on:** `fulfillAddOn` (ตัดสต็อก) + `cancelAddOn` (คืนสต็อก) → จับค่า side-effect เป็น `invFx` ใน closure ของ set() แล้ว dual-write หลัง set (bookingAddOns ยังเป็น blob/Tier C — ย้ายเฉพาะ slice inventory). **หมายเหตุ TS:** ต้อง cast `invFx` ก่อน truthiness guard (TS ไม่ widen ตัวที่ assign ใน closure → มองเป็น never)
+- **per-table realtime** (`AppShell.tsx`): `inventory_items-sync` (event `'*'`, soft-delete→ลบออก/อื่นๆ upsert, เหมือน expenses) + `inventory_transactions-sync` (INSERT, dedup-by-id sort date desc, เหมือน audit). subscribe→buffer→seed ทั้งคู่; echo-guard `writer_id===CLIENT_ID`; mapper `rowToInventoryItem`/`rowToInventoryTx`
+- **backfill ครั้งเดียว** (ตาราง 001 ว่าง, ของจริงอยู่ blob): seed items ก่อน (FK) → seed tx; **tx backfill กรองเฉพาะ tx ที่อ้าง item ที่ยังอยู่** (กัน FK violation จาก orphan tx ของ item ที่ถูกลบไปแล้วใน blob). tx seed รับ default cap 1000 แถวล่าสุดของ Supabase (พอสำหรับรีสอร์ตเล็ก)
+- **blob isolation 4 จุด** (เหมือน auditLogs/expenses): partialize ตัด 2 slice, merge บังคับ `current ?? []` ทั้งสอง, AppShell app_state-sync strip 2 slice, `mergeState` (supabase-storage) `delete out.inventoryItems`+`inventoryTransactions`. seed = authoritative replace (`setState` ไม่ merge ทับ mock)
+- tsc clean (เหลือ 4 errors เดิม). **⚠️ ยังไม่ commit** (working tree: 009 sql, store.ts, AppShell.tsx, supabase-storage.ts, PROGRESS.md)
+- ⏳ **NEXT:** ผู้ใช้ **รัน DDL 009 ใน Dashboard** → hard-refresh 2 แท็บ ยืนยัน (เพิ่ม/แก้/ลบ item, restock/adjust/use, fulfill+cancel add-on ตัด/คืนสต็อก, 2-tab realtime ตรงกัน, mock ที่ลบไม่ฟื้น) → commit → push → แล้วไล่ **maintenance** (maintenance_logs, พัวพัน rooms status — ต้อง replay side-effect เพราะ rooms ยังอยู่ blob/Tier B) ด้วยแพทเทิร์นเดียวกัน
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)

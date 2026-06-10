@@ -24,6 +24,40 @@ function reportExpenseError({ error }: { error: { code?: string; message: string
   if (error && error.code !== '23505') reportSaveError('expense write', error.message)
 }
 
+// dual-write helpers สำหรับ inventory (Tier A) — 2 entity:
+//   inventory_items        = mutable (add/update/soft-delete + currentStock เปลี่ยนตลอด)
+//   inventory_transactions = append-only ledger (restock/use/adjust/waste) เหมือน audit_logs
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportInventoryError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('inventory write', error.message)
+}
+
+// แปลง InventoryItem → row (snake_case) สำหรับ insert (+ writer_id echo key)
+function inventoryItemRow(item: InventoryItem) {
+  return {
+    id: item.id, name: item.name, category: item.category, unit: item.unit,
+    current_stock: item.currentStock, min_stock: item.minStock, max_stock: item.maxStock,
+    cost_per_unit: item.costPerUnit, supplier: item.supplier ?? null,
+    last_restocked: item.lastRestocked, notes: item.notes ?? null, writer_id: CLIENT_ID,
+  }
+}
+
+// อัปเดต currentStock (+ last_restocked เมื่อ restock) ของ item ขึ้นตาราง — ใช้โดยทุก stock-movement
+function pushInventoryStock(itemId: string, currentStock: number, lastRestocked?: string) {
+  const patch: Record<string, unknown> = { current_stock: currentStock, writer_id: CLIENT_ID }
+  if (lastRestocked !== undefined) patch.last_restocked = lastRestocked
+  void supabase.from('inventory_items').update(patch).eq('id', itemId).then(reportInventoryError)
+}
+
+// insert แถว ledger ขึ้นตาราง inventory_transactions (append-only)
+function pushInventoryTx(tx: InventoryTransaction) {
+  void supabase.from('inventory_transactions').insert({
+    id: tx.id, item_id: tx.itemId, type: tx.type, quantity: tx.quantity,
+    reference_id: tx.referenceId ?? null, performed_by: tx.performedBy, date: tx.date,
+    notes: tx.notes ?? null, writer_id: CLIENT_ID,
+  }).then(reportInventoryError)
+}
+
 interface HotelStore {
   rooms: Room[]
   guests: Guest[]
@@ -728,39 +762,60 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       return { maintenanceLogs: updatedLogs, rooms: updatedRooms }
     }),
 
-  addInventoryItem: (itemData) =>
-    set((state) => ({
-      inventoryItems: [...state.inventoryItems, { ...itemData, id: `inv${Date.now()}` }],
-    })),
+  // ── inventory dual-write (Tier A, strangler) — blob ยังเป็นแหล่งจริงช่วง dual-write ──
+  addInventoryItem: (itemData) => {
+    const newItem: InventoryItem = { ...itemData, id: `inv${Date.now()}` }
+    set((state) => ({ inventoryItems: [...state.inventoryItems, newItem] }))
+    void supabase.from('inventory_items').insert(inventoryItemRow(newItem)).then(reportInventoryError)
+  },
 
-  updateInventoryItem: (id, updates) =>
+  updateInventoryItem: (id, updates) => {
     set((state) => ({
       inventoryItems: state.inventoryItems.map((item) =>
         item.id === id ? { ...item, ...updates } : item
       ),
-    })),
+    }))
+    // map เฉพาะฟิลด์ที่เปลี่ยน → snake_case + writer_id เสมอ
+    const patch: Record<string, unknown> = { writer_id: CLIENT_ID }
+    if (updates.name !== undefined) patch.name = updates.name
+    if (updates.category !== undefined) patch.category = updates.category
+    if (updates.unit !== undefined) patch.unit = updates.unit
+    if (updates.currentStock !== undefined) patch.current_stock = updates.currentStock
+    if (updates.minStock !== undefined) patch.min_stock = updates.minStock
+    if (updates.maxStock !== undefined) patch.max_stock = updates.maxStock
+    if (updates.costPerUnit !== undefined) patch.cost_per_unit = updates.costPerUnit
+    if (updates.supplier !== undefined) patch.supplier = updates.supplier ?? null
+    if (updates.lastRestocked !== undefined) patch.last_restocked = updates.lastRestocked
+    if (updates.notes !== undefined) patch.notes = updates.notes ?? null
+    void supabase.from('inventory_items').update(patch).eq('id', id).then(reportInventoryError)
+  },
 
-  deleteInventoryItem: (id) =>
+  deleteInventoryItem: (id) => {
+    set((state) => ({ inventoryItems: state.inventoryItems.filter((item) => item.id !== id) }))
+    // soft-delete (กัน §3c resurrection); inventory_transactions อ้าง item_id ผ่าน FK → ห้ามลบแถวจริง
+    void supabase.from('inventory_items')
+      .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+      .eq('id', id).then(reportInventoryError)
+  },
+
+  restockItem: (itemId, quantity, staffId, notes) => {
+    if (quantity <= 0) return // กันเติมสต็อกค่าติดลบ/ศูนย์
+    const item = get().inventoryItems.find((i) => i.id === itemId)
+    if (!item) return
+    const now = new Date().toISOString()
+    const newStock = item.currentStock + quantity
+    const tx: InventoryTransaction = {
+      id: `itx${Date.now()}`, itemId, type: 'restock', quantity, performedBy: staffId, date: now, notes,
+    }
     set((state) => ({
-      inventoryItems: state.inventoryItems.filter((item) => item.id !== id),
-    })),
-
-  restockItem: (itemId, quantity, staffId, notes) =>
-    set((state) => {
-      if (quantity <= 0) return {} // กันเติมสต็อกค่าติดลบ/ศูนย์
-      const now = new Date().toISOString()
-      const tx: InventoryTransaction = {
-        id: `itx${Date.now()}`, itemId, type: 'restock', quantity, performedBy: staffId, date: now, notes,
-      }
-      return {
-        inventoryItems: state.inventoryItems.map((item) =>
-          item.id === itemId
-            ? { ...item, currentStock: item.currentStock + quantity, lastRestocked: now }
-            : item
-        ),
-        inventoryTransactions: [tx, ...state.inventoryTransactions],
-      }
-    }),
+      inventoryItems: state.inventoryItems.map((it) =>
+        it.id === itemId ? { ...it, currentStock: newStock, lastRestocked: now } : it
+      ),
+      inventoryTransactions: [tx, ...state.inventoryTransactions],
+    }))
+    pushInventoryStock(itemId, newStock, now)
+    pushInventoryTx(tx)
+  },
 
   useInventoryItem: (itemId, quantity, staffId, referenceId, notes) => {
     const state = get()
@@ -771,34 +826,38 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       return { ok: false, error: `สต็อก "${item.name}" ไม่พอ (มี ${item.currentStock} ต้องการ ${quantity})` }
     }
     const now = new Date().toISOString()
+    const newStock = item.currentStock - quantity
     const tx: InventoryTransaction = {
       id: `itx${Date.now()}`, itemId, type: 'use', quantity: -quantity, performedBy: staffId, date: now, referenceId, notes,
     }
     set((s) => ({
       inventoryItems: s.inventoryItems.map((it) =>
-        it.id === itemId ? { ...it, currentStock: it.currentStock - quantity } : it
+        it.id === itemId ? { ...it, currentStock: newStock } : it
       ),
       inventoryTransactions: [tx, ...s.inventoryTransactions],
     }))
+    pushInventoryStock(itemId, newStock)
+    pushInventoryTx(tx)
     return { ok: true }
   },
 
-  adjustStock: (itemId, newQuantity, staffId, notes) =>
-    set((state) => {
-      const now = new Date().toISOString()
-      const item = state.inventoryItems.find((i) => i.id === itemId)
-      if (!item) return {}
-      const diff = newQuantity - item.currentStock
-      const tx: InventoryTransaction = {
-        id: `itx${Date.now()}`, itemId, type: 'adjust', quantity: diff, performedBy: staffId, date: now, notes,
-      }
-      return {
-        inventoryItems: state.inventoryItems.map((i) =>
-          i.id === itemId ? { ...i, currentStock: newQuantity } : i
-        ),
-        inventoryTransactions: [tx, ...state.inventoryTransactions],
-      }
-    }),
+  adjustStock: (itemId, newQuantity, staffId, notes) => {
+    const item = get().inventoryItems.find((i) => i.id === itemId)
+    if (!item) return
+    const now = new Date().toISOString()
+    const diff = newQuantity - item.currentStock
+    const tx: InventoryTransaction = {
+      id: `itx${Date.now()}`, itemId, type: 'adjust', quantity: diff, performedBy: staffId, date: now, notes,
+    }
+    set((state) => ({
+      inventoryItems: state.inventoryItems.map((i) =>
+        i.id === itemId ? { ...i, currentStock: newQuantity } : i
+      ),
+      inventoryTransactions: [tx, ...state.inventoryTransactions],
+    }))
+    pushInventoryStock(itemId, newQuantity)
+    pushInventoryTx(tx)
+  },
 
   addCorporateAccount: (accountData) =>
     set((state) => ({
@@ -1078,6 +1137,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     // ตรวจสถานะ + สต็อก แล้วตัดสต็อก ใน set() เดียว (atomic) — กัน fulfill 2 รายการรัว ๆ
     // ที่ดึงของชิ้นเดียวกัน: ถ้าตรวจสต็อกนอก set() ทั้งคู่ผ่าน check บน stock เดิม → ตัดเกิน stock ติดลบ
     let result: { ok: true } | { ok: false; error: string } = { ok: true }
+    // side-effect ฝั่ง inventory (ตัดสต็อก) ที่ต้อง dual-write ขึ้นตารางหลัง set() — bookingAddOns ยัง blob (Tier C)
+    let invFx: { itemId: string; newStock: number; tx: InventoryTransaction } | null = null
     set((s) => {
       const addOn = s.bookingAddOns.find((a) => a.id === addOnId)
       if (!addOn) {
@@ -1111,6 +1172,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             : i
         )
         updatedTx = [invTx, ...s.inventoryTransactions]
+        invFx = { itemId: item.inventoryItemId, newStock: inv.currentStock - deduct, tx: invTx }
       }
       return {
         bookingAddOns: s.bookingAddOns.map((a) =>
@@ -1120,10 +1182,18 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         inventoryTransactions: updatedTx,
       }
     })
+    // TS ไม่ widen invFx ที่ assign ใน closure → cast คืน type ก่อน truthiness guard
+    const fx = invFx as { itemId: string; newStock: number; tx: InventoryTransaction } | null
+    if (result.ok && fx) {
+      pushInventoryStock(fx.itemId, fx.newStock)
+      pushInventoryTx(fx.tx)
+    }
     return result
   },
 
-  cancelAddOn: (addOnId) =>
+  cancelAddOn: (addOnId) => {
+    // side-effect ฝั่ง inventory (คืนสต็อก) ที่ต้อง dual-write ขึ้นตารางหลัง set()
+    let invFx: { itemId: string; newStock: number; tx: InventoryTransaction } | null = null
     set((state) => {
       const addOn = state.bookingAddOns.find((a) => a.id === addOnId)
       if (!addOn) return {}
@@ -1137,6 +1207,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       let updatedTx = state.inventoryTransactions
       if (wasFulfilled && item?.inventoryItemId && item.inventoryQtyPerUnit > 0) {
         const restore = item.inventoryQtyPerUnit * addOn.quantity
+        const inv = state.inventoryItems.find((i) => i.id === item.inventoryItemId)
         const invTx: InventoryTransaction = {
           id: `itx${Date.now()}`, itemId: item.inventoryItemId, type: 'adjust',
           quantity: restore, referenceId: addOnId, performedBy: 'system',
@@ -1149,6 +1220,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             : i
         )
         updatedTx = [invTx, ...state.inventoryTransactions]
+        if (inv) invFx = { itemId: item.inventoryItemId, newStock: inv.currentStock + restore, tx: invTx }
       }
 
       // คืนเงินส่วนที่จ่ายเกิน ถ้า add-on นี้ถูกชำระไปแล้ว (paidAmount เกินยอดที่ต้องจ่ายหลังยกเลิก)
@@ -1206,7 +1278,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         corporateAccounts: updatedCorpAccounts,
         corporateTransactions: updatedCorpTx,
       }
-    }),
+    })
+    const fx = invFx as { itemId: string; newStock: number; tx: InventoryTransaction } | null
+    if (fx) {
+      pushInventoryStock(fx.itemId, fx.newStock)
+      pushInventoryTx(fx.tx)
+    }
+  },
 }), {
   name: 'hotel-pms-storage',
   storage: createJSONStorage(() => supabaseStorage),
@@ -1214,7 +1292,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
   // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
   skipHydration: true,
-  // ── relational migration: auditLogs (Phase 1) + expenses (Tier A) ย้ายไปตารางจริงแล้ว ──
+  // ── relational migration: auditLogs (Phase 1) + expenses + inventory (Tier A) ย้ายไปตารางจริงแล้ว ──
   // partialize = ตัด slice เหล่านี้ออกจากสิ่งที่เขียนลง blob → ตารางเป็นเจ้าของคนเดียว
   // (กัน app_state full-state sync / union-merge มาทับ-หรือชุบชีวิต สิ่งที่ per-table sync เพิ่ง apply)
   partialize: (state) => ({
@@ -1226,18 +1304,22 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     maintenanceLogs: state.maintenanceLogs,
     staff: state.staff,
     users: state.users,
-    inventoryItems: state.inventoryItems,
-    inventoryTransactions: state.inventoryTransactions,
     corporateAccounts: state.corporateAccounts,
     corporateTransactions: state.corporateTransactions,
     addOnItems: state.addOnItems,
     bookingAddOns: state.bookingAddOns,
   }),
-  // blob เก่าอาจยังพก auditLogs/expenses ติดมา — บังคับใช้ค่าใน current (ปล่อยให้ seed จากตารางเติม)
+  // blob เก่าอาจยังพก slice ที่ย้ายแล้วติดมา — บังคับใช้ค่าใน current (ปล่อยให้ seed จากตารางเติม)
   // ไม่งั้นแถวที่ลบไป (soft-delete) จะถูก rehydrate จาก blob เก่ามาชุบชีวิตก่อน seed ทับ
   merge: (persisted, current) => {
     const p = (persisted ?? {}) as Partial<typeof current>
-    return { ...current, ...p, auditLogs: current.auditLogs ?? [], expenses: current.expenses ?? [] }
+    return {
+      ...current, ...p,
+      auditLogs: current.auditLogs ?? [],
+      expenses: current.expenses ?? [],
+      inventoryItems: current.inventoryItems ?? [],
+      inventoryTransactions: current.inventoryTransactions ?? [],
+    }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading
   onRehydrateStorage: () => (_state, error) => {

@@ -8,7 +8,7 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog, Expense } from '@/types'
+import type { AuditLog, Expense, InventoryItem, InventoryTransaction } from '@/types'
 import { toast } from 'sonner'
 
 const STORE_KEY = 'hotel-pms-storage'
@@ -39,6 +39,37 @@ function rowToExpense(r: Record<string, unknown>): Expense {
     note: r.note != null ? String(r.note) : undefined,
     receiptPath: r.receipt_path != null ? String(r.receipt_path) : undefined,
     createdAt: String(r.created_at ?? r.date),
+  }
+}
+
+// แปลงแถว inventory_items (snake_case) → InventoryItem (camelCase)
+function rowToInventoryItem(r: Record<string, unknown>): InventoryItem {
+  return {
+    id: String(r.id),
+    name: String(r.name ?? ''),
+    category: r.category as InventoryItem['category'],
+    unit: r.unit as InventoryItem['unit'],
+    currentStock: Number(r.current_stock ?? 0),
+    minStock: Number(r.min_stock ?? 0),
+    maxStock: Number(r.max_stock ?? 0),
+    costPerUnit: Number(r.cost_per_unit ?? 0),
+    supplier: r.supplier != null ? String(r.supplier) : undefined,
+    lastRestocked: String(r.last_restocked ?? ''),
+    notes: r.notes != null ? String(r.notes) : undefined,
+  }
+}
+
+// แปลงแถว inventory_transactions (snake_case) → InventoryTransaction (camelCase)
+function rowToInventoryTx(r: Record<string, unknown>): InventoryTransaction {
+  return {
+    id: String(r.id),
+    itemId: String(r.item_id),
+    type: r.type as InventoryTransaction['type'],
+    quantity: Number(r.quantity ?? 0),
+    referenceId: r.reference_id != null ? String(r.reference_id) : undefined,
+    performedBy: String(r.performed_by ?? ''),
+    date: String(r.date ?? ''),
+    notes: r.notes != null ? String(r.notes) : undefined,
   }
 }
 
@@ -79,9 +110,13 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           const { _writer, ...envelope } = data
           const incoming = (envelope as { state?: Record<string, unknown> }).state
           if (!incoming) return
-          // auditLogs/expenses ย้ายไปตารางจริงแล้ว — strip ออกจาก full-state sync ของ blob
+          // auditLogs/expenses/inventory ย้ายไปตารางจริงแล้ว — strip ออกจาก full-state sync ของ blob
           // (ไม่งั้นจะมาทับ/ชุบชีวิตสิ่งที่ per-table sync เพิ่ง apply → 2 แท็บไม่ตรงกัน)
-          const { auditLogs: _migratedAudit, expenses: _migratedExpenses, ...rest } = incoming
+          const {
+            auditLogs: _migAudit, expenses: _migExp,
+            inventoryItems: _migInvItems, inventoryTransactions: _migInvTx,
+            ...rest
+          } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
           applyRemoteState(() => useHotelStore.setState(rest as never))
         }
@@ -179,6 +214,80 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
+    // ── inventory relational sync (Tier A, strangler) — 2 entity ────────────
+    // inventory_items = mutable (event '*' + soft-delete เหมือน expenses)
+    let itemsLive = false
+    type InvItemEvent = { id: string; deleted: boolean; item: InventoryItem }
+    const itemsBuffer: InvItemEvent[] = []
+    const applyInventoryItemEvents = (events: InvItemEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.inventoryItems.map((i) => [i.id, i]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.item)
+          }
+          return { inventoryItems: Array.from(byId.values()) }
+        })
+      )
+    }
+    const itemsChannel = supabase
+      .channel('inventory_items-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'inventory_items' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: InvItemEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            item: rowToInventoryItem(row),
+          }
+          if (!itemsLive) {
+            itemsBuffer.push(ev)
+            return
+          }
+          applyInventoryItemEvents([ev])
+        }
+      )
+      .subscribe()
+
+    // inventory_transactions = append-only ledger (INSERT เหมือน audit_logs)
+    let txLive = false
+    const txBuffer: InventoryTransaction[] = []
+    const upsertInventoryTx = (incoming: InventoryTransaction[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map<string, InventoryTransaction>()
+          for (const t of [...incoming, ...s.inventoryTransactions]) {
+            if (!byId.has(t.id)) byId.set(t.id, t)
+          }
+          const merged = Array.from(byId.values()).sort((a, b) => (a.date < b.date ? 1 : -1))
+          return { inventoryTransactions: merged }
+        })
+      )
+    }
+    const txChannel = supabase
+      .channel('inventory_transactions-sync')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'inventory_transactions' },
+        (payload) => {
+          const row = payload.new as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return
+          const tx = rowToInventoryTx(row)
+          if (!txLive) {
+            txBuffer.push(tx)
+            return
+          }
+          upsertInventoryTx([tx])
+        }
+      )
+      .subscribe()
+
     // rehydrate blob ให้เสร็จก่อน แล้วค่อย seed audit + expenses จากตาราง
     // (กัน rehydrate.merge เขียนทับสิ่งที่ seed มา — blob ยังพก slice เหล่านี้อยู่ช่วง dual-write)
     Promise.resolve(useHotelStore.persist.rehydrate()).then(async () => {
@@ -235,12 +344,87 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       expensesBuffer.length = 0
       expensesLive = true
+
+      // ── seed inventory_items (กรอง soft-deleted) + backfill ครั้งเดียวจาก blob ──
+      const { data: itemData, error: itemErr } = await supabase
+        .from('inventory_items')
+        .select('*')
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
+      if (itemErr) {
+        console.error('[inventory-items-sync] seed:', itemErr.message)
+      } else {
+        let rows = itemData ?? []
+        const localItems = useHotelStore.getState().inventoryItems
+        if (rows.length === 0 && localItems.length > 0) {
+          const { error: bfErr } = await supabase.from('inventory_items').upsert(
+            localItems.map((i) => ({
+              id: i.id, name: i.name, category: i.category, unit: i.unit,
+              current_stock: i.currentStock, min_stock: i.minStock, max_stock: i.maxStock,
+              cost_per_unit: i.costPerUnit, supplier: i.supplier ?? null,
+              last_restocked: i.lastRestocked, notes: i.notes ?? null, writer_id: CLIENT_ID,
+            })),
+            { onConflict: 'id' }
+          )
+          if (bfErr) console.error('[inventory-items-sync] backfill:', bfErr.message)
+          else {
+            const re = await supabase
+              .from('inventory_items').select('*').is('deleted_at', null)
+              .order('created_at', { ascending: false })
+            rows = re.data ?? rows
+          }
+        }
+        applyRemoteState(() => useHotelStore.setState({ inventoryItems: rows.map(rowToInventoryItem) }))
+        if (itemsBuffer.length) applyInventoryItemEvents(itemsBuffer)
+      }
+      itemsBuffer.length = 0
+      itemsLive = true
+
+      // ── seed inventory_transactions (ledger) + backfill (หลัง items เพราะ FK item_id) ──
+      // backfill กรอง tx ที่อ้าง item ซึ่งถูกลบไปแล้ว (ไม่อยู่ในตาราง items) กัน FK violation
+      const { data: txData, error: txErr } = await supabase
+        .from('inventory_transactions')
+        .select('*')
+        .order('created_at', { ascending: false })
+      if (txErr) {
+        console.error('[inventory-tx-sync] seed:', txErr.message)
+      } else {
+        let rows = txData ?? []
+        const localTx = useHotelStore.getState().inventoryTransactions
+        if (rows.length === 0 && localTx.length > 0) {
+          const liveItemIds = new Set(useHotelStore.getState().inventoryItems.map((i) => i.id))
+          const insertable = localTx.filter((t) => liveItemIds.has(t.itemId))
+          if (insertable.length > 0) {
+            const { error: bfErr } = await supabase.from('inventory_transactions').upsert(
+              insertable.map((t) => ({
+                id: t.id, item_id: t.itemId, type: t.type, quantity: t.quantity,
+                reference_id: t.referenceId ?? null, performed_by: t.performedBy,
+                date: t.date, notes: t.notes ?? null, writer_id: CLIENT_ID,
+              })),
+              { onConflict: 'id' }
+            )
+            if (bfErr) console.error('[inventory-tx-sync] backfill:', bfErr.message)
+            else {
+              const re = await supabase
+                .from('inventory_transactions').select('*')
+                .order('created_at', { ascending: false })
+              rows = re.data ?? rows
+            }
+          }
+        }
+        applyRemoteState(() => useHotelStore.setState({ inventoryTransactions: rows.map(rowToInventoryTx) }))
+        if (txBuffer.length) upsertInventoryTx(txBuffer)
+      }
+      txBuffer.length = 0
+      txLive = true
     })
 
     return () => {
       supabase.removeChannel(channel)
       supabase.removeChannel(auditChannel)
       supabase.removeChannel(expensesChannel)
+      supabase.removeChannel(itemsChannel)
+      supabase.removeChannel(txChannel)
     }
   }, [])
 
