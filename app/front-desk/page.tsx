@@ -23,11 +23,11 @@ export default function FrontDeskPage() {
     payMode: 'full' as 'full' | 'deposit', deposit: 0,
   })
   const [newGuestMode, setNewGuestMode] = useState(false)
-  const [newGuest, setNewGuest] = useState({ name: '', phone: '', nationality: 'ไทย' })
+  const [newGuest, setNewGuest] = useState({ name: '', phone: '', nationality: 'ไทย', idNumber: '' })
   const [payDialog, setPayDialog] = useState<{ bookingId: string; outstanding: number } | null>(null)
   const [payAmount, setPayAmount] = useState(0)
   const [payMethod, setPayMethod] = useState<PaymentMethod>('cash')
-  const [checkoutTarget, setCheckoutTarget] = useState<{ bookingId: string; gName: string; roomNo: string; outstanding: number } | null>(null)
+  const [checkoutTarget, setCheckoutTarget] = useState<{ bookingId: string; gName: string; roomNo: string; outstanding: number; corporateCharge?: { amount: number; company: string } | null } | null>(null)
   const [earlyTarget, setEarlyTarget] = useState<{ bookingId: string; gName: string; roomNo: string; remaining: number } | null>(null)
   const payTrapRef = useFocusTrap<HTMLDivElement>(!!payDialog, () => setPayDialog(null))
 
@@ -86,7 +86,13 @@ export default function FrontDeskPage() {
     if (outstanding > 0) {
       const gName = b ? getGuestDisplayName(b, guests) : '-'
       const roomNo = rooms.find((x) => x.id === b?.roomId)?.number ?? '-'
-      setCheckoutTarget({ bookingId, gName, roomNo, outstanding })
+      // booking องค์กรที่เครดิตพอ → เช็คเอาต์จะตัดเครดิตอัตโนมัติ ไม่ใช่ค้างชำระจริง → แจ้งให้ชัด
+      let corporateCharge: { amount: number; company: string } | null = null
+      if (b?.corporateAccountId) {
+        const acc = st.corporateAccounts.find((a) => a.id === b.corporateAccountId)
+        if (acc && acc.availableBalance >= outstanding) corporateCharge = { amount: outstanding, company: acc.companyName }
+      }
+      setCheckoutTarget({ bookingId, gName, roomNo, outstanding, corporateCharge })
       return
     }
     doCheckOut(bookingId)
@@ -169,7 +175,7 @@ export default function FrontDeskPage() {
     // (dropdown "เลือกลูกค้าเดิม" จึงมีแค่ลูกค้าประจำ — ลูกค้าประจำเพิ่มผ่านหน้าลูกค้าเอง)
     const guestId = newGuestMode ? undefined : form.guestId
     const guestSnapshot = newGuestMode
-      ? { name: newGuest.name, phone: newGuest.phone, nationality: newGuest.nationality }
+      ? { name: newGuest.name, phone: newGuest.phone, nationality: newGuest.nationality, idNumber: newGuest.idNumber || undefined }
       : undefined
     if (!newGuestMode && !guestId) return
 
@@ -199,7 +205,7 @@ export default function FrontDeskPage() {
     setWalkInRoomId(null)
     setForm({ guestId: '', nights: 1, adults: 1, children: 0, paymentMethod: 'cash', payMode: 'full', deposit: 0 })
     setNewGuestMode(false)
-    setNewGuest({ name: '', phone: '', nationality: 'ไทย' })
+    setNewGuest({ name: '', phone: '', nationality: 'ไทย', idNumber: '' })
     const guestName = guests.find((x) => x.id === guestId)?.name ?? newGuest.name ?? '-'
     logAudit({ category: 'booking', action: 'walk_in', summary: `Walk-in ${guestName} ห้อง ${room.number} ${form.nights} คืน` })
     toast.success(`Walk-in สำเร็จ ห้อง ${room.number}`)
@@ -387,7 +393,7 @@ export default function FrontDeskPage() {
                                 setWalkInRoomId(room.id)
                                 setForm({ guestId: '', nights: 1, adults: 1, children: 0, paymentMethod: 'cash', payMode: 'full', deposit: 0 })
                                 setNewGuestMode(true)
-                                setNewGuest({ name: '', phone: '', nationality: 'ไทย' })
+                                setNewGuest({ name: '', phone: '', nationality: 'ไทย', idNumber: '' })
                               }
                             }}
                             className="shrink-0 flex items-center gap-1.5 px-3 py-2 min-h-[40px] bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-medium transition-colors"
@@ -420,6 +426,12 @@ export default function FrontDeskPage() {
                                   onChange={(e) => setNewGuest({ ...newGuest, phone: e.target.value })}
                                   placeholder="เบอร์โทร" aria-label="เบอร์โทรลูกค้าใหม่"
                                   className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                                />
+                                <input
+                                  value={newGuest.idNumber}
+                                  onChange={(e) => setNewGuest({ ...newGuest, idNumber: e.target.value })}
+                                  placeholder="เลขบัตรประชาชน / พาสปอร์ต" aria-label="เลขบัตรประชาชนหรือพาสปอร์ตลูกค้าใหม่"
+                                  className="col-span-2 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                                 />
                               </div>
                             ) : (
@@ -502,7 +514,7 @@ export default function FrontDeskPage() {
                                     <div className="flex gap-1 bg-slate-100 p-1 rounded-lg">
                                       {([['full', 'ชำระเต็ม'], ['deposit', 'มัดจำ']] as const).map(([mode, label]) => (
                                         <button key={mode} type="button"
-                                          onClick={() => setForm({ ...form, payMode: mode, deposit: mode === 'deposit' ? form.deposit : 0 })}
+                                          onClick={() => setForm({ ...form, payMode: mode, deposit: mode === 'deposit' ? (form.deposit || Math.min(room.pricePerNight, total)) : 0 })}
                                           className={`flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${form.payMode === mode ? 'bg-white shadow-sm text-slate-800' : 'text-slate-500'}`}>
                                           {label}
                                         </button>
@@ -579,6 +591,11 @@ export default function FrontDeskPage() {
                   onChange={(e) => setPayAmount(Math.min(payDialog.outstanding, Math.max(0, +e.target.value)))}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
+                {payAmount > 0 && payAmount < payDialog.outstanding && (
+                  <p className="text-xs text-amber-600 mt-1.5">
+                    ชำระบางส่วน — ยังค้างอีก {formatCurrency(payDialog.outstanding - payAmount)} (แขกจะเช็คเอาต์พร้อมยอดค้าง)
+                  </p>
+                )}
               </div>
               <div>
                 <label htmlFor="fd-pay-method" className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทาง</label>
@@ -619,6 +636,7 @@ export default function FrontDeskPage() {
           guestName={checkoutTarget.gName}
           roomNumber={checkoutTarget.roomNo}
           outstanding={checkoutTarget.outstanding}
+          corporateCharge={checkoutTarget.corporateCharge}
           onClose={() => setCheckoutTarget(null)}
           onPayFirst={() => {
             setPayDialog({ bookingId: checkoutTarget.bookingId, outstanding: checkoutTarget.outstanding })

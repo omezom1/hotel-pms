@@ -33,7 +33,7 @@ const addOnStatusLabels: Record<string, string> = {
 
 export default function BookingDetailPage() {
   const { id } = useParams<{ id: string }>()
-  const { bookings, rooms, guests, addOnItems, bookingAddOns, invoices, updateBookingStatus, cancelBooking, requestAddOn, cancelAddOn, recordPayment, extendBooking, moveBooking, updateBooking, adjustForEarlyCheckout, logAudit } = useHotelStore()
+  const { bookings, rooms, guests, addOnItems, bookingAddOns, invoices, corporateAccounts, updateBookingStatus, cancelBooking, requestAddOn, cancelAddOn, recordPayment, extendBooking, moveBooking, updateBooking, adjustForEarlyCheckout, logAudit } = useHotelStore()
   const { user } = useAuthStore()
   const confirm = useConfirm()
   const [showAddOnDialog, setShowAddOnDialog] = useState(false)
@@ -715,6 +715,11 @@ export default function BookingDetailPage() {
           guestName={guestDisplayName}
           roomNumber={room?.number ?? '-'}
           outstanding={outstanding}
+          corporateCharge={(() => {
+            if (!booking?.corporateAccountId) return null
+            const acc = corporateAccounts.find((a) => a.id === booking.corporateAccountId)
+            return acc && acc.availableBalance >= outstanding ? { amount: outstanding, company: acc.companyName } : null
+          })()}
           onClose={() => setCheckoutConfirm(false)}
           onPayFirst={() => { setPayForm({ amount: outstanding, method: 'cash' }); setShowPayDialog(true); setCheckoutConfirm(false) }}
           onProceed={() => { doCheckOut(); setCheckoutConfirm(false) }}

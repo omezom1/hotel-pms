@@ -279,7 +279,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     return result
   },
 
-  updateBookingStatus: (bookingId, status) =>
+  updateBookingStatus: (bookingId, status) => {
+    // จับ corporate auto-charge ที่เกิดตอนเช็คเอาต์ เพื่อ log audit หลัง set() (เงินขยับต้องมีร่องรอย)
+    let corpAudit: { amount: number; company: string } | null = null
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -366,6 +368,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             staffId: 'system',
             notes: `ตัดเครดิตองค์กรอัตโนมัติ (${acc.companyName})`,
           }
+          corpAudit = { amount: outstanding, company: acc.companyName }
         }
       }
 
@@ -451,9 +454,20 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         corporateAccounts: updatedCorpAccounts,
         corporateTransactions: updatedCorpTx,
       }
-    }),
+    })
+    // เงินขยับ (ตัดเครดิตองค์กร) → ลง audit เสมอ แม้ checkout จะ trigger จากหลายหน้า
+    const ca = corpAudit as { amount: number; company: string } | null
+    if (ca) {
+      get().logAudit({
+        category: 'payment', action: 'corporate_charge',
+        summary: `ตัดเครดิตองค์กรอัตโนมัติ ${ca.amount.toLocaleString()} บาท (${ca.company}) เมื่อเช็คเอาต์`,
+        entityId: bookingId,
+      })
+    }
+  },
 
-  cancelBooking: (bookingId) =>
+  cancelBooking: (bookingId) => {
+    let refundAudit = 0 // เงินคืนที่เกิดจากการยกเลิก → log audit หลัง set()
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -478,6 +492,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
 
       // คืนเงินที่รับมาแล้ว: บันทึก refund payment (ยอดติดลบ) + เคลียร์ยอดที่จ่าย
       const refundAmount = booking.paidAmount
+      refundAudit = refundAmount
       const refundPayment: import('@/types').Payment | null = refundAmount > 0
         ? {
             id: `pay${Date.now()}`,
@@ -533,7 +548,15 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         corporateAccounts: updatedCorpAccounts,
         corporateTransactions: updatedCorpTx,
       }
-    }),
+    })
+    if (refundAudit > 0) {
+      get().logAudit({
+        category: 'payment', action: 'refund',
+        summary: `คืนเงินจากการยกเลิกการจอง ${refundAudit.toLocaleString()} บาท`,
+        entityId: bookingId,
+      })
+    }
+  },
 
   updateBooking: (bookingId, updates) =>
     set((state) => ({
@@ -669,6 +692,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           : x
       ),
     }))
+    if (overpaid > 0) {
+      get().logAudit({
+        category: 'payment', action: 'refund',
+        summary: `คืนเงินออกก่อนกำหนด ${overpaid.toLocaleString()} บาท`,
+        entityId: bookingId,
+      })
+    }
     return { ok: true, newNights: actualNights, newTotal, refunded: overpaid }
   },
 
@@ -1238,6 +1268,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   cancelAddOn: (addOnId) => {
     // side-effect ฝั่ง inventory (คืนสต็อก) ที่ต้อง dual-write ขึ้นตารางหลัง set()
     let invFx: { itemId: string; newStock: number; tx: InventoryTransaction } | null = null
+    let refundAudit = 0 // เงินคืนส่วนเกินจากการยกเลิก add-on → log audit หลัง set()
     set((state) => {
       const addOn = state.bookingAddOns.find((a) => a.id === addOnId)
       if (!addOn) return {}
@@ -1279,6 +1310,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         const newCharge = booking.totalAmount + otherAddOnTotal
         const overpaid = Math.max(0, booking.paidAmount - newCharge)
         if (overpaid > 0) {
+          refundAudit = overpaid
           const refundPayment: import('@/types').Payment = {
             id: `pay${Date.now()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash',
             date: now, staffId: 'system', notes: `คืนเงินจากการยกเลิก Add-on: ${item?.name ?? addOn.addOnItemId}`,
@@ -1327,6 +1359,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (fx) {
       pushInventoryStock(fx.itemId, fx.newStock)
       pushInventoryTx(fx.tx)
+    }
+    if (refundAudit > 0) {
+      get().logAudit({
+        category: 'payment', action: 'refund',
+        summary: `คืนเงินจากการยกเลิก Add-on ${refundAudit.toLocaleString()} บาท`,
+      })
     }
   },
 }), {
