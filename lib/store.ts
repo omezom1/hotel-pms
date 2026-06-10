@@ -1319,7 +1319,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
   // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
   skipHydration: true,
-  // ── relational migration: auditLogs (Phase 1) + expenses + inventory + maintenance (Tier A) ย้ายไปตารางจริงแล้ว ──
+  // ── relational migration: auditLogs (Phase 1) + expenses/inventory/maintenance (Tier A) + add_on_items (Tier B) ย้ายไปตารางจริงแล้ว ──
   // partialize = ตัด slice เหล่านี้ออกจากสิ่งที่เขียนลง blob → ตารางเป็นเจ้าของคนเดียว
   // (กัน app_state full-state sync / union-merge มาทับ-หรือชุบชีวิต สิ่งที่ per-table sync เพิ่ง apply)
   partialize: (state) => ({
@@ -1332,7 +1332,6 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     users: state.users,
     corporateAccounts: state.corporateAccounts,
     corporateTransactions: state.corporateTransactions,
-    addOnItems: state.addOnItems,
     bookingAddOns: state.bookingAddOns,
   }),
   // blob เก่าอาจยังพก slice ที่ย้ายแล้วติดมา — บังคับใช้ค่าใน current (ปล่อยให้ seed จากตารางเติม)
@@ -1346,6 +1345,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       inventoryItems: current.inventoryItems ?? [],
       inventoryTransactions: current.inventoryTransactions ?? [],
       maintenanceLogs: current.maintenanceLogs ?? [],
+      addOnItems: current.addOnItems ?? [],
     }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading

@@ -63,8 +63,9 @@
 - `007_receipts_storage.sql` — bucket `receipts` (แนบรูปบิล) public + anon read/upload/delete — ✅ รันแล้ว
 - `008_expenses_realtime.sql` — **Tier A** (expenses, entity แรกที่ mutable): เพิ่มคอลัมน์ `receipt_path`+`writer_id`, เปิด realtime publication + replica identity full (รองรับ UPDATE/DELETE payload) — ✅ รันแล้ว (2026-06-09)
 - `009_inventory_realtime.sql` — **Tier A** (inventory, 2 entity): เพิ่ม `writer_id` ให้ `inventory_items` (mutable, soft-delete) + `inventory_transactions` (ledger append-only), เปิด realtime publication + replica identity full ทั้งคู่ — ✅ รันแล้ว (2026-06-10)
-- `010_maintenance_realtime.sql` — **Tier A** (maintenance_logs, mutable+soft-delete): เพิ่ม `writer_id`, **DROP FK `maintenance_logs_room_id_fkey`** (rooms ยัง blob/orphan — ใส่กลับเมื่อย้าย rooms ใน Tier B), เปิด realtime + replica identity full — ⏳ **ยังไม่รัน** (ต้องรันก่อนใช้หน้า /maintenance ไม่งั้น dual-write fail → toast เตือน; blob ยังเป็นแหล่งจริง ไม่หาย)
-> DDL รันผ่าน anon key ไม่ได้ ต้องทำใน Dashboard เท่านั้น (MCP ก็ถูกบล็อกตามกฎนี้)
+- `010_maintenance_realtime.sql` — **Tier A** (maintenance_logs, mutable+soft-delete): เพิ่ม `writer_id`, **DROP FK `maintenance_logs_room_id_fkey`** (rooms ยัง blob/orphan — ใส่กลับเมื่อย้าย rooms ใน Tier B), เปิด realtime + replica identity full — ✅ รันแล้ว (2026-06-10)
+- `011_add_on_items_realtime.sql` — **Tier B kickoff** (add_on_items, read-only catalog): เพิ่ม `writer_id`, เปิด realtime + replica identity full (คง FK `inventory_item_id→inventory_items` ไว้ — parent ย้ายแล้ว valid) — ✅ รันแล้ว (2026-06-10, **ผ่าน MCP execute_sql**)
+> **อัปเดต 2026-06-10:** MCP `execute_sql` **รัน DDL ได้** (ใช้สิทธิ์ management ไม่ใช่ anon key) — ไม่ต้องไปวางใน Dashboard เองอีก. (กฎเก่าว่า "MCP ถูกบล็อก" ใช้กับ `apply_migration` tool เท่านั้น; `execute_sql` รัน ALTER/DO/etc. ได้)
 
 ## 4b. Deployment (Vercel) — ⚠️ ตั้งค่าครั้งเดียว อย่าลืม
 - โปรเจกต์ Vercel: **hotel-pms** (org "Wasin's projects") → domain `hotel-pms-henna.vercel.app`
@@ -212,8 +213,19 @@
 - **per-table realtime** (`AppShell.tsx`): `maintenance_logs-sync` (event '*', soft-delete→ลบ/อื่นๆ upsert by id, sort reportedAt desc); subscribe→buffer→seed; echo-guard `writer_id===CLIENT_ID`; mapper `rowToMaintenanceLog`
 - **blob isolation 4 จุด** (partialize ตัด maintenanceLogs, merge บังคับ `current ?? []`, app_state-sync strip, mergeState `delete out.maintenanceLogs`)
 - 🐞 **บั๊กที่เจอตอน 2-tab verify (แก้แล้ว):** reconcile อ่าน `app_state` **หลัง** rehydrate → แต่ rehydrate trigger persist write ครั้งแรก (`onRehydrateStorage` setState `_hasHydrated`) ที่ partialize **ตัด maintenanceLogs ออกจาก blob ไปแล้ว** → reconcile ได้ slice ว่าง → เข้าใจผิดว่า orphan ทั้ง 4 (m001–m004) "ไม่มีใน blob" → **soft-delete ทิ้งแทนที่จะกู้**. โชคดี m001–m004 เป็น mock demo (ไม่ใช่ ticket จริง) — ผู้ใช้เลือก "ลบทิ้งไป". **fix:** ยิงอ่าน `app_state` เป็น `bootBlobPromise` **ก่อน** เรียก `rehydrate()` (request ออกก่อน strip-write ถูกสร้าง = ได้ snapshot pre-strip) แล้ว `await` ใน reconcile. **สำคัญสำหรับ Tier B** (guests/rooms มีข้อมูลจริง — แพทเทิร์น reconcile ต้องอ่าน blob ก่อน rehydrate เสมอ)
-- tsc clean (เหลือ 4 errors เดิม). **⚠️ ยังไม่ commit** (working tree: 010 sql, store.ts, AppShell.tsx, supabase-storage.ts, PROGRESS.md)
-- ⏳ **NEXT:** ผู้ใช้ **รัน DDL 010 ใน Dashboard** → 2 แท็บ ยืนยัน (สร้าง ticket→ห้องเป็น maintenance, in_progress/resolved sync + ห้องคืน available เมื่อ resolve อันสุดท้าย, cancel→หาย+reload ไม่ฟื้น, resolvedAt ที่เพี้ยนถูกแก้) → commit → push → แล้วไป **Tier B** (guests/rooms/staff/users/corporate/add_on_items) — rooms อยู่ที่นี่, ย้ายแล้วใส่ FK maintenance_logs.room_id กลับได้
+- tsc clean (เหลือ 4 errors เดิม). ✅ **DDL 010 รันแล้ว + 2-tab verify ผ่าน + commit `0e905c0`** (รวม race fix — m001–m004 เป็น mock โดน soft-delete ตอนเจอบั๊ก ผู้ใช้เลือกลบทิ้ง)
+
+### 2026-06-10 (เริ่ม Tier B — add_on_items cutover, code-complete)
+ตัวแรกของ **Tier B** (guests/rooms/staff/users/corporate/add_on_items) — เลือก **add_on_items ก่อนเพราะปลอดภัยสุด:**
+- **read-only catalog:** ไม่มี action เพิ่ม/แก้/ลบในแอป (seed จาก mock, อ่านอย่างเดียวที่ bookings/[id], daily-report, rooms) → **ไม่ต้อง dual-write** เลย; cutover = realtime + reconcile + blob isolation
+- **FK ปลอดภัย:** `add_on_items.inventory_item_id → inventory_items` ชี้ไป parent ที่**ย้ายแล้ว/มีข้อมูลครบ** (Tier A) → คง FK ไว้ ไม่ต้อง drop (ต่างจาก maintenance→rooms)
+- **DDL `011_add_on_items_realtime.sql`** — ✅ **รันแล้วผ่าน MCP execute_sql** (writer_id + realtime + replica identity full; deleted_at/trigger มาจาก 005)
+- store: partialize ตัด addOnItems + merge บังคับ `current ?? []` (ไม่มี action ให้แก้). supabase-storage: mergeState `delete out.addOnItems`
+- AppShell: `add_on_items-sync` (event '*', กัน edit จาก Dashboard/แท็บอื่น) + mapper rowToAddOnItem/addOnItemToRow + reconcile-from-blob
+- 🐞🐞 **บั๊กรอบ 2 (race) — เจอ+กู้+แก้ถาวร:** fix maintenance รอบแรกแค่ "ยิง read ก่อน rehydrate **แต่ไม่ await**" = ยัง race. รอบ add_on_items ปรากฏ read resolve **หลัง** strip-write → ได้ blob ว่าง → reconcile soft-delete **catalog ทั้ง 7 รายการ** (booking ไม่มี add-on ให้เลือก). **กู้แล้ว** (un-delete 7 แถวผ่าน MCP — read-only catalog, orphan==mock==ถูกต้องเป๊ะ, ปลอดภัย; ทั้ง 7 มี writer_id → reconcile skip รอบหน้า). **แก้ถาวร:** เปลี่ยนเป็น **`await` อ่าน app_state ให้เสร็จก่อนเรียก `rehydrate()`** (strip-write ยังไม่ถูกสร้าง → pre-strip การันตี 100% ไม่ใช่ race) — เก็บเป็น `bootState` ใช้ทั้ง maintenance + add_on reconcile. **สำคัญมากสำหรับ guests/staff/users/corporate/rooms ที่มีข้อมูลจริง**
+- tsc clean (เหลือ 4 errors เดิม). **⚠️ ยังไม่ commit** (working tree: 011 sql, store.ts, AppShell.tsx, supabase-storage.ts, PROGRESS.md)
+- ⏳ **NEXT:** ผู้ใช้ **reload แอป** → ตรวจ (เปิด booking เห็น add-on ครบ 7 + ราคาถูก, สร้าง add-on บน booking ยังได้, 2 แท็บ reload ไม่หาย) → commit → ไล่ Tier B ที่เหลือ: **guests** (mutable + side-effect totalStays/totalSpend ตอน checkout → dual-write แบบ maintenance) → **staff** → **users** (auth) → **corporate** (accounts+transactions, drop corp_tx FK→bookings/invoices) → **rooms ท้ายสุด** (พัวพัน updateRoomStatus ทุก flow; ย้ายเสร็จใส่ FK maintenance_logs.room_id กลับ)
+- ✅ **inventory verify ผ่าน MCP:** 12/15 รายการที่ไม่ได้แตะ = ตรง mock เป๊ะ (orphan=ของจริง), อีก 3 = แก้จริงตอน verify (สบู่ -1, ลบน้ำดื่ม+ถั่วอบ). ไม่มีข้อมูลหาย
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)

@@ -8,7 +8,7 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog } from '@/types'
+import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem } from '@/types'
 import { toast } from 'sonner'
 
 const STORE_KEY = 'hotel-pms-storage'
@@ -102,6 +102,29 @@ function maintLogToRow(l: MaintenanceLog) {
   }
 }
 
+// แปลงแถว add_on_items (snake_case) → AddOnItem (camelCase)
+function rowToAddOnItem(r: Record<string, unknown>): AddOnItem {
+  return {
+    id: String(r.id),
+    name: String(r.name ?? ''),
+    category: r.category as AddOnItem['category'],
+    price: Number(r.price ?? 0),
+    inventoryItemId: r.inventory_item_id != null ? String(r.inventory_item_id) : undefined,
+    inventoryQtyPerUnit: Number(r.inventory_qty_per_unit ?? 0),
+    isAvailable: Boolean(r.is_available),
+  }
+}
+
+// แปลง AddOnItem → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function addOnItemToRow(a: AddOnItem) {
+  return {
+    id: a.id, name: a.name, category: a.category, price: a.price,
+    inventory_item_id: a.inventoryItemId ?? null,
+    inventory_qty_per_unit: a.inventoryQtyPerUnit,
+    is_available: a.isAvailable, writer_id: CLIENT_ID,
+  }
+}
+
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -139,12 +162,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           const { _writer, ...envelope } = data
           const incoming = (envelope as { state?: Record<string, unknown> }).state
           if (!incoming) return
-          // auditLogs/expenses/inventory/maintenance ย้ายไปตารางจริงแล้ว — strip ออกจาก full-state sync ของ blob
+          // auditLogs/expenses/inventory/maintenance/add_on_items ย้ายไปตารางจริงแล้ว — strip ออกจาก full-state sync ของ blob
           // (ไม่งั้นจะมาทับ/ชุบชีวิตสิ่งที่ per-table sync เพิ่ง apply → 2 แท็บไม่ตรงกัน)
           const {
             auditLogs: _migAudit, expenses: _migExp,
             inventoryItems: _migInvItems, inventoryTransactions: _migInvTx,
-            maintenanceLogs: _migMaint,
+            maintenanceLogs: _migMaint, addOnItems: _migAddOn,
             ...rest
           } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
@@ -360,16 +383,59 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
-    // ⚠️ ยิงอ่าน app_state "ก่อน" rehydrate — เพราะ rehydrate จะ trigger persist write ครั้งแรก
-    // (onRehydrateStorage setState _hasHydrated) ที่ partialize ตัด migrated slice ทิ้งจาก blob.
-    // ถ้าอ่านหลัง rehydrate จะได้ค่าว่าง → reconcile พัง (เคยทำให้ maintenance orphan โดน soft-delete
-    // แทนที่จะกู้ของจริง). request นี้ออกก่อน strip-write ถูกสร้าง → snapshot เป็น pre-strip
-    const bootBlobPromise = supabase
-      .from('app_state').select('data').eq('id', STORE_KEY).maybeSingle()
+    // ── add_on_items relational sync (Tier B kickoff) — read-only catalog ────
+    // แอปไม่ mutate (ไม่มี action) แต่ subscribe ไว้กัน edit จาก Dashboard/แท็บอื่น + รองรับ reconcile echo
+    let addOnLive = false
+    type AddOnEvent = { id: string; deleted: boolean; item: AddOnItem }
+    const addOnBuffer: AddOnEvent[] = []
+    const applyAddOnEvents = (events: AddOnEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.addOnItems.map((a) => [a.id, a]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.item)
+          }
+          return { addOnItems: Array.from(byId.values()) }
+        })
+      )
+    }
+    const addOnChannel = supabase
+      .channel('add_on_items-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'add_on_items' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: AddOnEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            item: rowToAddOnItem(row),
+          }
+          if (!addOnLive) {
+            addOnBuffer.push(ev)
+            return
+          }
+          applyAddOnEvents([ev])
+        }
+      )
+      .subscribe()
 
-    // rehydrate blob ให้เสร็จก่อน แล้วค่อย seed audit + expenses จากตาราง
-    // (กัน rehydrate.merge เขียนทับสิ่งที่ seed มา — blob ยังพก slice เหล่านี้อยู่ช่วง dual-write)
-    Promise.resolve(useHotelStore.persist.rehydrate()).then(async () => {
+    // ⚠️ ต้อง AWAIT อ่าน app_state ให้เสร็จ "ก่อน" เรียก rehydrate (deterministic ไม่ใช่ race)
+    // เหตุผล: rehydrate จะ trigger persist write ครั้งแรก (onRehydrateStorage setState _hasHydrated)
+    // ที่ partialize ตัด migrated slice ทิ้งจาก blob. ถ้าอ่านหลัง/พร้อมกับ rehydrate อาจได้ค่าว่าง →
+    // reconcile เข้าใจผิดว่า "ไม่มีใน blob" → soft-delete ของจริงทิ้ง (เคยทำ add_on_items/maintenance หาย).
+    // await ก่อนเรียก rehydrate = strip-write ยังไม่ถูกสร้าง → snapshot pre-strip การันตี 100%
+    ;(async () => {
+      const bootBlob = await supabase
+        .from('app_state').select('data').eq('id', STORE_KEY).maybeSingle()
+      const bootState = ((bootBlob.data?.data as { state?: Record<string, unknown> } | null)?.state) ?? {}
+
+      // rehydrate blob ให้เสร็จก่อน แล้วค่อย seed audit + expenses จากตาราง
+      // (กัน rehydrate.merge เขียนทับสิ่งที่ seed มา — blob ยังพก slice เหล่านี้อยู่ช่วง dual-write)
+      await useHotelStore.persist.rehydrate()
       const { data, error } = await supabase
         .from('audit_logs')
         .select('*')
@@ -513,10 +579,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         let rows = mlData ?? []
         const everWritten = rows.some((r) => r.writer_id != null)
         if (!everWritten) {
-          // ใช้ snapshot ที่อ่านไว้ "ก่อน" rehydrate (pre-strip) — blob ตอนนี้อาจถูกถอด slice แล้ว
-          const bootBlob = await bootBlobPromise
-          const blobState = (bootBlob.data?.data as { state?: Record<string, unknown> } | null)?.state
-          const blobLogs = (blobState?.maintenanceLogs ?? []) as MaintenanceLog[]
+          // ใช้ bootState ที่ await ไว้ "ก่อน" rehydrate (pre-strip การันตี)
+          const blobLogs = (bootState.maintenanceLogs ?? []) as MaintenanceLog[]
           if (blobLogs.length > 0) {
             const { error: upErr } = await supabase.from('maintenance_logs')
               .upsert(blobLogs.map(maintLogToRow), { onConflict: 'id' })
@@ -541,7 +605,46 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       maintBuffer.length = 0
       maintLive = true
-    })
+
+      // ── seed add_on_items (read-only catalog) + one-time reconcile จาก blob ──
+      // เหมือน maintenance: ตาราง 001 มี orphan seed → ใช้ everWritten (writer_id) เป็น flag
+      // แล้ว reconcile จาก bootState (await อ่านก่อน rehydrate = pre-strip snapshot การันตี)
+      const { data: aoData, error: aoErr } = await supabase
+        .from('add_on_items')
+        .select('*')
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
+      if (aoErr) {
+        console.error('[add-on-sync] seed:', aoErr.message)
+      } else {
+        let rows = aoData ?? []
+        const everWritten = rows.some((r) => r.writer_id != null)
+        if (!everWritten) {
+          const blobItems = (bootState.addOnItems ?? []) as AddOnItem[]
+          if (blobItems.length > 0) {
+            const { error: upErr } = await supabase.from('add_on_items')
+              .upsert(blobItems.map(addOnItemToRow), { onConflict: 'id' })
+            if (upErr) console.error('[add-on-sync] reconcile upsert:', upErr.message)
+          }
+          const blobIds = new Set(blobItems.map((a) => a.id))
+          const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+          if (orphanIds.length > 0) {
+            const { error: delErr } = await supabase.from('add_on_items')
+              .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+              .in('id', orphanIds)
+            if (delErr) console.error('[add-on-sync] reconcile soft-delete:', delErr.message)
+          }
+          const re = await supabase
+            .from('add_on_items').select('*').is('deleted_at', null)
+            .order('created_at', { ascending: false })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ addOnItems: rows.map(rowToAddOnItem) }))
+        if (addOnBuffer.length) applyAddOnEvents(addOnBuffer)
+      }
+      addOnBuffer.length = 0
+      addOnLive = true
+    })()
 
     return () => {
       supabase.removeChannel(channel)
@@ -550,6 +653,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(itemsChannel)
       supabase.removeChannel(txChannel)
       supabase.removeChannel(maintenanceChannel)
+      supabase.removeChannel(addOnChannel)
     }
   }, [])
 
