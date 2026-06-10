@@ -100,7 +100,9 @@ export default function ExpensesPage() {
 
   function openAdd() {
     setEditId(null)
-    setForm({ ...emptyForm, date: `${periodKey}-15` })
+    // ดูงวดปัจจุบัน → default เป็นวันนี้; ดูงวดย้อนหลัง → กลางงวดนั้น (กันรายการหลุดไปงวดอื่น)
+    const isCurrentPeriod = year === now.getFullYear() && month === now.getMonth() + 1
+    setForm({ ...emptyForm, date: isCurrentPeriod ? todayLocal() : `${periodKey}-15` })
     setShowForm(true)
   }
   function openEdit(e: Expense) {
