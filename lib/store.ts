@@ -58,6 +58,23 @@ function pushInventoryTx(tx: InventoryTransaction) {
   }).then(reportInventoryError)
 }
 
+// dual-write helper สำหรับ maintenance_logs (Tier A) — mutable + soft-delete (แพทเทิร์น expenses)
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportMaintenanceError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('maintenance write', error.message)
+}
+
+// แปลง MaintenanceLog → row (snake_case) สำหรับ insert/upsert (+ writer_id echo key)
+function maintLogRow(log: MaintenanceLog) {
+  return {
+    id: log.id, room_id: log.roomId, room_number: log.roomNumber,
+    issue: log.issue, description: log.description, status: log.status,
+    priority: log.priority, reported_by: log.reportedBy, reported_at: log.reportedAt,
+    assigned_to: log.assignedTo ?? null, resolved_at: log.resolvedAt ?? null,
+    cost: log.cost ?? null, writer_id: CLIENT_ID,
+  }
+}
+
 interface HotelStore {
   rooms: Room[]
   guests: Guest[]
@@ -698,10 +715,11 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       return { housekeepingTasks: updatedTasks, rooms: updatedRooms }
     }),
 
-  addMaintenanceLog: (logData) =>
+  // ── maintenance dual-write (Tier A) — maintenanceLogs ย้ายไปตาราง; rooms-side-effect ยัง blob (Tier B) ──
+  addMaintenanceLog: (logData) => {
+    const newLog: MaintenanceLog = { ...logData, id: `m${Date.now()}` }
     set((state) => {
-      const newLog = { ...logData, id: `m${Date.now()}` }
-      // ตั้งห้องเป็น maintenance ทันทีถ้า issue ยังไม่ resolved
+      // ตั้งห้องเป็น maintenance ทันทีถ้า issue ยังไม่ resolved (rooms = blob path)
       const updatedRooms = newLog.status !== 'resolved'
         ? state.rooms.map((r) =>
             r.id === newLog.roomId && r.status !== 'occupied'
@@ -709,22 +727,21 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
               : r
           )
         : state.rooms
-      return {
-        maintenanceLogs: [newLog, ...state.maintenanceLogs],
-        rooms: updatedRooms,
-      }
-    }),
+      return { maintenanceLogs: [newLog, ...state.maintenanceLogs], rooms: updatedRooms }
+    })
+    void supabase.from('maintenance_logs').insert(maintLogRow(newLog)).then(reportMaintenanceError)
+  },
 
-  updateMaintenanceStatus: (logId, status) =>
+  updateMaintenanceStatus: (logId, status) => {
+    const now = new Date().toISOString()
     set((state) => {
-      const now = new Date().toISOString()
       const log = state.maintenanceLogs.find((l) => l.id === logId)
       const updatedLogs = state.maintenanceLogs.map((l) =>
         l.id === logId
           ? { ...l, status, resolvedAt: status === 'resolved' ? now : l.resolvedAt }
           : l
       )
-      // เมื่อ resolved + ไม่มี maintenance อื่นค้างของห้องนี้ → คืนห้องเป็น available
+      // เมื่อ resolved + ไม่มี maintenance อื่นค้างของห้องนี้ → คืนห้องเป็น available (rooms = blob path)
       let updatedRooms = state.rooms
       if (status === 'resolved' && log) {
         const hasOtherOpen = updatedLogs.some(
@@ -739,13 +756,18 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         }
       }
       return { maintenanceLogs: updatedLogs, rooms: updatedRooms }
-    }),
+    })
+    // dual-write status (+ resolved_at เฉพาะตอน resolved); rooms ไม่ dual-write (ยัง blob)
+    const patch: Record<string, unknown> = { status, writer_id: CLIENT_ID }
+    if (status === 'resolved') patch.resolved_at = now
+    void supabase.from('maintenance_logs').update(patch).eq('id', logId).then(reportMaintenanceError)
+  },
 
-  removeMaintenanceLog: (logId) =>
+  removeMaintenanceLog: (logId) => {
     set((state) => {
       const log = state.maintenanceLogs.find((l) => l.id === logId)
       const updatedLogs = state.maintenanceLogs.filter((l) => l.id !== logId)
-      // ถ้าห้องอยู่ในสถานะ maintenance และไม่มี log ค้างอื่น → คืนห้องเป็น available
+      // ถ้าห้องอยู่ในสถานะ maintenance และไม่มี log ค้างอื่น → คืนห้องเป็น available (rooms = blob path)
       let updatedRooms = state.rooms
       if (log) {
         const hasOtherOpen = updatedLogs.some(
@@ -760,7 +782,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         }
       }
       return { maintenanceLogs: updatedLogs, rooms: updatedRooms }
-    }),
+    })
+    // soft-delete (กัน §3c resurrection + เก็บ history) — UI ลบออกจาก state แล้ว
+    void supabase.from('maintenance_logs')
+      .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+      .eq('id', logId).then(reportMaintenanceError)
+  },
 
   // ── inventory dual-write (Tier A, strangler) — blob ยังเป็นแหล่งจริงช่วง dual-write ──
   addInventoryItem: (itemData) => {
@@ -1292,7 +1319,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
   // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
   skipHydration: true,
-  // ── relational migration: auditLogs (Phase 1) + expenses + inventory (Tier A) ย้ายไปตารางจริงแล้ว ──
+  // ── relational migration: auditLogs (Phase 1) + expenses + inventory + maintenance (Tier A) ย้ายไปตารางจริงแล้ว ──
   // partialize = ตัด slice เหล่านี้ออกจากสิ่งที่เขียนลง blob → ตารางเป็นเจ้าของคนเดียว
   // (กัน app_state full-state sync / union-merge มาทับ-หรือชุบชีวิต สิ่งที่ per-table sync เพิ่ง apply)
   partialize: (state) => ({
@@ -1301,7 +1328,6 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     bookings: state.bookings,
     invoices: state.invoices,
     housekeepingTasks: state.housekeepingTasks,
-    maintenanceLogs: state.maintenanceLogs,
     staff: state.staff,
     users: state.users,
     corporateAccounts: state.corporateAccounts,
@@ -1319,6 +1345,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       expenses: current.expenses ?? [],
       inventoryItems: current.inventoryItems ?? [],
       inventoryTransactions: current.inventoryTransactions ?? [],
+      maintenanceLogs: current.maintenanceLogs ?? [],
     }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading

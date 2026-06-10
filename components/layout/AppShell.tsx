@@ -8,7 +8,7 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog, Expense, InventoryItem, InventoryTransaction } from '@/types'
+import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog } from '@/types'
 import { toast } from 'sonner'
 
 const STORE_KEY = 'hotel-pms-storage'
@@ -73,6 +73,35 @@ function rowToInventoryTx(r: Record<string, unknown>): InventoryTransaction {
   }
 }
 
+// แปลงแถว maintenance_logs (snake_case) → MaintenanceLog (camelCase)
+function rowToMaintenanceLog(r: Record<string, unknown>): MaintenanceLog {
+  return {
+    id: String(r.id),
+    roomId: String(r.room_id),
+    roomNumber: String(r.room_number ?? ''),
+    issue: String(r.issue ?? ''),
+    description: String(r.description ?? ''),
+    status: r.status as MaintenanceLog['status'],
+    priority: r.priority as MaintenanceLog['priority'],
+    reportedBy: String(r.reported_by ?? ''),
+    reportedAt: String(r.reported_at ?? ''),
+    assignedTo: r.assigned_to != null ? String(r.assigned_to) : undefined,
+    resolvedAt: r.resolved_at != null ? String(r.resolved_at) : undefined,
+    cost: r.cost != null ? Number(r.cost) : undefined,
+  }
+}
+
+// แปลง MaintenanceLog → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function maintLogToRow(l: MaintenanceLog) {
+  return {
+    id: l.id, room_id: l.roomId, room_number: l.roomNumber,
+    issue: l.issue, description: l.description, status: l.status,
+    priority: l.priority, reported_by: l.reportedBy, reported_at: l.reportedAt,
+    assigned_to: l.assignedTo ?? null, resolved_at: l.resolvedAt ?? null,
+    cost: l.cost ?? null, writer_id: CLIENT_ID,
+  }
+}
+
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -110,11 +139,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           const { _writer, ...envelope } = data
           const incoming = (envelope as { state?: Record<string, unknown> }).state
           if (!incoming) return
-          // auditLogs/expenses/inventory ย้ายไปตารางจริงแล้ว — strip ออกจาก full-state sync ของ blob
+          // auditLogs/expenses/inventory/maintenance ย้ายไปตารางจริงแล้ว — strip ออกจาก full-state sync ของ blob
           // (ไม่งั้นจะมาทับ/ชุบชีวิตสิ่งที่ per-table sync เพิ่ง apply → 2 แท็บไม่ตรงกัน)
           const {
             auditLogs: _migAudit, expenses: _migExp,
             inventoryItems: _migInvItems, inventoryTransactions: _migInvTx,
+            maintenanceLogs: _migMaint,
             ...rest
           } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
@@ -288,6 +318,55 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
+    // ── maintenance_logs relational sync (Tier A) — mutable + soft-delete (เหมือน expenses) ──
+    let maintLive = false
+    type MaintEvent = { id: string; deleted: boolean; log: MaintenanceLog }
+    const maintBuffer: MaintEvent[] = []
+    const applyMaintEvents = (events: MaintEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.maintenanceLogs.map((l) => [l.id, l]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.log)
+          }
+          const merged = Array.from(byId.values()).sort((a, b) =>
+            a.reportedAt < b.reportedAt ? 1 : -1
+          )
+          return { maintenanceLogs: merged }
+        })
+      )
+    }
+    const maintenanceChannel = supabase
+      .channel('maintenance_logs-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'maintenance_logs' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: MaintEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            log: rowToMaintenanceLog(row),
+          }
+          if (!maintLive) {
+            maintBuffer.push(ev)
+            return
+          }
+          applyMaintEvents([ev])
+        }
+      )
+      .subscribe()
+
+    // ⚠️ ยิงอ่าน app_state "ก่อน" rehydrate — เพราะ rehydrate จะ trigger persist write ครั้งแรก
+    // (onRehydrateStorage setState _hasHydrated) ที่ partialize ตัด migrated slice ทิ้งจาก blob.
+    // ถ้าอ่านหลัง rehydrate จะได้ค่าว่าง → reconcile พัง (เคยทำให้ maintenance orphan โดน soft-delete
+    // แทนที่จะกู้ของจริง). request นี้ออกก่อน strip-write ถูกสร้าง → snapshot เป็น pre-strip
+    const bootBlobPromise = supabase
+      .from('app_state').select('data').eq('id', STORE_KEY).maybeSingle()
+
     // rehydrate blob ให้เสร็จก่อน แล้วค่อย seed audit + expenses จากตาราง
     // (กัน rehydrate.merge เขียนทับสิ่งที่ seed มา — blob ยังพก slice เหล่านี้อยู่ช่วง dual-write)
     Promise.resolve(useHotelStore.persist.rehydrate()).then(async () => {
@@ -417,6 +496,51 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       txBuffer.length = 0
       txLive = true
+
+      // ── seed maintenance_logs (กรอง soft-deleted) + one-time reconcile จาก blob ──
+      // ตาราง 001 มี orphan seed ที่ stale (content ต่างจาก blob — เช่น resolvedAt เลื่อน)
+      // → guard rows.length===0 ใช้ไม่ได้; ใช้ "ยังไม่เคย cutover" = ไม่มีแถวที่มี writer_id
+      //   แล้ว reconcile จาก blob (แหล่งจริง ยังพก maintenanceLogs อยู่): upsert ทับ orphan ที่ stale
+      //   + soft-delete แถวที่ blob ไม่มี (เคลียร์ orphan ส่วนเกิน)
+      const { data: mlData, error: mlErr } = await supabase
+        .from('maintenance_logs')
+        .select('*')
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
+      if (mlErr) {
+        console.error('[maintenance-sync] seed:', mlErr.message)
+      } else {
+        let rows = mlData ?? []
+        const everWritten = rows.some((r) => r.writer_id != null)
+        if (!everWritten) {
+          // ใช้ snapshot ที่อ่านไว้ "ก่อน" rehydrate (pre-strip) — blob ตอนนี้อาจถูกถอด slice แล้ว
+          const bootBlob = await bootBlobPromise
+          const blobState = (bootBlob.data?.data as { state?: Record<string, unknown> } | null)?.state
+          const blobLogs = (blobState?.maintenanceLogs ?? []) as MaintenanceLog[]
+          if (blobLogs.length > 0) {
+            const { error: upErr } = await supabase.from('maintenance_logs')
+              .upsert(blobLogs.map(maintLogToRow), { onConflict: 'id' })
+            if (upErr) console.error('[maintenance-sync] reconcile upsert:', upErr.message)
+          }
+          // soft-delete orphan ที่ blob ไม่มี (รวมกรณี blobLogs ว่าง → เคลียร์ orphan ทั้งหมด)
+          const blobIds = new Set(blobLogs.map((l) => l.id))
+          const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+          if (orphanIds.length > 0) {
+            const { error: delErr } = await supabase.from('maintenance_logs')
+              .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+              .in('id', orphanIds)
+            if (delErr) console.error('[maintenance-sync] reconcile soft-delete:', delErr.message)
+          }
+          const re = await supabase
+            .from('maintenance_logs').select('*').is('deleted_at', null)
+            .order('created_at', { ascending: false })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ maintenanceLogs: rows.map(rowToMaintenanceLog) }))
+        if (maintBuffer.length) applyMaintEvents(maintBuffer)
+      }
+      maintBuffer.length = 0
+      maintLive = true
     })
 
     return () => {
@@ -425,6 +549,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(expensesChannel)
       supabase.removeChannel(itemsChannel)
       supabase.removeChannel(txChannel)
+      supabase.removeChannel(maintenanceChannel)
     }
   }, [])
 
