@@ -146,7 +146,7 @@ interface HotelStore {
   // Inventory actions
   addInventoryItem: (item: Omit<InventoryItem, 'id'>) => void
   updateInventoryItem: (id: string, updates: Partial<InventoryItem>) => void
-  deleteInventoryItem: (id: string) => void
+  deleteInventoryItem: (id: string, staffId: string) => void
   restockItem: (itemId: string, quantity: number, staffId: string, notes?: string) => void
   useInventoryItem: (itemId: string, quantity: number, staffId: string, referenceId?: string, notes?: string) => { ok: boolean; error?: string }
   adjustStock: (itemId: string, newQuantity: number, staffId: string, notes?: string) => void
@@ -817,11 +817,28 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     void supabase.from('inventory_items').update(patch).eq('id', id).then(reportInventoryError)
   },
 
-  deleteInventoryItem: (id) => {
-    set((state) => ({ inventoryItems: state.inventoryItems.filter((item) => item.id !== id) }))
-    // soft-delete (กัน §3c resurrection); inventory_transactions อ้าง item_id ผ่าน FK → ห้ามลบแถวจริง
+  deleteInventoryItem: (id, staffId) => {
+    const item = get().inventoryItems.find((i) => i.id === id)
+    const now = new Date().toISOString()
+    // ถ้ายังมีสต็อกค้าง → บันทึก write-off (waste) ยอดที่เหลือ ก่อนลบ เพื่อให้ ledger ครบ
+    // (ไม่งั้นสต็อกที่เหลือหายจากบัญชีเงียบ ๆ — มีแค่ audit log ว่า "ลบรายการ")
+    const writeOffTx: InventoryTransaction | null = item && item.currentStock > 0
+      ? {
+          id: `itx${Date.now()}`, itemId: id, type: 'waste', quantity: -item.currentStock,
+          performedBy: staffId, date: now, notes: `ตัดสต็อกตอนลบรายการ "${item.name}"`,
+        }
+      : null
+    set((state) => ({
+      inventoryItems: state.inventoryItems.filter((i) => i.id !== id),
+      inventoryTransactions: writeOffTx
+        ? [writeOffTx, ...state.inventoryTransactions]
+        : state.inventoryTransactions,
+    }))
+    // dual-write write-off ก่อน (item ยังอยู่ใน table แบบ soft-delete → FK item_id ครบ)
+    if (writeOffTx) pushInventoryTx(writeOffTx)
+    // soft-delete (กัน §3c resurrection); ตั้ง current_stock=0 ให้แถวที่เก็บไว้ตรงกับ ledger
     void supabase.from('inventory_items')
-      .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+      .update({ current_stock: 0, deleted_at: now, writer_id: CLIENT_ID })
       .eq('id', id).then(reportInventoryError)
   },
 

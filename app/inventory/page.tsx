@@ -113,8 +113,8 @@ export default function InventoryPage() {
   }
 
   function handleDelete() {
-    if (!deleteConfirm) return
-    deleteInventoryItem(deleteConfirm.id)
+    if (!deleteConfirm || !user) return
+    deleteInventoryItem(deleteConfirm.id, user.staff.id)
     logAudit({ category: 'inventory', action: 'delete', summary: `ลบรายการ "${deleteConfirm.name}"`, entityId: deleteConfirm.id })
     toast.success(`ลบ "${deleteConfirm.name}" แล้ว`)
     setDeleteConfirm(null)
@@ -523,6 +523,11 @@ export default function InventoryPage() {
               <p className="text-sm text-slate-600 mt-2">
                 ลบรายการ <span className="font-semibold">&ldquo;{deleteConfirm.name}&rdquo;</span> ออกจากคลังถาวร?
               </p>
+              {deleteConfirm.currentStock > 0 && (
+                <p className="text-xs text-amber-600 mt-2 bg-amber-50 dark:bg-amber-950/40 rounded-md px-2 py-1.5">
+                  มีสต็อกเหลือ {deleteConfirm.currentStock} {unitLabels[deleteConfirm.unit]} — จะถูกตัดเป็นของเสีย (write-off) และบันทึกในประวัติการเคลื่อนไหว
+                </p>
+              )}
               <p className="text-xs text-slate-400 mt-1">การกระทำนี้ย้อนกลับไม่ได้</p>
             </div>
             <div className="flex justify-end gap-3 p-4">
