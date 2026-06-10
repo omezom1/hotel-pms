@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-06-10
+> อัปเดตล่าสุด: 2026-06-11
 
 ---
 
@@ -226,6 +226,20 @@
 - tsc clean (เหลือ 4 errors เดิม). **⚠️ ยังไม่ commit** (working tree: 011 sql, store.ts, AppShell.tsx, supabase-storage.ts, PROGRESS.md)
 - ⏳ **NEXT:** ผู้ใช้ **reload แอป** → ตรวจ (เปิด booking เห็น add-on ครบ 7 + ราคาถูก, สร้าง add-on บน booking ยังได้, 2 แท็บ reload ไม่หาย) → commit → ไล่ Tier B ที่เหลือ: **guests** (mutable + side-effect totalStays/totalSpend ตอน checkout → dual-write แบบ maintenance) → **staff** → **users** (auth) → **corporate** (accounts+transactions, drop corp_tx FK→bookings/invoices) → **rooms ท้ายสุด** (พัวพัน updateRoomStatus ทุก flow; ย้ายเสร็จใส่ FK maintenance_logs.room_id กลับ)
 - ✅ **inventory verify ผ่าน MCP:** 12/15 รายการที่ไม่ได้แตะ = ตรง mock เป๊ะ (orphan=ของจริง), อีก 3 = แก้จริงตอน verify (สบู่ -1, ลบน้ำดื่ม+ถั่วอบ). ไม่มีข้อมูลหาย
+
+### 2026-06-10/11 (UX/ops fixes + agent ใหม่ — ปิดงานวัน)
+รอบนี้สลับมาเก็บ "ของใช้จริง" ที่เจอตอนคลิกใช้ + สร้าง agent ช่วยหา
+- **🆕 ข้อเท็จจริงสำคัญ: MCP `execute_sql` รัน DDL ได้** (ใช้สิทธิ์ management ไม่ใช่ anon key) — ใช้รัน migration 011 แล้ว. กฎเก่า "DDL ต้องทำใน Dashboard / MCP บล็อก" จริง ๆ ใช้กับ tool `apply_migration` เท่านั้น → ต่อไปรัน migration ผ่าน MCP ได้เลย
+- **`327853e` วันที่ default ฟอร์มรายจ่าย:** `openAdd` เดิมตั้งวันที่ 15 ของงวดเสมอ → แก้เป็น "งวดปัจจุบัน→วันนี้, งวดย้อนหลัง→กลางงวด"
+- **`163e4f9` ลบ inventory item = write-off:** ลบของที่ยังมีสต็อก → สร้าง movement `waste` (ยอด→0) ก่อน soft-delete + ตั้ง `current_stock=0` ในตาราง → ledger ครบ ไม่หายเงียบ. `deleteInventoryItem` รับ `staffId`; dialog เตือนเมื่อมีสต็อกค้าง
+- **`be8b2eb` agent ใหม่ `hotel-pms-ops-reviewer`** (`.claude/agents/`): มองแอปแบบผู้ใช้งานจริง ไล่ workflow จับ operational/UX gaps (default ไม่ฉลาด/ลบแก้ไม่มีร่องรอย/friction/confirm ขาด-เกิน/edge case). read-only เสนอรายการ. **แยกบทบาทชัดจาก qa-auditor** ("ใช้จริงเวิร์กไหม" vs "เลขถูกไหม"). หมายเหตุ: agent ที่สร้างใหม่ spawn native ได้ session หน้า (รอบนี้รันผ่าน general-purpose + persona)
+- **`288aa44` แก้รอบแรกจาก ops-reviewer (front-desk lifecycle):**
+  - **P1 corporate auto-charge:** เช็คเอาต์ตัดเครดิตองค์กรเงียบ → เพิ่ม audit (`corporate_charge`) + CheckoutConfirmDialog แจ้ง "จะตัดเครดิตองค์กร X (บริษัท)" (ทั้ง front-desk + bookings/[id])
+  - **P1 refund audit:** early-checkout / cancel-booking / cancel-add-on คืนเงินแล้วไม่มี audit ยอด → log ใน store ผ่าน `get().logAudit` หลัง set() (รับประกันทุกหน้า)
+  - **P2:** walk-in เพิ่มช่องเลขบัตร/พาสปอร์ต→guestSnapshot; quick-pay เตือน "ชำระบางส่วน—ค้างอีก X"; ช่องมัดจำ default=ค่าห้อง 1 คืน
+- ⏳ **ops-reviewer P3 ที่ยังไม่ทำ (รอตัดสินใจ product):** (#6) action การเงิน/คืนเงินผูกแค่ `canManageBookings` ไม่มี finance gate; (#7) ย้ายห้องข้ามประเภทไม่ปรับราคา (บางส่วนเป็นงาน qa-auditor); (#8) เช็คอินก่อนวันได้โดยไม่มี guard/confirm
+- **branch `fix/revenue-consolidation-double-submit` นำ origin 13 commits (ยังไม่ push)**, tsc clean (เหลือ 4 errors เดิม)
+- ⏳ **NEXT (พรุ่งนี้):** ใช้ ops-reviewer ต่อกับ workflow อื่น + เคาะ P3 ข้างบน · งาน migration ตัวถัดไป = **guests** (Tier B; mutable + side-effect checkout totalStays/totalSpend → dual-write แบบ maintenance, ใช้ reconcile แบบ await-ก่อน-rehydrate)
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
