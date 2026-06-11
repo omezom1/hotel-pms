@@ -191,16 +191,24 @@ export default function MaintenancePage() {
                           </>
                         )}
                         {log.status === 'in_progress' && (
-                          <button
-                            onClick={() => {
-                              updateMaintenanceStatus(log.id, 'resolved')
-                              logAudit({ category: 'maintenance', action: 'resolve', summary: `ซ่อมห้อง ${log.roomNumber} เสร็จ`, entityId: log.id })
-                              toast.success(`ซ่อมห้อง ${log.roomNumber} เสร็จแล้ว`, { description: 'คืนสถานะห้องเป็น "ว่าง" อัตโนมัติ' })
-                            }}
-                            className="text-sm px-4 py-2.5 min-h-[44px] bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg transition-colors font-medium whitespace-nowrap"
-                          >
-                            ✓ แก้ไขแล้ว
-                          </button>
+                          <>
+                            <button
+                              onClick={() => {
+                                updateMaintenanceStatus(log.id, 'resolved')
+                                logAudit({ category: 'maintenance', action: 'resolve', summary: `ซ่อมห้อง ${log.roomNumber} เสร็จ`, entityId: log.id })
+                                toast.success(`ซ่อมห้อง ${log.roomNumber} เสร็จแล้ว`, { description: 'คืนสถานะห้องเป็น "ว่าง" อัตโนมัติ' })
+                              }}
+                              className="text-sm px-4 py-2.5 min-h-[44px] bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg transition-colors font-medium whitespace-nowrap"
+                            >
+                              ✓ แก้ไขแล้ว
+                            </button>
+                            <button
+                              onClick={() => handleCancel(log)}
+                              className="text-sm px-3 py-2.5 min-h-[44px] border border-slate-200 text-slate-500 hover:bg-red-50 hover:border-red-300 hover:text-red-600 rounded-lg transition-colors whitespace-nowrap"
+                            >
+                              ยกเลิก
+                            </button>
+                          </>
                         )}
                       </div>
                     </td>
