@@ -14,6 +14,8 @@ import { toast } from 'sonner'
 export default function FrontDeskPage() {
   const { rooms, guests, bookings, bookingAddOns, updateBookingStatus, createBooking, recordPayment, adjustForEarlyCheckout, logAudit } = useHotelStore()
   const { user } = useAuthStore()
+  // คืนเงิน (ปรับยอด early-checkout) ต้องมีสิทธิ์การเงิน
+  const canRefund = user?.staff.permissions.canManageFinance ?? false
 
   const [walkInRoomId, setWalkInRoomId] = useState<string | null>(null)
   const walkInBusy = useRef(false) // กัน double-submit walk-in (สร้าง guest/booking ซ้ำ)
@@ -100,6 +102,7 @@ export default function FrontDeskPage() {
 
   function handleEarlyAdjust() {
     if (!earlyTarget) return
+    if (!canRefund) { toast.error('ต้องมีสิทธิ์จัดการการเงินเพื่อปรับยอด/คืนเงิน'); return }
     const res = adjustForEarlyCheckout(earlyTarget.bookingId)
     if (res.ok) {
       logAudit({ category: 'booking', action: 'early_checkout', summary: `ออกก่อนกำหนด — ปรับเป็น ${res.newNights} คืน`, entityId: earlyTarget.bookingId })
@@ -625,6 +628,7 @@ export default function FrontDeskPage() {
           guestName={earlyTarget.gName}
           roomNumber={earlyTarget.roomNo}
           remainingNights={earlyTarget.remaining}
+          canRefund={canRefund}
           onClose={() => setEarlyTarget(null)}
           onAdjust={handleEarlyAdjust}
           onKeepFull={() => { const id = earlyTarget.bookingId; setEarlyTarget(null); proceedCheckOut(id) }}

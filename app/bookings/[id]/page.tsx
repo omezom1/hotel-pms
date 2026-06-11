@@ -143,6 +143,7 @@ export default function BookingDetailPage() {
   }
 
   function handleEarlyAdjust() {
+    if (!canRefund) { toast.error('ต้องมีสิทธิ์จัดการการเงินเพื่อปรับยอด/คืนเงิน'); return }
     const res = adjustForEarlyCheckout(id)
     if (res.ok) {
       logAudit({ category: 'booking', action: 'early_checkout', summary: `ออกก่อนกำหนด — ปรับเป็น ${res.newNights} คืน`, entityId: id })
@@ -264,6 +265,7 @@ export default function BookingDetailPage() {
                   )}
                   {(booking.status === 'confirmed' || booking.status === 'pending') && (
                     <button onClick={async () => {
+                      if (booking.paidAmount > 0 && !canRefund) { toast.error('ยกเลิกการจองที่จ่ายเงินแล้วต้องมีสิทธิ์จัดการการเงิน (มีการคืนเงิน)'); return }
                       if (!(await confirm({ title: 'ยกเลิกการจอง?', message: `ยกเลิกการจอง ${booking.id} ของ ${guestDisplayName}?\nการกระทำนี้ไม่สามารถย้อนกลับได้`, danger: true, confirmText: 'ยกเลิกการจอง' }))) return
                       cancelBooking(booking.id)
                       logAudit({ category: 'booking', action: 'cancel', summary: `ยกเลิกการจอง ${guestDisplayName} ห้อง ${room?.number ?? '-'}`, entityId: booking.id })
@@ -377,6 +379,7 @@ export default function BookingDetailPage() {
                         {ao.status === 'requested' && (
                           <button
                             onClick={async () => {
+                              if (booking.paidAmount > 0 && !canRefund) { toast.error('ยกเลิก add-on ของบิลที่จ่ายเงินแล้วต้องมีสิทธิ์จัดการการเงิน (อาจมีการคืนเงิน)'); return }
                               if (!(await confirm({ title: 'ยกเลิก Add-on?', message: `ยกเลิก add-on "${item?.name ?? 'รายการนี้'}"?\nรายได้ ${formatCurrency(ao.totalPrice)} จะหายไปจากบิล`, danger: true }))) return
                               cancelAddOn(ao.id)
                               toast.info('ยกเลิก Add-on แล้ว')
@@ -740,6 +743,7 @@ export default function BookingDetailPage() {
           guestName={guestDisplayName}
           roomNumber={room?.number ?? '-'}
           remainingNights={remainingNights}
+          canRefund={canRefund}
           onClose={() => setEarlyConfirm(false)}
           onAdjust={handleEarlyAdjust}
           onKeepFull={() => { setEarlyConfirm(false); proceedCheckout() }}
