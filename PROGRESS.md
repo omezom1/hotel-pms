@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-06-11
+> อัปเดตล่าสุด: 2026-06-12
 
 ---
 
@@ -240,6 +240,23 @@
 - ⏳ **ops-reviewer P3 ที่ยังไม่ทำ (รอตัดสินใจ product):** (#6) action การเงิน/คืนเงินผูกแค่ `canManageBookings` ไม่มี finance gate; (#7) ย้ายห้องข้ามประเภทไม่ปรับราคา (บางส่วนเป็นงาน qa-auditor); (#8) เช็คอินก่อนวันได้โดยไม่มี guard/confirm
 - **branch `fix/revenue-consolidation-double-submit` นำ origin 13 commits (ยังไม่ push)**, tsc clean (เหลือ 4 errors เดิม)
 - ⏳ **NEXT (พรุ่งนี้):** ใช้ ops-reviewer ต่อกับ workflow อื่น + เคาะ P3 ข้างบน · งาน migration ตัวถัดไป = **guests** (Tier B; mutable + side-effect checkout totalStays/totalSpend → dual-write แบบ maintenance, ใช้ reconcile แบบ await-ก่อน-rehydrate)
+
+### 2026-06-12 (ops-review 2 batch + เคาะ P3 + browser-verify ครบ)
+ปิด P3 ที่ค้าง (move-room reprice, finance gate) + รัน ops-reviewer รอบ housekeeping/maintenance/inventory แล้วเก็บที่เลือก
+- **batch #1 (4 commits):**
+  - `2dba6d3` maintenance honest-msg: แจ้งซ่อมห้อง occupied เดิม toast บอก "ปิดห้องอัตโนมัติ" แต่ store ไม่ปิดห้อง occupied (โกหก) → แก้ข้อความตามจริง + **checkout ห้องที่มี maintenance log ค้าง (status≠resolved) → ห้อง→maintenance แทน cleaning + ข้าม HK task** (ห้องเสียห้ามขายต่อ)
+  - `135cda2` inventory adjust: โชว์บรรทัดส่วนต่างสด + confirm เมื่อปรับ**ลด** (กันพิมพ์ 40→4)
+  - `96c2220` move-room reprice: `moveBooking(…, reprice?)` + `MoveRoomDialog` (ย้ายข้ามประเภทราคาต่าง → เลือก "ปรับเป็นราคาใหม่"=reprice+คืนเงินส่วนเกิน / "คงราคาเดิม"=อัพเกรดฟรี); ราคาเท่ากันไม่เด้ง
+  - `c311f10` finance gate (เฉพาะคืนเงิน): block cancel-booking(จ่ายแล้ว)/early-checkout-adjust/cancel-addon/move-reprice เมื่อไม่มี `canManageFinance`; รับเงิน (recordPayment) คงที่ `canManageBookings`. `EarlyCheckoutDialog`+`MoveRoomDialog` รับ prop `canRefund` disable ปุ่ม
+- **batch #2 (3 commits):**
+  - `e3e5957` maintenance: เพิ่มปุ่ม "ยกเลิก" บน ticket `in_progress` (reuse handleCancel = soft-delete + audit cancel) — เดิมยกเลิกได้แค่ตอน open
+  - `d515c93` inventory delete write-off เลือกเหตุผล: `deleteInventoryItem(id,staff,reason)` → ของเสีย→tx `waste`, โอนออก/เลิกใช้→tx `adjust` (ไม่เฟ้อรายงานของเสีย; ใช้ enum เดิม ไม่แตะ DDL)
+  - `0b09b90` inventory adjust บังคับหมายเหตุ (ปุ่ม disable จนใส่) + dialog อ่าน **stock สดจาก store** (ไม่ใช่ snapshot) กันโชว์เลขเก่าเมื่ออีกแท็บแก้
+- **ตัดออก 2 ข้อ (housekeeping):** HK auto-task invisibility + scheduledAt input — ผู้ใช้ drop เพราะแม่บ้านไม่ใช้แอป (รื้อเมื่อ usage เปลี่ยน)
+- **Browser-verify ผ่าน 7/7** (CDP→Windows Chrome, ดู memory reference-browser-verify-handle): finance gate (reception=disabled/admin=enabled), move-reprice dialog (B4 1,500→B1 2,100 ส่วนต่าง +600), inventory adjust/delete reason, maintenance occupied-msg + cancel in_progress. checkout→maintenance ตรวจ code-reasoning (real checkout กู้ยาก)
+- **⚠️ verify hazard เจอ+กู้:** กดปุ่มเช็คเอาต์แรกใน front-desk → booking checkout-วันนี้+จ่ายเต็ม (rA7, walk-in) checkout จริงไม่มี dialog → revert ครบผ่าน MCP (booking→checked_in, room→occupied, ลบ ghost invoice/HK + audit row check_out; walk-in/guestSnapshot ไม่แตะ guest). **verify ครั้งหน้า: เล็ง booking checkout-อนาคต ผ่าน /bookings/[id]**
+- tsc clean (4 errors เดิม). branch **นำ origin 28 commits, ยังไม่ push** (gh ยังไม่ auth)
+- ⏳ **NEXT:** push/PR · migration **Tier B/guests** (mutable + side-effect checkout totalStays/totalSpend → dual-write แบบ maintenance, reconcile await-ก่อน-rehydrate)
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
