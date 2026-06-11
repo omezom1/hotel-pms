@@ -145,7 +145,9 @@ export default function InventoryPage() {
 
   async function handleStockAction() {
     if (!stockDialog || !user) return
-    const { item, mode } = stockDialog
+    const { mode } = stockDialog
+    // ใช้ค่าสด (กันคิดส่วนต่าง adjust จาก snapshot เก่าเมื่ออีกแท็บแก้)
+    const item = inventoryItems.find((i) => i.id === stockDialog.item.id) ?? stockDialog.item
     if (mode === 'restock') {
       restockItem(item.id, stockQty, user.staff.id, stockNote || undefined)
       logAudit({ category: 'inventory', action: 'restock', summary: `เติมสต็อก ${item.name} +${stockQty}`, entityId: item.id })
@@ -469,19 +471,23 @@ export default function InventoryPage() {
       )}
 
       {/* Stock action dialog */}
-      {stockDialog && (
+      {stockDialog && (() => {
+        // ใช้ค่าสต็อกสดจาก store (ไม่ใช่ snapshot ตอนเปิด) — กันโชว์เลขเก่าเมื่ออีกแท็บเบิก/เติม
+        const liveItem = inventoryItems.find((i) => i.id === stockDialog.item.id) ?? stockDialog.item
+        const adjustNoteMissing = stockDialog.mode === 'adjust' && (stockQty === liveItem.currentStock || !stockNote.trim())
+        return (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setStockDialog(null)}>
           <div ref={stockTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">
-                {stockDialog.mode === 'restock' ? 'เติมสต็อก' : stockDialog.mode === 'use' ? 'ใช้สต็อก' : 'ปรับสต็อก'}: {stockDialog.item.name}
+                {stockDialog.mode === 'restock' ? 'เติมสต็อก' : stockDialog.mode === 'use' ? 'ใช้สต็อก' : 'ปรับสต็อก'}: {liveItem.name}
               </h2>
               <button onClick={() => setStockDialog(null)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
               <div className="flex justify-between text-sm text-slate-600 bg-slate-50 rounded-lg px-4 py-3">
                 <span>สต็อกปัจจุบัน</span>
-                <span className="font-semibold">{stockDialog.item.currentStock} {unitLabels[stockDialog.item.unit]}</span>
+                <span className="font-semibold">{liveItem.currentStock} {unitLabels[liveItem.unit]}</span>
               </div>
               <div>
                 <label htmlFor="inv-stock-qty" className="block text-sm font-medium text-slate-700 mb-1.5">
@@ -490,33 +496,39 @@ export default function InventoryPage() {
                 <input id="inv-stock-qty"
                   type="number"
                   min={0}
-                  max={stockDialog.mode === 'use' ? stockDialog.item.currentStock : undefined}
+                  max={stockDialog.mode === 'use' ? liveItem.currentStock : undefined}
                   value={stockQty}
                   onChange={(e) => {
                     const v = Math.max(0, +e.target.value)
-                    setStockQty(stockDialog.mode === 'use' ? Math.min(stockDialog.item.currentStock, v) : v)
+                    setStockQty(stockDialog.mode === 'use' ? Math.min(liveItem.currentStock, v) : v)
                   }}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 {stockDialog.mode === 'use' && (
-                  <p className="text-xs text-slate-400 mt-1.5">ใช้ได้สูงสุด {stockDialog.item.currentStock} {unitLabels[stockDialog.item.unit]}</p>
+                  <p className="text-xs text-slate-400 mt-1.5">ใช้ได้สูงสุด {liveItem.currentStock} {unitLabels[liveItem.unit]}</p>
                 )}
-                {stockDialog.mode === 'adjust' && stockQty !== stockDialog.item.currentStock && (
-                  <p className={`text-xs mt-1.5 font-medium ${stockQty < stockDialog.item.currentStock ? 'text-red-600' : 'text-emerald-600'}`}>
-                    จะปรับ {stockQty > stockDialog.item.currentStock ? '+' : ''}{stockQty - stockDialog.item.currentStock} {unitLabels[stockDialog.item.unit]}
+                {stockDialog.mode === 'adjust' && stockQty !== liveItem.currentStock && (
+                  <p className={`text-xs mt-1.5 font-medium ${stockQty < liveItem.currentStock ? 'text-red-600' : 'text-emerald-600'}`}>
+                    จะปรับ {stockQty > liveItem.currentStock ? '+' : ''}{stockQty - liveItem.currentStock} {unitLabels[liveItem.unit]}
                   </p>
                 )}
               </div>
               <div>
-                <label htmlFor="inv-stock-note" className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
+                <label htmlFor="inv-stock-note" className="block text-sm font-medium text-slate-700 mb-1.5">
+                  หมายเหตุ{stockDialog.mode === 'adjust' && <span className="text-red-500"> *</span>}
+                </label>
                 <input id="inv-stock-note" value={stockNote} onChange={(e) => setStockNote(e.target.value)}
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" placeholder="ไม่บังคับ" />
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none"
+                  placeholder={stockDialog.mode === 'adjust' ? 'เช่น นับสต็อกจริง / ของแตก / ของหาย' : 'ไม่บังคับ'} />
+                {stockDialog.mode === 'adjust' && (
+                  <p className="text-xs text-slate-400 mt-1.5">ระบุเหตุผลที่ปรับยอด (จำเป็นสำหรับการปรับสต็อก)</p>
+                )}
               </div>
               {/* Recent transactions for this item */}
-              {inventoryTransactions.filter((t) => t.itemId === stockDialog.item.id).length > 0 && (
+              {inventoryTransactions.filter((t) => t.itemId === liveItem.id).length > 0 && (
                 <div>
                   <div className="text-xs font-medium text-slate-500 mb-2">ประวัติล่าสุด</div>
-                  {inventoryTransactions.filter((t) => t.itemId === stockDialog.item.id).slice(0, 3).map((tx) => (
+                  {inventoryTransactions.filter((t) => t.itemId === liveItem.id).slice(0, 3).map((tx) => (
                     <div key={tx.id} className="flex justify-between text-xs text-slate-500 py-1 border-b border-slate-50">
                       <span>{{ restock: 'เติม', use: 'ใช้', adjust: 'ปรับ', waste: 'เสีย' }[tx.type]}</span>
                       <span className={tx.quantity > 0 ? 'text-emerald-600' : 'text-red-600'}>{tx.quantity > 0 ? '+' : ''}{tx.quantity}</span>
@@ -530,14 +542,16 @@ export default function InventoryPage() {
               <button onClick={() => setStockDialog(null)} className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>
               <button
                 onClick={handleStockAction}
-                className={`px-5 py-2.5 text-white rounded-lg text-sm font-medium ${stockDialog.mode === 'restock' ? 'bg-emerald-500 hover:bg-emerald-600' : stockDialog.mode === 'use' ? 'bg-amber-500 hover:bg-amber-600' : 'bg-blue-500 hover:bg-blue-600'}`}
+                disabled={adjustNoteMissing}
+                className={`px-5 py-2.5 text-white rounded-lg text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed ${stockDialog.mode === 'restock' ? 'bg-emerald-500 hover:bg-emerald-600' : stockDialog.mode === 'use' ? 'bg-amber-500 hover:bg-amber-600' : 'bg-blue-500 hover:bg-blue-600'}`}
               >
                 ยืนยัน
               </button>
             </div>
           </div>
         </div>
-      )}
+        )
+      })()}
 
       {/* Delete confirm */}
       {deleteConfirm && (
