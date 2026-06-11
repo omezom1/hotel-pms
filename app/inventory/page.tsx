@@ -7,6 +7,7 @@ import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { InventoryCategory, InventoryItem, InventoryUnit, InventoryTransaction } from '@/types'
 import { Plus, X, AlertTriangle, RefreshCw, Minus, Edit2, Trash2, History, Search } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
+import { useConfirm } from '@/components/ConfirmProvider'
 import { toast } from 'sonner'
 
 const txTypeLabel: Record<InventoryTransaction['type'], string> = {
@@ -53,6 +54,7 @@ export default function InventoryPage() {
   const { inventoryItems, inventoryTransactions, staff, addInventoryItem, updateInventoryItem, deleteInventoryItem, restockItem, adjustStock, logAudit } = store
   const consumeInventory = store.useInventoryItem
   const { user } = useAuthStore()
+  const confirm = useConfirm()
 
   const [activeTab, setActiveTab] = useState<'all' | InventoryCategory>('all')
   const [showAddDialog, setShowAddDialog] = useState(false)
@@ -130,7 +132,7 @@ export default function InventoryPage() {
     setShowAddDialog(true)
   }
 
-  function handleStockAction() {
+  async function handleStockAction() {
     if (!stockDialog || !user) return
     const { item, mode } = stockDialog
     if (mode === 'restock') {
@@ -146,6 +148,16 @@ export default function InventoryPage() {
       logAudit({ category: 'inventory', action: 'use', summary: `เบิก ${item.name} -${stockQty}`, entityId: item.id })
       toast.success(`เบิก ${item.name} -${stockQty} ${unitLabels[item.unit]}`)
     } else {
+      const diff = stockQty - item.currentStock
+      // ปรับลดสต็อก = ตัดของหายถาวร → ยืนยันก่อน (กันพิมพ์พลาด เช่น 40 → 4)
+      if (diff < 0) {
+        const ok = await confirm({
+          title: 'ยืนยันการปรับลดสต็อก',
+          message: `ปรับ "${item.name}" จาก ${item.currentStock} → ${stockQty} ${unitLabels[item.unit]} (ลด ${Math.abs(diff)} ${unitLabels[item.unit]})\nตัดสต็อกออกถาวร ยืนยันหรือไม่?`,
+          danger: true,
+        })
+        if (!ok) return
+      }
       adjustStock(item.id, stockQty, user.staff.id, stockNote || undefined)
       logAudit({ category: 'inventory', action: 'adjust', summary: `ปรับสต็อก ${item.name} เป็น ${stockQty}`, entityId: item.id })
       toast.success(`ปรับสต็อก ${item.name} เป็น ${stockQty} ${unitLabels[item.unit]}`)
@@ -477,6 +489,11 @@ export default function InventoryPage() {
                 />
                 {stockDialog.mode === 'use' && (
                   <p className="text-xs text-slate-400 mt-1.5">ใช้ได้สูงสุด {stockDialog.item.currentStock} {unitLabels[stockDialog.item.unit]}</p>
+                )}
+                {stockDialog.mode === 'adjust' && stockQty !== stockDialog.item.currentStock && (
+                  <p className={`text-xs mt-1.5 font-medium ${stockQty < stockDialog.item.currentStock ? 'text-red-600' : 'text-emerald-600'}`}>
+                    จะปรับ {stockQty > stockDialog.item.currentStock ? '+' : ''}{stockQty - stockDialog.item.currentStock} {unitLabels[stockDialog.item.unit]}
+                  </p>
                 )}
               </div>
               <div>
