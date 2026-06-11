@@ -64,6 +64,7 @@ export default function InventoryPage() {
   const [stockNote, setStockNote] = useState('')
   const [form, setForm] = useState(emptyForm)
   const [deleteConfirm, setDeleteConfirm] = useState<InventoryItem | null>(null)
+  const [deleteReason, setDeleteReason] = useState<'waste' | 'transfer' | 'discontinue'>('waste')
   const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null)
   const addTrapRef = useFocusTrap<HTMLDivElement>(showAddDialog, () => { setShowAddDialog(false); setEditItem(null) })
   const stockTrapRef = useFocusTrap<HTMLDivElement>(!!stockDialog, () => setStockDialog(null))
@@ -114,12 +115,22 @@ export default function InventoryPage() {
     setForm(emptyForm)
   }
 
+  const deleteReasonLabels: Record<'waste' | 'transfer' | 'discontinue', string> = {
+    waste: 'ของเสีย/ทิ้ง', transfer: 'โอนออก/ย้ายคลัง', discontinue: 'เลิกใช้รายการ',
+  }
+
   function handleDelete() {
     if (!deleteConfirm || !user) return
-    deleteInventoryItem(deleteConfirm.id, user.staff.id)
-    logAudit({ category: 'inventory', action: 'delete', summary: `ลบรายการ "${deleteConfirm.name}"`, entityId: deleteConfirm.id })
+    const hasStock = deleteConfirm.currentStock > 0
+    deleteInventoryItem(deleteConfirm.id, user.staff.id, deleteReason)
+    logAudit({
+      category: 'inventory', action: 'delete',
+      summary: `ลบรายการ "${deleteConfirm.name}"${hasStock ? ` (${deleteReasonLabels[deleteReason]})` : ''}`,
+      entityId: deleteConfirm.id,
+    })
     toast.success(`ลบ "${deleteConfirm.name}" แล้ว`)
     setDeleteConfirm(null)
+    setDeleteReason('waste')
   }
 
   function openEdit(item: InventoryItem) {
@@ -291,7 +302,7 @@ export default function InventoryPage() {
                             <Edit2 size={14} />
                           </button>
                           <button
-                            onClick={() => setDeleteConfirm(item)}
+                            onClick={() => { setDeleteReason('waste'); setDeleteConfirm(item) }}
                             title="ลบ"
                             className="p-1.5 rounded hover:bg-red-50 text-slate-400 hover:text-red-600 transition-colors"
                           >
@@ -541,11 +552,30 @@ export default function InventoryPage() {
                 ลบรายการ <span className="font-semibold">&ldquo;{deleteConfirm.name}&rdquo;</span> ออกจากคลังถาวร?
               </p>
               {deleteConfirm.currentStock > 0 && (
-                <p className="text-xs text-amber-600 mt-2 bg-amber-50 dark:bg-amber-950/40 rounded-md px-2 py-1.5">
-                  มีสต็อกเหลือ {deleteConfirm.currentStock} {unitLabels[deleteConfirm.unit]} — จะถูกตัดเป็นของเสีย (write-off) และบันทึกในประวัติการเคลื่อนไหว
-                </p>
+                <div className="mt-3">
+                  <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-950/40 rounded-md px-2 py-1.5">
+                    มีสต็อกเหลือ {deleteConfirm.currentStock} {unitLabels[deleteConfirm.unit]} — จะถูกตัดออกและบันทึกในประวัติ (เหตุผล: {deleteReasonLabels[deleteReason]})
+                  </p>
+                  <div className="mt-2">
+                    <span className="block text-xs font-medium text-slate-600 mb-1.5">เหตุผลที่ตัดสต็อก</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(['waste', 'transfer', 'discontinue'] as const).map((r) => (
+                        <button
+                          key={r}
+                          onClick={() => setDeleteReason(r)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${deleteReason === r ? 'bg-slate-800 text-white border-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-400'}`}
+                        >
+                          {deleteReasonLabels[r]}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-slate-400 mt-1.5">
+                      {deleteReason === 'waste' ? 'นับเข้ารายงานของเสีย' : 'ไม่นับเป็นของเสีย (ลงประวัติแบบปรับยอด)'}
+                    </p>
+                  </div>
+                </div>
               )}
-              <p className="text-xs text-slate-400 mt-1">การกระทำนี้ย้อนกลับไม่ได้</p>
+              <p className="text-xs text-slate-400 mt-2">การกระทำนี้ย้อนกลับไม่ได้</p>
             </div>
             <div className="flex justify-end gap-3 p-4">
               <button onClick={() => setDeleteConfirm(null)} className="px-4 py-2 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>

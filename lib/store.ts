@@ -146,7 +146,7 @@ interface HotelStore {
   // Inventory actions
   addInventoryItem: (item: Omit<InventoryItem, 'id'>) => void
   updateInventoryItem: (id: string, updates: Partial<InventoryItem>) => void
-  deleteInventoryItem: (id: string, staffId: string) => void
+  deleteInventoryItem: (id: string, staffId: string, reason?: 'waste' | 'transfer' | 'discontinue') => void
   restockItem: (itemId: string, quantity: number, staffId: string, notes?: string) => void
   useInventoryItem: (itemId: string, quantity: number, staffId: string, referenceId?: string, notes?: string) => { ok: boolean; error?: string }
   adjustStock: (itemId: string, newQuantity: number, staffId: string, notes?: string) => void
@@ -889,15 +889,17 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     void supabase.from('inventory_items').update(patch).eq('id', id).then(reportInventoryError)
   },
 
-  deleteInventoryItem: (id, staffId) => {
+  deleteInventoryItem: (id, staffId, reason = 'waste') => {
     const item = get().inventoryItems.find((i) => i.id === id)
     const now = new Date().toISOString()
-    // ถ้ายังมีสต็อกค้าง → บันทึก write-off (waste) ยอดที่เหลือ ก่อนลบ เพื่อให้ ledger ครบ
+    // ถ้ายังมีสต็อกค้าง → บันทึก write-off ยอดที่เหลือ ก่อนลบ เพื่อให้ ledger ครบ
     // (ไม่งั้นสต็อกที่เหลือหายจากบัญชีเงียบ ๆ — มีแค่ audit log ว่า "ลบรายการ")
+    // เหตุผลกำหนด tx type: ของเสีย→'waste' (นับเข้ารายงานของเสีย); โอนออก/เลิกใช้→'adjust' (neutral ไม่เฟ้อรายงาน)
+    const reasonText = reason === 'transfer' ? 'โอนออก/ย้ายคลัง' : reason === 'discontinue' ? 'เลิกใช้รายการ' : 'ตัดเป็นของเสีย'
     const writeOffTx: InventoryTransaction | null = item && item.currentStock > 0
       ? {
-          id: `itx${Date.now()}`, itemId: id, type: 'waste', quantity: -item.currentStock,
-          performedBy: staffId, date: now, notes: `ตัดสต็อกตอนลบรายการ "${item.name}"`,
+          id: `itx${Date.now()}`, itemId: id, type: reason === 'waste' ? 'waste' : 'adjust', quantity: -item.currentStock,
+          performedBy: staffId, date: now, notes: `${reasonText} (ลบรายการ "${item.name}")`,
         }
       : null
     set((state) => ({
