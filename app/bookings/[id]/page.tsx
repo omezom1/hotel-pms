@@ -4,13 +4,14 @@ import { useParams } from 'next/navigation'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
-import { addNightsISO, formatCurrency, formatDate, formatDateTime, getBookingStatusLabel, getBookingSourceLabel, getPaymentMethodLabel, getRoomTypeLabel, getGuestDisplayName, roomHasConflict, calcAddOnTotal, calcOutstanding, todayLocal } from '@/lib/utils'
+import { addNightsISO, calcBookingTotal, formatCurrency, formatDate, formatDateTime, getBookingStatusLabel, getBookingSourceLabel, getPaymentMethodLabel, getRoomTypeLabel, getGuestDisplayName, roomHasConflict, calcAddOnTotal, calcOutstanding, todayLocal } from '@/lib/utils'
 import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { BookingStatus, PaymentMethod } from '@/types'
 import Link from 'next/link'
 import { ArrowLeft, User, BedDouble, CalendarDays, CreditCard, MessageSquare, ShoppingBag, Plus, X, Ban, Banknote } from 'lucide-react'
 import CheckoutConfirmDialog from '@/components/CheckoutConfirmDialog'
 import EarlyCheckoutDialog from '@/components/EarlyCheckoutDialog'
+import MoveRoomDialog from '@/components/MoveRoomDialog'
 import { useConfirm } from '@/components/ConfirmProvider'
 import { toast } from 'sonner'
 
@@ -36,6 +37,8 @@ export default function BookingDetailPage() {
   const { bookings, rooms, guests, addOnItems, bookingAddOns, invoices, corporateAccounts, updateBookingStatus, cancelBooking, requestAddOn, cancelAddOn, recordPayment, extendBooking, moveBooking, updateBooking, adjustForEarlyCheckout, logAudit } = useHotelStore()
   const { user } = useAuthStore()
   const confirm = useConfirm()
+  // คืนเงิน (cancel/early-checkout/cancel-addon/move-reprice) ต้องมีสิทธิ์การเงิน
+  const canRefund = user?.staff.permissions.canManageFinance ?? false
   const [showAddOnDialog, setShowAddOnDialog] = useState(false)
   const [addOnForm, setAddOnForm] = useState({ addOnItemId: '', quantity: 1, notes: '' })
   const [showPayDialog, setShowPayDialog] = useState(false)
@@ -43,6 +46,7 @@ export default function BookingDetailPage() {
   const [extendNights, setExtendNights] = useState<number | null>(null)
   const [moveDialog, setMoveDialog] = useState(false)
   const [newRoomId, setNewRoomId] = useState('')
+  const [moveReprice, setMoveReprice] = useState<{ roomId: string; roomNumber: string; oldTotal: number; newTotal: number } | null>(null)
   const [editDialog, setEditDialog] = useState(false)
   const [editForm, setEditForm] = useState({ adults: 1, children: 0, source: 'direct' as import('@/types').BookingSource, specialRequests: '' })
   const payTrapRef = useFocusTrap<HTMLDivElement>(showPayDialog, () => setShowPayDialog(false))
@@ -151,15 +155,32 @@ export default function BookingDetailPage() {
   }
 
   function handleMove() {
-    if (!newRoomId) return
-    const result = moveBooking(id, newRoomId)
+    if (!newRoomId || !booking) return
+    const newRoom = rooms.find((x) => x.id === newRoomId)
+    if (!newRoom) return
+    const newTotal = calcBookingTotal(newRoom.type, booking.checkIn, booking.checkOut, newRoom.pricePerNight)
+    // ราคาต่างจากยอดเดิม → ถามก่อนว่าจะปรับราคาใหม่หรือคงราคาเดิม
+    if (newTotal !== booking.totalAmount) {
+      setMoveReprice({ roomId: newRoomId, roomNumber: newRoom.number, oldTotal: booking.totalAmount, newTotal })
+      return
+    }
+    doMove(newRoomId, false)
+  }
+
+  function doMove(targetRoomId: string, reprice: boolean) {
+    const r = rooms.find((x) => x.id === targetRoomId)
+    const oldRoom = rooms.find((x) => x.id === booking?.roomId)
+    const result = moveBooking(id, targetRoomId, reprice)
     if (result.ok) {
-      const r = rooms.find((x) => x.id === newRoomId)
-      const oldRoom = rooms.find((x) => x.id === booking?.roomId)
-      logAudit({ category: 'booking', action: 'move_room', summary: `ย้ายจากห้อง ${oldRoom?.number ?? '-'} → ${r?.number ?? newRoomId}`, entityId: id })
-      toast.success(`ย้ายห้องเป็นห้อง ${r?.number ?? newRoomId} แล้ว`)
+      logAudit({
+        category: 'booking', action: 'move_room',
+        summary: `ย้ายจากห้อง ${oldRoom?.number ?? '-'} → ${r?.number ?? targetRoomId}${reprice ? ' (ปรับราคาใหม่)' : ''}`,
+        entityId: id,
+      })
+      toast.success(`ย้ายห้องเป็นห้อง ${r?.number ?? targetRoomId} แล้ว`)
       setMoveDialog(false)
       setNewRoomId('')
+      setMoveReprice(null)
     } else {
       toast.error(result.error ?? 'ย้ายห้องไม่สำเร็จ')
     }
@@ -688,7 +709,7 @@ export default function BookingDetailPage() {
                 )}
               </div>
               <p className="text-xs text-slate-400">
-                หมายเหตุ: ราคาเดิมไม่เปลี่ยน — ถ้าราคาห้องใหม่ต่างกัน ปรับยอดเองที่ &ldquo;บันทึกรับชำระ&rdquo;
+                หมายเหตุ: ถ้าราคาห้องใหม่ต่างจากยอดเดิม ระบบจะถามให้เลือก &ldquo;ปรับเป็นราคาใหม่&rdquo; หรือ &ldquo;คงราคาเดิม&rdquo;
               </p>
             </div>
             <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100">
@@ -697,6 +718,21 @@ export default function BookingDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {moveReprice && (
+        <MoveRoomDialog
+          guestName={guestDisplayName}
+          oldRoomNumber={room?.number ?? '-'}
+          newRoomNumber={moveReprice.roomNumber}
+          oldTotal={moveReprice.oldTotal}
+          newTotal={moveReprice.newTotal}
+          paidAmount={booking.paidAmount}
+          canRefund={canRefund}
+          onReprice={() => doMove(moveReprice.roomId, true)}
+          onKeepPrice={() => doMove(moveReprice.roomId, false)}
+          onClose={() => setMoveReprice(null)}
+        />
       )}
 
       {earlyConfirm && (

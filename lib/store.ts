@@ -124,7 +124,7 @@ interface HotelStore {
   cancelBooking: (bookingId: string) => void
   updateBooking: (bookingId: string, updates: Partial<Pick<Booking, 'adults' | 'children' | 'source' | 'specialRequests' | 'paymentMethod'>>) => void
   extendBooking: (bookingId: string, additionalNights: number) => { ok: boolean; error?: string }
-  moveBooking: (bookingId: string, newRoomId: string) => { ok: boolean; error?: string }
+  moveBooking: (bookingId: string, newRoomId: string, reprice?: boolean) => { ok: boolean; error?: string }
   adjustForEarlyCheckout: (bookingId: string) => { ok: boolean; error?: string; newNights?: number; newTotal?: number; refunded?: number }
 
   // Data backup / restore
@@ -612,7 +612,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     return { ok: true }
   },
 
-  moveBooking: (bookingId, newRoomId) => {
+  moveBooking: (bookingId, newRoomId, reprice = false) => {
     const state = get()
     const booking = state.bookings.find((b) => b.id === bookingId)
     if (!booking) return { ok: false, error: 'ไม่พบการจอง' }
@@ -645,8 +645,33 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         }
       : null
 
+    // คิดราคาใหม่ตามประเภทห้องใหม่ (ผ่าน source เดียวกับสร้าง/ขยาย/early-checkout)
+    // ถ้า reprice=false → คงราคาเดิม (อัพเกรด/ย้ายฟรี)
+    const newTotal = reprice
+      ? calcBookingTotal(newRoom.type, booking.checkIn, booking.checkOut, newRoom.pricePerNight)
+      : booking.totalAmount
+    const overpaid = reprice ? Math.max(0, booking.paidAmount - newTotal) : 0
+    const refundPayment: import('@/types').Payment | null = overpaid > 0
+      ? { id: `pay${Date.now()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการย้ายห้อง (ราคาใหม่ต่ำกว่ายอดที่จ่าย)' }
+      : null
+
     set((s) => ({
-      bookings: s.bookings.map((b) => (b.id === bookingId ? { ...b, roomId: newRoomId } : b)),
+      bookings: s.bookings.map((b) =>
+        b.id === bookingId
+          ? {
+              ...b,
+              roomId: newRoomId,
+              ...(reprice
+                ? {
+                    totalAmount: newTotal,
+                    roomTypeAtBooking: newRoom.type,
+                    paidAmount: Math.min(b.paidAmount, newTotal),
+                    payments: refundPayment ? [...(b.payments ?? []), refundPayment] : b.payments,
+                  }
+                : {}),
+            }
+          : b
+      ),
       rooms: s.rooms.map((r) => {
         if (wasCheckedIn) {
           if (r.id === booking.roomId) {
@@ -660,6 +685,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       }),
       housekeepingTasks: newTask ? [...s.housekeepingTasks, newTask] : s.housekeepingTasks,
     }))
+    if (overpaid > 0) {
+      get().logAudit({
+        category: 'payment', action: 'refund',
+        summary: `คืนเงินจากย้ายห้อง ${overpaid.toLocaleString()} บาท`,
+        entityId: bookingId,
+      })
+    }
     return { ok: true }
   },
 
