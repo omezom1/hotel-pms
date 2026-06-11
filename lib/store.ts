@@ -415,25 +415,35 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         items,
       }
 
-      // 4) ห้อง → cleaning
+      // 4) ห้อง → cleaning (แต่ถ้ามีแจ้งซ่อมค้าง → maintenance: ห้องเสียห้ามขายต่อ)
+      const hasOpenMaintenance = state.maintenanceLogs.some(
+        (l) => l.roomId === booking.roomId && l.status !== 'resolved'
+      )
       const updatedRooms = state.rooms.map((r) =>
         r.id === booking.roomId
-          ? { ...r, status: 'cleaning' as RoomStatus, currentBookingId: undefined, currentGuestId: undefined }
+          ? {
+              ...r,
+              status: (hasOpenMaintenance ? 'maintenance' : 'cleaning') as RoomStatus,
+              currentBookingId: undefined,
+              currentGuestId: undefined,
+            }
           : r
       )
 
-      // 5) สร้าง Housekeeping task อัตโนมัติ
-      const newTask: HousekeepingTask = {
-        id: `hk${Date.now()}`,
-        roomId: booking.roomId,
-        roomNumber: room?.number ?? '-',
-        assignedTo: '',
-        staffId: '',
-        status: 'pending',
-        priority: 'normal',
-        notes: `ทำความสะอาดหลังเช็คเอาต์ (${bookingId})`,
-        scheduledAt: now,
-      }
+      // 5) สร้าง Housekeeping task อัตโนมัติ (ข้ามถ้าห้องไปซ่อม — ยังไม่ต้องทำความสะอาด)
+      const newTask: HousekeepingTask | null = hasOpenMaintenance
+        ? null
+        : {
+            id: `hk${Date.now()}`,
+            roomId: booking.roomId,
+            roomNumber: room?.number ?? '-',
+            assignedTo: '',
+            staffId: '',
+            status: 'pending',
+            priority: 'normal',
+            notes: `ทำความสะอาดหลังเช็คเอาต์ (${bookingId})`,
+            scheduledAt: now,
+          }
 
       // 6) อัพเดทสถิติแขก — นับเฉพาะที่จ่ายเงินจริง (paid) เพื่อไม่ให้ totalSpend เฟ้อเมื่อ corp credit ไม่พอ
       let updatedGuests = state.guests
@@ -449,7 +459,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         bookings: updatedBookings,
         rooms: updatedRooms,
         invoices: [newInvoice, ...state.invoices],
-        housekeepingTasks: [...state.housekeepingTasks, newTask],
+        housekeepingTasks: newTask ? [...state.housekeepingTasks, newTask] : state.housekeepingTasks,
         guests: updatedGuests,
         corporateAccounts: updatedCorpAccounts,
         corporateTransactions: updatedCorpTx,

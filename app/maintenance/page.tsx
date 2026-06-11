@@ -47,7 +47,7 @@ export default function MaintenancePage() {
     if (!room) return
     // Fix C: warn if room is occupied before reporting maintenance
     if (room.status === 'occupied') {
-      if (!(await confirm({ title: 'ห้องมีผู้เข้าพัก', message: `ห้อง ${room.number} มีผู้เข้าพักอยู่\nการแจ้งซ่อมจะปิดห้องอัตโนมัติ ยืนยันหรือไม่?`, danger: true }))) return
+      if (!(await confirm({ title: 'ห้องมีผู้เข้าพัก', message: `ห้อง ${room.number} มีผู้เข้าพักอยู่\nระบบจะบันทึกแจ้งซ่อมไว้ และปิดห้องอัตโนมัติหลังแขกเช็คเอาต์ (ตอนนี้ยังไม่ปิด)\nยืนยันหรือไม่?`, danger: true }))) return
     }
     const reportedBy = form.reportedBy || user?.staff.name || 'พนักงาน'
     addMaintenanceLog({
@@ -57,7 +57,11 @@ export default function MaintenancePage() {
       reportedBy, reportedAt: new Date().toISOString(),
     })
     logAudit({ category: 'maintenance', action: 'report', summary: `แจ้งซ่อมห้อง ${room.number}: ${form.issue}` })
-    toast.success(`แจ้งซ่อมห้อง ${room.number} แล้ว`, { description: 'ห้องถูกปิดใช้งานโดยอัตโนมัติ' })
+    toast.success(`แจ้งซ่อมห้อง ${room.number} แล้ว`, {
+      description: room.status === 'occupied'
+        ? 'ห้องจะถูกปิดอัตโนมัติหลังแขกเช็คเอาต์'
+        : 'ห้องถูกปิดใช้งานโดยอัตโนมัติ',
+    })
     setShowModal(false)
     setForm({ roomId: '', issue: '', description: '', priority: 'normal', reportedBy: '' })
   }
