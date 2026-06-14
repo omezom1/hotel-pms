@@ -2,7 +2,7 @@
 import { useParams } from 'next/navigation'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, getBookingStatusLabel } from '@/lib/utils'
+import { formatCurrency, formatDate, getBookingStatusLabel, calcOutstanding } from '@/lib/utils'
 import type { BookingStatus } from '@/types'
 import Link from 'next/link'
 import { ArrowLeft, AlertTriangle } from 'lucide-react'
@@ -17,7 +17,7 @@ const statusColors: Record<BookingStatus, string> = {
 
 export default function GuestDetailPage() {
   const { id } = useParams<{ id: string }>()
-  const { guests, bookings, rooms } = useHotelStore()
+  const { guests, bookings, rooms, bookingAddOns } = useHotelStore()
   const guest = guests.find((g) => g.id === id)
   if (!guest) return <div className="p-8 text-slate-500">ไม่พบข้อมูลแขก</div>
 
@@ -74,15 +74,19 @@ export default function GuestDetailPage() {
           <div className="lg:col-span-2">
             <div className="bg-white rounded-xl shadow-sm border border-slate-100">
               <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
-                <h2 className="font-semibold text-slate-800">ประวัติการเข้าพัก</h2>
+                <div>
+                  <h2 className="font-semibold text-slate-800">ประวัติการเข้าพัก</h2>
+                  <p className="text-[11px] text-slate-400 mt-0.5">นับเฉพาะการเข้าพักที่เช็คเอาต์แล้ว</p>
+                </div>
                 <div className="flex gap-4 text-sm text-slate-500">
-                  <span>ทั้งหมด <strong className="text-slate-800">{guest.totalStays}</strong> ครั้ง</span>
+                  <span>เข้าพักแล้ว <strong className="text-slate-800">{guest.totalStays}</strong> ครั้ง</span>
                   <span>รวม <strong className="text-slate-800">{formatCurrency(guest.totalSpend)}</strong></span>
                 </div>
               </div>
               <div className="divide-y divide-slate-50">
                 {guestBookings.map((b) => {
                   const room = rooms.find((r) => r.id === b.roomId)
+                  const outstanding = b.status !== 'cancelled' ? calcOutstanding(b, bookingAddOns) : 0
                   return (
                     <div key={b.id} className="px-5 py-4 hover:bg-slate-50 transition-colors">
                       <div className="flex items-start justify-between">
@@ -98,6 +102,9 @@ export default function GuestDetailPage() {
                             {getBookingStatusLabel(b.status)}
                           </span>
                           <div className="font-semibold text-slate-800 mt-1.5">{formatCurrency(b.totalAmount)}</div>
+                          {outstanding > 0 && (
+                            <div className="text-xs font-medium text-red-600 mt-0.5">ค้างชำระ {formatCurrency(outstanding)}</div>
+                          )}
                         </div>
                       </div>
                     </div>

@@ -1,5 +1,5 @@
 'use client'
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
@@ -16,6 +16,8 @@ import { th } from 'date-fns/locale'
 // @ts-ignore
 const DateRange = dynamic(() => import('react-date-range').then((m: any) => m.DateRange), { ssr: false })
 
+const addDays = (d: Date, n: number) => { const x = new Date(d); x.setDate(x.getDate() + n); return x }
+
 const statusColors: Record<BookingStatus, string> = {
   confirmed: 'text-blue-700 bg-blue-100',
   checked_in: 'text-emerald-700 bg-emerald-100',
@@ -30,13 +32,14 @@ export default function BookingsPage() {
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState<BookingStatus | 'all'>('all')
   const [showModal, setShowModal] = useState(false)
-  const [dateRange, setDateRange] = useState([{ startDate: new Date(), endDate: new Date(), key: 'selection' }])
+  const [dateRange, setDateRange] = useState([{ startDate: new Date(), endDate: addDays(new Date(), 1), key: 'selection' }])
   const createBusy = useRef(false) // กัน double-submit สร้างการจอง
   const [guestMode, setGuestMode] = useState<'existing' | 'new'>('existing')
   const [guestSearch, setGuestSearch] = useState('')
   const [guestOpen, setGuestOpen] = useState(false)
   const [form, setForm] = useState({
-    roomId: '', guestId: '', checkIn: '', checkOut: '',
+    // default = เข้าวันนี้ ออกพรุ่งนี้ (1 คืน) ตรงเคสที่พบบ่อยสุด — กันสร้างจอง 0 คืน
+    roomId: '', guestId: '', checkIn: calendarDateToISO(new Date()), checkOut: calendarDateToISO(addDays(new Date(), 1)),
     source: 'direct' as BookingSource, adults: 1, children: 0,
     specialRequests: '', paymentMethod: 'credit_card' as PaymentMethod,
     corporateAccountId: '', isCorporate: false,
@@ -68,8 +71,8 @@ export default function BookingsPage() {
     setGuestMode('existing')
     setGuestSearch('')
     setGuestOpen(false)
-    setDateRange([{ startDate: new Date(), endDate: new Date(), key: 'selection' }])
-    setForm({ roomId: '', guestId: '', checkIn: '', checkOut: '', source: 'direct', adults: 1, children: 0, specialRequests: '', paymentMethod: 'credit_card', corporateAccountId: '', isCorporate: false, snapName: '', snapPhone: '', snapIdNumber: '' })
+    setDateRange([{ startDate: new Date(), endDate: addDays(new Date(), 1), key: 'selection' }])
+    setForm({ roomId: '', guestId: '', checkIn: calendarDateToISO(new Date()), checkOut: calendarDateToISO(addDays(new Date(), 1)), source: 'direct', adults: 1, children: 0, specialRequests: '', paymentMethod: 'credit_card', corporateAccountId: '', isCorporate: false, snapName: '', snapPhone: '', snapIdNumber: '' })
   }
 
   function closeModal() {
@@ -77,6 +80,19 @@ export default function BookingsPage() {
     resetForm()
   }
   const trapRef = useFocusTrap<HTMLDivElement>(showModal, closeModal)
+
+  // เปิดจากปฏิทิน (คลิกช่องว่าง) → prefill ห้อง+วัน แล้วเปิดฟอร์มสร้างจองเลย
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const roomId = params.get('roomId')
+    const date = params.get('date')
+    if (!roomId && !date) return
+    const start = date ? new Date(`${date}T00:00:00`) : new Date()
+    const end = addDays(start, 1)
+    setDateRange([{ startDate: start, endDate: end, key: 'selection' }])
+    setForm((f) => ({ ...f, roomId: roomId ?? f.roomId, checkIn: calendarDateToISO(start), checkOut: calendarDateToISO(end) }))
+    setShowModal(true)
+  }, [])
 
   function handleCreate() {
     if (createBusy.current) return // กดซ้ำระหว่างทำรายการ → ข้าม (กันจอง/toast ซ้ำ)
@@ -93,6 +109,9 @@ export default function BookingsPage() {
     try {
     const nights = calcNights(form.checkIn, form.checkOut)
     const total = calcTotal()
+    // จองล่วงหน้า (เช็คอินวันอนาคต) = reservation ยังไม่เก็บเงิน → paidAmount=0 เก็บเงินตอนเช็คอิน
+    // เฉพาะ same-day (วันนี้) ถึงถือว่ารับเงินตามวิธีชำระที่เลือก
+    const isAdvance = form.checkIn.split('T')[0] > todayLocal()
     const guestSnapshot = guestMode === 'new' ? {
       name: form.snapName.trim(),
       phone: form.snapPhone.trim() || undefined,
@@ -105,7 +124,7 @@ export default function BookingsPage() {
       checkIn: form.checkIn, checkOut: form.checkOut,
       nights, status: 'confirmed',
       totalAmount: total,
-      paidAmount: form.paymentMethod === 'pay_later' ? 0 : total,
+      paidAmount: (form.paymentMethod === 'pay_later' || isAdvance) ? 0 : total,
       source: form.source,
       adults: form.adults, children: form.children,
       specialRequests: form.specialRequests,

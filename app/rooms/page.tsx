@@ -3,10 +3,11 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import { useConfirm } from '@/components/ConfirmProvider'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import { mockDynamicPricing } from '@/lib/mock-data'
 import Header from '@/components/layout/Header'
 import { formatCurrency, formatDateTime, getRoomStatusLabel, getRoomTypeLabel } from '@/lib/utils'
-import { ShoppingBag } from 'lucide-react'
+import { ShoppingBag, X } from 'lucide-react'
 import { toast } from 'sonner'
 import type { RoomStatus, RoomType, RoomWing } from '@/types'
 
@@ -31,14 +32,32 @@ const roomTypeStats = (rooms: ReturnType<typeof useHotelStore.getState>['rooms']
 }
 
 export default function RoomsPage() {
-  const { rooms, updateRoomStatus, bookingAddOns, addOnItems, bookings, fulfillAddOn, cancelAddOn } = useHotelStore()
+  const { rooms, updateRoomStatus, bookingAddOns, addOnItems, bookings, fulfillAddOn, cancelAddOn, logAudit } = useHotelStore()
   const { user } = useAuthStore()
+  // ยกเลิก add-on ที่จ่ายเงินแล้ว = คืนเงิน → ต้องมีสิทธิ์การเงิน (เหมือน booking detail)
+  const canRefund = user?.staff.permissions.canManageFinance ?? false
   const confirm = useConfirm()
   const [activeTab, setActiveTab] = useState<'rooms' | 'pricing' | 'addon'>('rooms')
   const pendingAddOns = bookingAddOns.filter((a) => a.status === 'requested')
   const [filterType, setFilterType] = useState<RoomType | 'all'>('all')
   const [filterStatus, setFilterStatus] = useState<RoomStatus | 'all'>('all')
   const [filterWing, setFilterWing] = useState<RoomWing | 'all'>('all')
+  // ปิดห้องปรับปรุง = ห้องหายจากการขาย → เก็บเหตุผล + audit ก่อนปิด
+  const [closeRoom, setCloseRoom] = useState<{ id: string; number: string } | null>(null)
+  const [closeReason, setCloseReason] = useState<'repair' | 'deep_clean' | 'renovation' | 'other'>('repair')
+  const closeTrapRef = useFocusTrap<HTMLDivElement>(!!closeRoom, () => setCloseRoom(null))
+
+  const CLOSE_REASON_LABEL: Record<'repair' | 'deep_clean' | 'renovation' | 'other', string> = {
+    repair: 'ซ่อมบำรุง', deep_clean: 'ทำความสะอาดใหญ่', renovation: 'ปรับปรุง/รีโนเวท', other: 'อื่นๆ',
+  }
+
+  function confirmCloseRoom() {
+    if (!closeRoom) return
+    updateRoomStatus(closeRoom.id, 'maintenance')
+    logAudit({ category: 'room', action: 'status_change', summary: `ปิดปรับปรุงห้อง ${closeRoom.number} (${CLOSE_REASON_LABEL[closeReason]})`, entityId: closeRoom.id })
+    toast.success(`ปิดปรับปรุงห้อง ${closeRoom.number} แล้ว`)
+    setCloseRoom(null)
+  }
 
   const filtered = rooms.filter((r) =>
     (filterType === 'all' || r.type === filterType) &&
@@ -155,8 +174,18 @@ export default function RoomsPage() {
                             disabled={room.status === 'occupied'}
                             onChange={async (e) => {
                               const next = e.target.value as RoomStatus
+                              // ปิดปรับปรุง = กระทบการขาย → เก็บเหตุผล + audit ผ่าน dialog
+                              if (next === 'maintenance') {
+                                setCloseReason('repair')
+                                setCloseRoom({ id: room.id, number: room.number })
+                                return
+                              }
                               if (next === 'available' && room.status === 'cleaning') {
                                 if (!(await confirm({ message: `ยืนยันว่าห้อง ${room.number} ทำความสะอาดเสร็จและพร้อมรับแขกแล้วใช่หรือไม่?`, confirmText: 'พร้อมรับแขก' }))) return
+                              }
+                              // เปิดห้องกลับจากปิดปรับปรุง → บันทึก audit ว่ากลับมาขายได้ (next ไม่ใช่ maintenance แล้วจาก guard ด้านบน)
+                              if (room.status === 'maintenance') {
+                                logAudit({ category: 'room', action: 'status_change', summary: `เปิดห้อง ${room.number} กลับมาใช้งาน (${getRoomStatusLabel(next)})`, entityId: room.id })
                               }
                               updateRoomStatus(room.id, next)
                             }}
@@ -250,6 +279,8 @@ export default function RoomsPage() {
                               </button>
                               <button
                                 onClick={async () => {
+                                  const booking = bookings.find((b) => b.id === ao.bookingId)
+                                  if ((booking?.paidAmount ?? 0) > 0 && !canRefund) { toast.error('ยกเลิก add-on ของบิลที่จ่ายเงินแล้วต้องมีสิทธิ์จัดการการเงิน (อาจมีการคืนเงิน)'); return }
                                   if (!(await confirm({ title: 'ยกเลิก Add-on?', message: `ยกเลิก add-on "${item?.name ?? 'รายการนี้'}"?\nรายได้ ${formatCurrency(ao.totalPrice)} จะหายไปจากบิล`, danger: true }))) return
                                   cancelAddOn(ao.id)
                                   toast.info('ยกเลิก Add-on แล้ว')
@@ -275,6 +306,34 @@ export default function RoomsPage() {
           </div>
         )}
       </div>
+
+      {/* Close-room (ปิดปรับปรุง) dialog — เก็บเหตุผล + audit */}
+      {closeRoom && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setCloseRoom(null)}>
+          <div ref={closeTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-slate-100">
+              <h2 className="font-semibold text-slate-800">ปิดปรับปรุงห้อง {closeRoom.number}</h2>
+              <button onClick={() => setCloseRoom(null)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-sm text-slate-600">ห้องนี้จะถูกปิดจากการขายจนกว่าจะเปิดกลับ — ระบุเหตุผลเพื่อเก็บเป็นประวัติ</p>
+              <div>
+                <label htmlFor="close-reason" className="block text-sm font-medium text-slate-700 mb-1.5">เหตุผล *</label>
+                <select id="close-reason" value={closeReason} onChange={(e) => setCloseReason(e.target.value as typeof closeReason)}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
+                  {(['repair', 'deep_clean', 'renovation', 'other'] as const).map((r) => (
+                    <option key={r} value={r}>{CLOSE_REASON_LABEL[r]}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100">
+              <button onClick={() => setCloseRoom(null)} className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>
+              <button onClick={confirmCloseRoom} className="px-5 py-2.5 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm font-medium">ปิดปรับปรุง</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

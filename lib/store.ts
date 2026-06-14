@@ -1306,6 +1306,16 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       pushInventoryStock(fx.itemId, fx.newStock)
       pushInventoryTx(fx.tx)
     }
+    if (result.ok) {
+      const s = get()
+      const ao = s.bookingAddOns.find((a) => a.id === addOnId)
+      const item = ao ? s.addOnItems.find((i) => i.id === ao.addOnItemId) : null
+      s.logAudit({
+        category: 'inventory', action: 'fulfill_addon',
+        summary: `จัดการ Add-on "${item?.name ?? ao?.addOnItemId ?? addOnId}"${ao ? ` x${ao.quantity}` : ''}${fx ? ' · ตัดสต็อก' : ''}`,
+        entityId: addOnId,
+      })
+    }
     return result
   },
 

@@ -4,6 +4,7 @@ import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
 import { formatCurrency } from '@/lib/utils'
 import { useFocusTrap } from '@/lib/useFocusTrap'
+import { useConfirm } from '@/components/ConfirmProvider'
 import { Search, UserPlus, X, Pencil } from 'lucide-react'
 import Link from 'next/link'
 import { toast } from 'sonner'
@@ -13,6 +14,7 @@ const emptyGuestForm = { name: '', phone: '', email: '', idNumber: '' }
 
 export default function GuestsPage() {
   const { guests, addGuest, updateGuest, logAudit } = useHotelStore()
+  const confirm = useConfirm()
   const [search, setSearch] = useState('')
   const [showForm, setShowForm] = useState(false)
   const [editId, setEditId] = useState<string | null>(null)
@@ -37,9 +39,20 @@ export default function GuestsPage() {
     setShowForm(true)
   }
 
-  function handleSave() {
+  async function handleSave() {
     const name = form.name.trim()
     if (!name) return
+    // กันลูกค้าซ้ำ: เตือนถ้าเบอร์โทร/ชื่อตรงกับรายที่มีอยู่ (ยกเว้นรายที่กำลังแก้)
+    const phone = form.phone.trim()
+    const dup = guests.find((g) => g.id !== editId && ((phone !== '' && g.phone.trim() === phone) || g.name.trim() === name))
+    if (dup) {
+      const ok = await confirm({
+        title: 'อาจมีลูกค้าซ้ำ',
+        message: `มีลูกค้า "${dup.name}"${dup.phone ? ` (${dup.phone})` : ''} อยู่ในระบบแล้ว\nยืนยันบันทึกเป็นรายนี้ต่อไปหรือไม่?`,
+        confirmText: editId ? 'บันทึกต่อ' : 'เพิ่มเป็นรายใหม่',
+      })
+      if (!ok) return
+    }
     if (editId) {
       updateGuest(editId, { name, email: form.email.trim(), phone: form.phone.trim(), idNumber: form.idNumber.trim() })
       logAudit({ category: 'guest', action: 'edit', summary: `แก้ไขข้อมูลลูกค้า "${name}"`, entityId: editId })

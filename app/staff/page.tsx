@@ -54,6 +54,7 @@ function StaffFormDialog({ editing, onClose }: { editing: Staff | null; onClose:
   const addStaff = useHotelStore((s) => s.addStaff)
   const updateStaff = useHotelStore((s) => s.updateStaff)
   const logAudit = useHotelStore((s) => s.logAudit)
+  const confirm = useConfirm()
   const [form, setForm] = useState({
     name: editing?.name ?? '',
     role: editing?.role ?? ('receptionist' as StaffRole),
@@ -64,14 +65,22 @@ function StaffFormDialog({ editing, onClose }: { editing: Staff | null; onClose:
   })
   const trapRef = useFocusTrap<HTMLDivElement>(true, onClose)
 
-  function save() {
+  async function save() {
     const name = form.name.trim()
     if (!name) { toast.error('กรุณาระบุชื่อ'); return }
     const common = { name, role: form.role, email: form.email.trim(), phone: form.phone.trim(), hireDate: form.hireDate, isActive: form.isActive }
     if (editing) {
-      updateStaff(editing.id, common) // หมายเหตุ: ไม่แตะ permissions (แก้ผ่าน "แก้สิทธิ์")
-      logAudit({ category: 'auth', action: 'update_staff', summary: `แก้ไขข้อมูลพนักงาน ${name}`, entityId: editing.id })
-      toast.success('บันทึกข้อมูลพนักงานแล้ว')
+      // เปลี่ยนตำแหน่ง → สิทธิ์ไม่เปลี่ยนตามโดยอัตโนมัติ (กันสิทธิ์ค้างของตำแหน่งเก่าเงียบ ๆ) → ถามก่อน
+      const roleChanged = editing.role !== form.role
+      const applyPerms = roleChanged && await confirm({
+        title: 'เปลี่ยนตำแหน่งพนักงาน',
+        message: `เปลี่ยนตำแหน่งเป็น "${getStaffRoleLabel(form.role)}" — ตั้งสิทธิ์เริ่มต้นของตำแหน่งใหม่ให้เลยไหม?\n(ถ้าไม่ จะคงสิทธิ์เดิมไว้ ปรับเองภายหลังได้ที่ "แก้สิทธิ์")`,
+        confirmText: 'ตั้งสิทธิ์ใหม่',
+        cancelText: 'คงสิทธิ์เดิม',
+      })
+      updateStaff(editing.id, applyPerms ? { ...common, permissions: ROLE_DEFAULT_PERMISSIONS[form.role] } : common)
+      logAudit({ category: 'auth', action: 'update_staff', summary: `แก้ไขข้อมูลพนักงาน ${name}${roleChanged ? ` · เปลี่ยนตำแหน่งเป็น ${getStaffRoleLabel(form.role)}${applyPerms ? ' (ตั้งสิทธิ์ใหม่)' : ' (คงสิทธิ์เดิม)'}` : ''}`, entityId: editing.id })
+      toast.success(applyPerms ? 'บันทึก + ตั้งสิทธิ์ตามตำแหน่งใหม่แล้ว' : 'บันทึกข้อมูลพนักงานแล้ว')
     } else {
       const id = addStaff({ ...common, permissions: ROLE_DEFAULT_PERMISSIONS[form.role] })
       logAudit({ category: 'auth', action: 'add_staff', summary: `เพิ่มพนักงาน ${name} (${getStaffRoleLabel(form.role)})`, entityId: id })

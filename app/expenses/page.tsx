@@ -76,6 +76,16 @@ export default function ExpensesPage() {
   const deleteTrapRef = useFocusTrap<HTMLDivElement>(!!deleteTarget, () => setDeleteTarget(null))
 
   const periodKey = `${year}-${String(month).padStart(2, '0')}`
+  // จำกัดวันที่ของรายจ่ายให้อยู่ในงวดที่กำลังดู (กันรายการ "หาย" ไปงวดอื่น/ลงวันอนาคต)
+  const isCurrentPeriod = year === now.getFullYear() && month === now.getMonth() + 1
+  const periodFirstDay = `${periodKey}-01`
+  const periodLastDay = `${periodKey}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`
+  const maxExpenseDate = isCurrentPeriod ? todayLocal() : periodLastDay
+  // default หมวด = หมวดที่ใช้ล่าสุด (รายจ่ายส่วนใหญ่เป็นหมวดประจำที่ลงซ้ำทุกเดือน)
+  const lastUsedCategory = useMemo<ExpenseCategory>(
+    () => [...expenses].sort((a, b) => b.date.localeCompare(a.date))[0]?.category ?? 'utilities_electric',
+    [expenses]
+  )
 
   // ปีที่มีในข้อมูล + ปีปัจจุบัน (สำหรับ dropdown)
   const years = useMemo(() => {
@@ -101,8 +111,7 @@ export default function ExpensesPage() {
   function openAdd() {
     setEditId(null)
     // ดูงวดปัจจุบัน → default เป็นวันนี้; ดูงวดย้อนหลัง → กลางงวดนั้น (กันรายการหลุดไปงวดอื่น)
-    const isCurrentPeriod = year === now.getFullYear() && month === now.getMonth() + 1
-    setForm({ ...emptyForm, date: isCurrentPeriod ? todayLocal() : `${periodKey}-15` })
+    setForm({ ...emptyForm, category: lastUsedCategory, date: isCurrentPeriod ? todayLocal() : `${periodKey}-15` })
     setShowForm(true)
   }
   function openEdit(e: Expense) {
@@ -290,7 +299,7 @@ export default function ExpensesPage() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label htmlFor="ex-date" className="block text-sm font-medium text-slate-700 mb-1.5">วันที่ *</label>
-                  <input id="ex-date" type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })}
+                  <input id="ex-date" type="date" value={form.date} min={periodFirstDay} max={maxExpenseDate} onChange={(e) => setForm({ ...form, date: e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
                 </div>
                 <div>
