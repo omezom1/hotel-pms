@@ -3,6 +3,7 @@ import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import type { Staff, StaffPermissions } from '@/types'
 import { useHotelStore } from './store'
+import { verifyPassword } from './auth-utils'
 
 export interface SessionUser {
   userId: string
@@ -35,7 +36,7 @@ export const useAuthStore = create<AuthStore>()(
           (m) => m.username.toLowerCase() === username.trim().toLowerCase()
         )
         if (!u) return { ok: false, error: 'ไม่พบชื่อผู้ใช้นี้ในระบบ' }
-        if (u.password !== password) return { ok: false, error: 'รหัสผ่านไม่ถูกต้อง' }
+        if (!verifyPassword(password, u.password)) return { ok: false, error: 'รหัสผ่านไม่ถูกต้อง' }
 
         const staff = staffList.find((s) => s.id === u.staffId)
         if (!staff) return { ok: false, error: 'ไม่พบข้อมูลพนักงานที่เชื่อมโยง' }
