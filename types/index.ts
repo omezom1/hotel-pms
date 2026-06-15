@@ -1,6 +1,17 @@
 export type RoomStatus = 'available' | 'occupied' | 'cleaning' | 'maintenance'
 export type RoomType = 'single' | 'double' | 'triple'
 export type RoomWing = 'front' | 'back'
+
+// กฎราคาตามช่วงวัน/ฤดูกาล ต่อประเภทห้อง (rule ช่วงสั้นสุดชนะ = เฉพาะเจาะจงสุด)
+export interface DynamicPricing {
+  id: string
+  roomType: RoomType
+  name: string
+  startDate: string  // YYYY-MM-DD
+  endDate: string    // YYYY-MM-DD (inclusive)
+  price: number
+  description?: string
+}
 export type BookingStatus = 'confirmed' | 'checked_in' | 'checked_out' | 'cancelled' | 'pending'
 export type BookingSource = 'direct' | 'walk_in'
 export type StaffRole = 'admin' | 'receptionist' | 'accountant' | 'housekeeper' | 'maintenance'

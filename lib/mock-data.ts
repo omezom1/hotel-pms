@@ -2,7 +2,7 @@ import type {
   Room, Guest, Booking, Invoice, HousekeepingTask,
   MaintenanceLog, Staff, User,
   InventoryItem, InventoryTransaction, CorporateAccount, CorporateTransaction,
-  AddOnItem, BookingAddOn, Expense
+  AddOnItem, BookingAddOn, Expense, DynamicPricing
 } from '@/types'
 
 // ===== ทำให้วันที่ mock เลื่อนตาม "วันนี้" จริง — เดโมมีกิจกรรมวันนี้เสมอ ไม่ว่าเปิดวันไหน =====
@@ -327,7 +327,7 @@ export const mockBookingAddOns: BookingAddOn[] = [
   { id: 'ba003', bookingId: 'b001', addOnItemId: 'ao005', quantity: 1, unitPrice: 60,  totalPrice: 60,   status: 'requested',  requestedAt: '2026-05-09T20:00:00', requestedBy: 's002' },
 ]
 
-export const mockDynamicPricing = [
+export const mockDynamicPricing: DynamicPricing[] = [
   { id: 'dp001', roomType: 'single', name: 'ราคาปกติ',    startDate: '2026-01-01', endDate: '2026-12-31', price: 500, description: 'ราคามาตรฐานเตียงเดี่ยว' },
   { id: 'dp002', roomType: 'double', name: 'ราคาปกติ',    startDate: '2026-01-01', endDate: '2026-12-31', price: 500, description: 'ราคามาตรฐานเตียงคู่' },
   { id: 'dp003', roomType: 'triple', name: 'ราคาปกติ',    startDate: '2026-01-01', endDate: '2026-12-31', price: 700, description: 'ราคามาตรฐาน 3 เตียง' },

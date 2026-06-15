@@ -2,8 +2,7 @@ import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import { format, differenceInDays, parseISO } from 'date-fns'
 import { th } from 'date-fns/locale'
-import { mockDynamicPricing } from './mock-data'
-import type { Booking, Guest, BookingAddOn, BookingStatus } from '@/types'
+import type { Booking, Guest, BookingAddOn, BookingStatus, DynamicPricing } from '@/types'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -235,9 +234,10 @@ export function eventDay(iso: string): string {
 }
 
 // ราคา/คืน ของ room type ในวันนั้น (เลือก rule ที่ช่วงวันสั้นที่สุด = เฉพาะเจาะจงที่สุด)
-export function getNightlyPrice(roomType: string, date: string, fallback: number): number {
+// rules = กฎราคาจาก store (state.dynamicPricing) — ส่งเข้ามาเพื่อให้แก้ผ่าน UI แล้วมีผลทันที
+export function getNightlyPrice(roomType: string, date: string, fallback: number, rules: DynamicPricing[]): number {
   const day = date.split('T')[0]
-  const matches = mockDynamicPricing.filter(
+  const matches = rules.filter(
     (r) => r.roomType === roomType && r.startDate <= day && r.endDate >= day
   )
   if (matches.length === 0) return fallback
@@ -250,13 +250,13 @@ export function getNightlyPrice(roomType: string, date: string, fallback: number
 }
 
 // ยอดรวมตามช่วงวัน โดยใช้ dynamic pricing ราย night
-export function calcBookingTotal(roomType: string, checkIn: string, checkOut: string, fallback: number): number {
+export function calcBookingTotal(roomType: string, checkIn: string, checkOut: string, fallback: number, rules: DynamicPricing[]): number {
   if (!checkIn || !checkOut) return 0
   const ci = parseISO(checkIn.split('T')[0])
   const co = parseISO(checkOut.split('T')[0])
   let total = 0
   for (const d = new Date(ci); d < co; d.setDate(d.getDate() + 1)) {
-    total += getNightlyPrice(roomType, toLocalDateKey(d), fallback)
+    total += getNightlyPrice(roomType, toLocalDateKey(d), fallback, rules)
   }
   return total
 }

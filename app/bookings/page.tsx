@@ -27,7 +27,7 @@ const statusColors: Record<BookingStatus, string> = {
 }
 
 export default function BookingsPage() {
-  const { bookings, rooms, guests, corporateAccounts, bookingAddOns, createBooking, cancelBooking, logAudit } = useHotelStore()
+  const { bookings, rooms, guests, corporateAccounts, bookingAddOns, dynamicPricing, createBooking, cancelBooking, logAudit } = useHotelStore()
   const confirm = useConfirm()
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState<BookingStatus | 'all'>('all')
@@ -64,7 +64,7 @@ export default function BookingsPage() {
     if (!form.roomId || !form.checkIn || !form.checkOut) return 0
     const room = rooms.find((r) => r.id === form.roomId)
     if (!room) return 0
-    return calcBookingTotal(room.type, form.checkIn, form.checkOut, room.pricePerNight)
+    return calcBookingTotal(room.type, form.checkIn, form.checkOut, room.pricePerNight, dynamicPricing)
   }
 
   function resetForm() {
