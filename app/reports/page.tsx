@@ -1,10 +1,10 @@
 'use client'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, todayLocal, toLocalDateKey, bookingOccupiesDay, bookingRevenue } from '@/lib/utils'
+import { formatCurrency, todayLocal, toLocalDateKey, bookingOccupiesDay, sumRealizedRevenue, sellableRoomCount } from '@/lib/utils'
 import type { Booking, BookingAddOn } from '@/types'
 import {
-  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area
 } from 'recharts'
 import { format, parseISO } from 'date-fns'
@@ -19,27 +19,29 @@ function buildDailyStats(bookings: Booking[], addOns: BookingAddOn[], totalRooms
     const d = new Date(today)
     d.setDate(d.getDate() - (days - 1 - i))
     const day = toLocalDateKey(d)
-    const revenue = bookings
-      .filter((b) => b.status === 'checked_out' && b.checkOut.startsWith(day))
-      .reduce((s, b) => s + bookingRevenue(b, addOns), 0)
+    const revenue = sumRealizedRevenue(bookings, addOns, (b) => b.checkOut.startsWith(day))
     const occupied = bookings.filter((b) => bookingOccupiesDay(b, day)).length
     const occupancy = totalRooms > 0 ? Math.round((occupied / totalRooms) * 100) : 0
-    const revpar = totalRooms > 0 ? Math.round(revenue / totalRooms) : 0
-    return { date: day, revenue, occupancy, revpar }
+    return { date: day, revenue, occupancy }
   })
 }
 
 export default function ReportsPage() {
   const { rooms, guests, bookings, bookingAddOns } = useHotelStore()
 
-  const revenueByType = ['single', 'double', 'triple'].map((type) => {
-    const typeRooms = rooms.filter((r) => r.type === type)
+  // ประเภทห้องของ booking = snapshot ตอนจอง (กันรายได้เพี้ยนถ้าย้ายห้องข้ามประเภท);
+  // booking เก่าที่ไม่มี snapshot fallback เป็นประเภทห้องปัจจุบัน
+  const roomTypeOf = (b: Booking) =>
+    b.roomTypeAtBooking ?? rooms.find((r) => r.id === b.roomId)?.type
+  const revenueByType = (['single', 'double', 'triple'] as const).map((type) => {
+    // นับเฉพาะ booking ที่ยังไม่ถูกยกเลิก สำหรับ "จำนวนการจอง" (ปริมาณงานที่รับเข้ามา)
     const typeBookings = bookings.filter((b) =>
-      typeRooms.some((r) => r.id === b.roomId) && b.status !== 'cancelled'
+      roomTypeOf(b) === type && b.status !== 'cancelled'
     )
     return {
       type: { single: 'เตียงเดี่ยว', double: 'เตียงคู่', triple: '3 เตียง' }[type],
-      รายได้: typeBookings.reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0),
+      // รายได้ = เฉพาะที่รับรู้แล้ว (เช็คเอาท์) ให้ตรงกับ Dashboard/Finance/Daily-report
+      รายได้: sumRealizedRevenue(typeBookings, bookingAddOns),
       จำนวนการจอง: typeBookings.length,
     }
   }).filter((d) => d.จำนวนการจอง > 0)
@@ -49,12 +51,9 @@ export default function ReportsPage() {
     value: bookings.filter((b) => b.source === src && b.status !== 'cancelled').length,
   })).filter((d) => d.value > 0)
 
-  const dailyStats = buildDailyStats(bookings, bookingAddOns, rooms.length, 30)
-  const revparData = dailyStats.slice(-14).map((d) => ({
-    date: format(parseISO(d.date), 'dd MMM', { locale: th }),
-    RevPAR: d.revpar,
-    รายได้: Math.round(d.revenue / 1000),
-  }))
+  // occupancy หารด้วยห้องที่ขายได้จริง (ตัดห้องปิดปรับปรุงออก) — ตัวหารมาตรฐานเดียวกันทุกหน้า
+  const sellableRooms = sellableRoomCount(rooms)
+  const dailyStats = buildDailyStats(bookings, bookingAddOns, sellableRooms, 30)
 
   const occupancyData = dailyStats.map((d) => ({
     date: format(parseISO(d.date), 'dd MMM', { locale: th }),
@@ -65,17 +64,13 @@ export default function ReportsPage() {
     .sort((a, b) => b.totalSpend - a.totalSpend)
     .slice(0, 5)
 
-  // KPI จากข้อมูลจริง (booking ที่ไม่ถูกยกเลิก)
+  // KPI — รายได้ใช้เกณฑ์ "รับรู้แล้ว" (เช็คเอาท์) ให้ตรงกับทุกหน้า
   const today = todayLocal()
-  const activeBookings = bookings.filter((b) => b.status !== 'cancelled')
-  const totalRevenue = activeBookings.reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
-  const todayRevenue = bookings
-    .filter((b) => b.status === 'checked_out' && b.checkOut.startsWith(today))
-    .reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
-  const occupancyNow = rooms.length > 0
-    ? (rooms.filter((r) => r.status === 'occupied').length / rooms.length) * 100
+  const totalRevenue = sumRealizedRevenue(bookings, bookingAddOns)
+  const todayRevenue = sumRealizedRevenue(bookings, bookingAddOns, (b) => b.checkOut.startsWith(today))
+  const occupancyNow = sellableRooms > 0
+    ? (rooms.filter((r) => r.status === 'occupied').length / sellableRooms) * 100
     : 0
-  const revparNow = rooms.length > 0 ? todayRevenue / rooms.length : 0
 
   return (
     <div className="flex flex-col h-screen">
@@ -83,11 +78,11 @@ export default function ReportsPage() {
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
 
         {/* KPI Summary */}
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
             { label: 'รายได้สะสมทั้งหมด', value: formatCurrency(totalRevenue), icon: <DollarSign size={18} className="text-emerald-600" />, bg: 'bg-emerald-100' },
             { label: 'Occupancy ตอนนี้', value: `${occupancyNow.toFixed(1)}%`, icon: <BarChart2 size={18} className="text-blue-600" />, bg: 'bg-blue-100' },
-            { label: 'RevPAR วันนี้', value: formatCurrency(revparNow), icon: <TrendingUp size={18} className="text-amber-600" />, bg: 'bg-amber-100' },
+            { label: 'รายได้วันนี้', value: formatCurrency(todayRevenue), icon: <TrendingUp size={18} className="text-amber-600" />, bg: 'bg-amber-100' },
             { label: 'สมาชิกทั้งหมด', value: `${guests.length} ราย`, icon: <Users size={18} className="text-purple-600" />, bg: 'bg-purple-100' },
           ].map(({ label, value, icon, bg }) => (
             <div key={label} className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
@@ -101,20 +96,6 @@ export default function ReportsPage() {
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-          {/* RevPAR Trend */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
-            <h2 className="font-semibold text-slate-800 mb-4">RevPAR (14 วันย้อนหลัง)</h2>
-            <ResponsiveContainer width="100%" height={200}>
-              <LineChart data={revparData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#94a3b8' }} />
-                <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} />
-                <Tooltip contentStyle={{ borderRadius: '8px', fontSize: '12px' }} formatter={(v) => [formatCurrency(Number(v)), 'RevPAR']} />
-                <Line type="monotone" dataKey="RevPAR" stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-
           {/* Occupancy Trend */}
           <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
             <h2 className="font-semibold text-slate-800 mb-4">Occupancy Rate (30 วันย้อนหลัง)</h2>

@@ -18,6 +18,21 @@ export default function InvoicePrintPage() {
   const guest = guests.find((g) => g.id === invoice.guestId)
   const room = booking ? rooms.find((r) => r.id === booking.roomId) : null
 
+  // invoice.amount/total แช่แข็งตอนออกใบ แต่ booking.paidAmount เป็นค่าสด (เปลี่ยนได้ถ้ามี add-on/refund หลังออกใบ)
+  // → clamp ยอดชำระที่แสดงให้อยู่ในกรอบ [0, total] เพื่อให้ตัวเลขบนใบที่พิมพ์สอดคล้องกันเอง (ชำระ ≤ รวม, ค้าง ≥ 0)
+  const isRefunded = invoice.status === 'refunded'
+  const displayedPaid = invoice.status === 'paid'
+    ? invoice.total
+    : Math.min(Math.max(booking?.paidAmount ?? 0, 0), invoice.total)
+  const displayedOutstanding = Math.max(0, invoice.total - displayedPaid)
+  const statusLabel = invoice.status === 'paid' ? 'ชำระแล้ว'
+    : invoice.status === 'issued' ? 'รอชำระ'
+    : invoice.status === 'refunded' ? 'คืนเงินแล้ว'
+    : invoice.status
+  const statusColor = invoice.status === 'paid' ? 'text-emerald-600'
+    : invoice.status === 'refunded' ? 'text-purple-600'
+    : 'text-amber-600'
+
   return (
     <div className="min-h-screen bg-slate-100 print:bg-white">
       {/* Top toolbar (no-print) */}
@@ -81,9 +96,7 @@ export default function InvoicePrintPage() {
                 </>
               )}
               <span className="text-slate-500">สถานะ:</span>
-              <span className={`font-semibold ${invoice.status === 'paid' ? 'text-emerald-600' : 'text-amber-600'}`}>
-                {invoice.status === 'paid' ? 'ชำระแล้ว' : invoice.status === 'issued' ? 'รอชำระ' : invoice.status}
-              </span>
+              <span className={`font-semibold ${statusColor}`}>{statusLabel}</span>
             </div>
           </div>
         </div>
@@ -129,20 +142,25 @@ export default function InvoicePrintPage() {
               <span>รวมทั้งสิ้น</span>
               <span>{formatCurrency(invoice.total)}</span>
             </div>
-            {booking && (
+            {booking && (isRefunded ? (
+              <div className="flex justify-between pt-2 font-semibold text-purple-700">
+                <span>สถานะการชำระ</span>
+                <span>คืนเงินแล้ว</span>
+              </div>
+            ) : (
               <>
                 <div className="flex justify-between pt-2 text-emerald-700">
                   <span>ชำระแล้ว</span>
-                  <span>{formatCurrency(booking.paidAmount)}</span>
+                  <span>{formatCurrency(displayedPaid)}</span>
                 </div>
-                {booking.paidAmount < invoice.total && (
+                {displayedOutstanding > 0 && (
                   <div className="flex justify-between font-semibold text-red-600">
                     <span>ค้างชำระ</span>
-                    <span>{formatCurrency(invoice.total - booking.paidAmount)}</span>
+                    <span>{formatCurrency(displayedOutstanding)}</span>
                   </div>
                 )}
               </>
-            )}
+            ))}
           </div>
         </div>
 

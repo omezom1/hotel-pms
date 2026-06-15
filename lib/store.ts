@@ -1,7 +1,8 @@
 'use client'
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import { supabaseStorage, registerStateApplier } from './supabase-storage'
+import { supabaseStorage, registerStateApplier, reportSaveError, CLIENT_ID } from './supabase-storage'
+import { supabase } from './supabase'
 import type {
   Room, Guest, Booking, Invoice, InvoiceItem, InvoiceStatus, HousekeepingTask,
   MaintenanceLog, Staff, RoomStatus, BookingStatus, HousekeepingStatus, MaintenanceStatus,
@@ -9,13 +10,70 @@ import type {
   AddOnItem, BookingAddOn, AuditLog, AuditCategory, Expense, User
 } from '@/types'
 import { useAuthStore } from './auth-store'
-import { calcAddOnTotal, calcOutstanding, roomHasConflict, todayLocal } from './utils'
+import { addNightsISO, addOnCountsTowardCharge, calcAddOnTotal, calcBookingTotal, calcOutstanding, roomHasConflict, todayLocal } from './utils'
 import {
   mockRooms, mockGuests, mockBookings, mockInvoices,
   mockHousekeepingTasks, mockMaintenanceLogs, mockStaff, mockUsers,
   mockInventoryItems, mockInventoryTransactions, mockCorporateAccounts, mockCorporateTransactions,
-  mockAddOnItems, mockBookingAddOns, mockExpenses, mockDynamicPricing, shiftMockDates
+  mockAddOnItems, mockBookingAddOns, mockExpenses, shiftMockDates
 } from './mock-data'
+
+// dual-write helper: รายงาน error ของการเขียนตาราง expenses (relational migration Tier A)
+// 23505 = PK ซ้ำ (echo/retry) → idempotent ไม่ถือเป็นความผิดพลาด; อื่น ๆ เตือนผู้ใช้
+function reportExpenseError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('expense write', error.message)
+}
+
+// dual-write helpers สำหรับ inventory (Tier A) — 2 entity:
+//   inventory_items        = mutable (add/update/soft-delete + currentStock เปลี่ยนตลอด)
+//   inventory_transactions = append-only ledger (restock/use/adjust/waste) เหมือน audit_logs
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportInventoryError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('inventory write', error.message)
+}
+
+// แปลง InventoryItem → row (snake_case) สำหรับ insert (+ writer_id echo key)
+function inventoryItemRow(item: InventoryItem) {
+  return {
+    id: item.id, name: item.name, category: item.category, unit: item.unit,
+    current_stock: item.currentStock, min_stock: item.minStock, max_stock: item.maxStock,
+    cost_per_unit: item.costPerUnit, supplier: item.supplier ?? null,
+    last_restocked: item.lastRestocked, notes: item.notes ?? null, writer_id: CLIENT_ID,
+  }
+}
+
+// อัปเดต currentStock (+ last_restocked เมื่อ restock) ของ item ขึ้นตาราง — ใช้โดยทุก stock-movement
+function pushInventoryStock(itemId: string, currentStock: number, lastRestocked?: string) {
+  const patch: Record<string, unknown> = { current_stock: currentStock, writer_id: CLIENT_ID }
+  if (lastRestocked !== undefined) patch.last_restocked = lastRestocked
+  void supabase.from('inventory_items').update(patch).eq('id', itemId).then(reportInventoryError)
+}
+
+// insert แถว ledger ขึ้นตาราง inventory_transactions (append-only)
+function pushInventoryTx(tx: InventoryTransaction) {
+  void supabase.from('inventory_transactions').insert({
+    id: tx.id, item_id: tx.itemId, type: tx.type, quantity: tx.quantity,
+    reference_id: tx.referenceId ?? null, performed_by: tx.performedBy, date: tx.date,
+    notes: tx.notes ?? null, writer_id: CLIENT_ID,
+  }).then(reportInventoryError)
+}
+
+// dual-write helper สำหรับ maintenance_logs (Tier A) — mutable + soft-delete (แพทเทิร์น expenses)
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportMaintenanceError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('maintenance write', error.message)
+}
+
+// แปลง MaintenanceLog → row (snake_case) สำหรับ insert/upsert (+ writer_id echo key)
+function maintLogRow(log: MaintenanceLog) {
+  return {
+    id: log.id, room_id: log.roomId, room_number: log.roomNumber,
+    issue: log.issue, description: log.description, status: log.status,
+    priority: log.priority, reported_by: log.reportedBy, reported_at: log.reportedAt,
+    assigned_to: log.assignedTo ?? null, resolved_at: log.resolvedAt ?? null,
+    cost: log.cost ?? null, writer_id: CLIENT_ID,
+  }
+}
 
 interface HotelStore {
   rooms: Room[]
@@ -66,7 +124,7 @@ interface HotelStore {
   cancelBooking: (bookingId: string) => void
   updateBooking: (bookingId: string, updates: Partial<Pick<Booking, 'adults' | 'children' | 'source' | 'specialRequests' | 'paymentMethod'>>) => void
   extendBooking: (bookingId: string, additionalNights: number) => { ok: boolean; error?: string }
-  moveBooking: (bookingId: string, newRoomId: string) => { ok: boolean; error?: string }
+  moveBooking: (bookingId: string, newRoomId: string, reprice?: boolean) => { ok: boolean; error?: string }
   adjustForEarlyCheckout: (bookingId: string) => { ok: boolean; error?: string; newNights?: number; newTotal?: number; refunded?: number }
 
   // Data backup / restore
@@ -88,7 +146,7 @@ interface HotelStore {
   // Inventory actions
   addInventoryItem: (item: Omit<InventoryItem, 'id'>) => void
   updateInventoryItem: (id: string, updates: Partial<InventoryItem>) => void
-  deleteInventoryItem: (id: string) => void
+  deleteInventoryItem: (id: string, staffId: string, reason?: 'waste' | 'transfer' | 'discontinue') => void
   restockItem: (itemId: string, quantity: number, staffId: string, notes?: string) => void
   useInventoryItem: (itemId: string, quantity: number, staffId: string, referenceId?: string, notes?: string) => { ok: boolean; error?: string }
   adjustStock: (itemId: string, newQuantity: number, staffId: string, notes?: string) => void
@@ -134,7 +192,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   logAudit: ({ category, action, summary, entityId }) => {
     const u = useAuthStore.getState().user
     const entry: AuditLog = {
-      id: `audit${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `audit${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       timestamp: new Date().toISOString(),
       staffId: u?.staff.id ?? 'system',
       staffName: u?.staff.name ?? 'ระบบ',
@@ -144,6 +202,26 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       entityId,
     }
     set((state) => ({ auditLogs: [entry, ...state.auditLogs].slice(0, 500) }))
+    // dual-write ขึ้นตาราง audit_logs (relational migration Phase 1, strangler)
+    // blob ยังเป็นแหล่งจริงอยู่ → insert ที่ fail แค่ทำให้ตารางตกหล่น 1 แถว (rollback ฟรี)
+    // แต่ "ห้าม fire-and-forget เงียบ" — ถ้าพังต้องเตือน (กันข้อมูลหายเงียบหลัง cutover)
+    void supabase
+      .from('audit_logs')
+      .insert({
+        id: entry.id,
+        timestamp: entry.timestamp,
+        staff_id: entry.staffId,
+        staff_name: entry.staffName,
+        category: entry.category,
+        action: entry.action,
+        summary: entry.summary,
+        entity_id: entry.entityId ?? null,
+        writer_id: CLIENT_ID,
+      })
+      .then(({ error }) => {
+        // 23505 = PK ซ้ำ (id เดิมถูก insert ไปแล้วจาก echo/retry) → idempotent ไม่ใช่ความผิดพลาด
+        if (error && error.code !== '23505') reportSaveError('audit insert', error.message)
+      })
   },
 
   updateRoomStatus: (roomId, status) =>
@@ -154,19 +232,22 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     })),
 
   createBooking: (bookingData) => {
-    // ด่านสุดท้ายกันจองซ้ำ: ห้ามมี booking active อื่นในห้องเดียวกันที่ช่วงวันคร่อมกัน
-    const state = get()
-    if (roomHasConflict(state.bookings, bookingData.roomId, bookingData.checkIn, bookingData.checkOut)) {
-      return { ok: false, error: 'ห้องนี้มีการจองอื่นทับช่วงวันที่เลือกแล้ว' }
-    }
-
+    // ด่านสุดท้ายกันจองซ้ำ + กัน double-submit race: ตรวจ conflict และ insert ใน set() เดียว
+    // (atomic) — ถ้าแยก get()→ตรวจ แล้วค่อย set() สอง submit เร็ว ๆ จะผ่าน conflict ทั้งคู่ = overbooking
+    let result: { ok: true } | { ok: false; error: string } = { ok: true }
     set((state) => {
+      if (roomHasConflict(state.bookings, bookingData.roomId, bookingData.checkIn, bookingData.checkOut)) {
+        result = { ok: false, error: 'ห้องนี้มีการจองอื่นทับช่วงวันที่เลือกแล้ว' }
+        return {}
+      }
       const now = new Date().toISOString()
-      const bookingId = `b${Date.now()}`
+      // id ผูก random กัน Date.now() ชนกันเมื่อสร้างสอง booking ในมิลลิวินาทีเดียว
+      const uid = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+      const bookingId = `b${uid}`
       // ถ้าจ่ายเงินมาตั้งแต่ตอนสร้าง (walk-in หรือ confirmed ที่จ่ายเต็ม) → push เข้า payments[]
       const initialPayment: import('@/types').Payment | null = bookingData.paidAmount > 0
         ? {
-            id: `pay${Date.now()}`,
+            id: `pay${uid}`,
             amount: bookingData.paidAmount,
             method: bookingData.paymentMethod ?? 'cash',
             date: now,
@@ -178,6 +259,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         ...bookingData,
         id: bookingId,
         createdAt: now,
+        // ตรึงประเภทห้อง ณ เวลาจอง เพื่อให้รายงานรายได้ตามประเภทถูกแม้ย้ายห้องข้ามประเภทภายหลัง
+        roomTypeAtBooking: state.rooms.find((r) => r.id === bookingData.roomId)?.type ?? bookingData.roomTypeAtBooking,
         payments: initialPayment ? [initialPayment] : undefined,
       }
       // ตั้งห้อง occupied เฉพาะเมื่อเป็น walk-in (checked_in ตั้งแต่สร้าง)
@@ -193,10 +276,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         rooms: updatedRooms,
       }
     })
-    return { ok: true }
+    return result
   },
 
-  updateBookingStatus: (bookingId, status) =>
+  updateBookingStatus: (bookingId, status) => {
+    // จับ corporate auto-charge ที่เกิดตอนเช็คเอาต์ เพื่อ log audit หลัง set() (เงินขยับต้องมีร่องรอย)
+    let corpAudit: { amount: number; company: string } | null = null
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -234,10 +319,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       const now = new Date().toISOString()
       const room = state.rooms.find((r) => r.id === booking.roomId)
 
-      // 1) รวมยอด add-on ที่ยังไม่ถูกยกเลิก (requested + fulfilled) เข้ายอดสุดท้าย
-      //    ใช้เกณฑ์เดียวกับยอดค้างที่แสดงหน้า front-desk เพื่อไม่ให้รายการ add-on หายจากบิล
+      // 1) รวมยอด add-on ที่คิดเงิน (เฉพาะ fulfilled ตาม addOnCountsTowardCharge) เข้ายอดสุดท้าย
+      //    ใช้เกณฑ์เดียวกับยอดค้าง/calcAddOnTotal เพื่อให้รายการในบิลตรงกับยอดรวมบิลเป๊ะ
       const chargeableAddOns = state.bookingAddOns.filter(
-        (a) => a.bookingId === bookingId && a.status !== 'cancelled'
+        (a) => a.bookingId === bookingId && addOnCountsTowardCharge(a.status)
       )
       const addOnTotal = calcAddOnTotal(bookingId, state.bookingAddOns)
       const combinedTotal = booking.totalAmount + addOnTotal
@@ -283,6 +368,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             staffId: 'system',
             notes: `ตัดเครดิตองค์กรอัตโนมัติ (${acc.companyName})`,
           }
+          corpAudit = { amount: outstanding, company: acc.companyName }
         }
       }
 
@@ -329,25 +415,35 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         items,
       }
 
-      // 4) ห้อง → cleaning
+      // 4) ห้อง → cleaning (แต่ถ้ามีแจ้งซ่อมค้าง → maintenance: ห้องเสียห้ามขายต่อ)
+      const hasOpenMaintenance = state.maintenanceLogs.some(
+        (l) => l.roomId === booking.roomId && l.status !== 'resolved'
+      )
       const updatedRooms = state.rooms.map((r) =>
         r.id === booking.roomId
-          ? { ...r, status: 'cleaning' as RoomStatus, currentBookingId: undefined, currentGuestId: undefined }
+          ? {
+              ...r,
+              status: (hasOpenMaintenance ? 'maintenance' : 'cleaning') as RoomStatus,
+              currentBookingId: undefined,
+              currentGuestId: undefined,
+            }
           : r
       )
 
-      // 5) สร้าง Housekeeping task อัตโนมัติ
-      const newTask: HousekeepingTask = {
-        id: `hk${Date.now()}`,
-        roomId: booking.roomId,
-        roomNumber: room?.number ?? '-',
-        assignedTo: '',
-        staffId: '',
-        status: 'pending',
-        priority: 'normal',
-        notes: `ทำความสะอาดหลังเช็คเอาต์ (${bookingId})`,
-        scheduledAt: now,
-      }
+      // 5) สร้าง Housekeeping task อัตโนมัติ (ข้ามถ้าห้องไปซ่อม — ยังไม่ต้องทำความสะอาด)
+      const newTask: HousekeepingTask | null = hasOpenMaintenance
+        ? null
+        : {
+            id: `hk${Date.now()}`,
+            roomId: booking.roomId,
+            roomNumber: room?.number ?? '-',
+            assignedTo: '',
+            staffId: '',
+            status: 'pending',
+            priority: 'normal',
+            notes: `ทำความสะอาดหลังเช็คเอาต์ (${bookingId})`,
+            scheduledAt: now,
+          }
 
       // 6) อัพเดทสถิติแขก — นับเฉพาะที่จ่ายเงินจริง (paid) เพื่อไม่ให้ totalSpend เฟ้อเมื่อ corp credit ไม่พอ
       let updatedGuests = state.guests
@@ -363,14 +459,25 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         bookings: updatedBookings,
         rooms: updatedRooms,
         invoices: [newInvoice, ...state.invoices],
-        housekeepingTasks: [...state.housekeepingTasks, newTask],
+        housekeepingTasks: newTask ? [...state.housekeepingTasks, newTask] : state.housekeepingTasks,
         guests: updatedGuests,
         corporateAccounts: updatedCorpAccounts,
         corporateTransactions: updatedCorpTx,
       }
-    }),
+    })
+    // เงินขยับ (ตัดเครดิตองค์กร) → ลง audit เสมอ แม้ checkout จะ trigger จากหลายหน้า
+    const ca = corpAudit as { amount: number; company: string } | null
+    if (ca) {
+      get().logAudit({
+        category: 'payment', action: 'corporate_charge',
+        summary: `ตัดเครดิตองค์กรอัตโนมัติ ${ca.amount.toLocaleString()} บาท (${ca.company}) เมื่อเช็คเอาต์`,
+        entityId: bookingId,
+      })
+    }
+  },
 
-  cancelBooking: (bookingId) =>
+  cancelBooking: (bookingId) => {
+    let refundAudit = 0 // เงินคืนที่เกิดจากการยกเลิก → log audit หลัง set()
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -395,6 +502,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
 
       // คืนเงินที่รับมาแล้ว: บันทึก refund payment (ยอดติดลบ) + เคลียร์ยอดที่จ่าย
       const refundAmount = booking.paidAmount
+      refundAudit = refundAmount
       const refundPayment: import('@/types').Payment | null = refundAmount > 0
         ? {
             id: `pay${Date.now()}`,
@@ -450,7 +558,15 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         corporateAccounts: updatedCorpAccounts,
         corporateTransactions: updatedCorpTx,
       }
-    }),
+    })
+    if (refundAudit > 0) {
+      get().logAudit({
+        category: 'payment', action: 'refund',
+        summary: `คืนเงินจากการยกเลิกการจอง ${refundAudit.toLocaleString()} บาท`,
+        entityId: bookingId,
+      })
+    }
+  },
 
   updateBooking: (bookingId, updates) =>
     set((state) => ({
@@ -469,33 +585,17 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     }
 
     const oldCheckOut = booking.checkOut.split('T')[0]
-    const newCheckOutDate = new Date(oldCheckOut)
-    newCheckOutDate.setDate(newCheckOutDate.getDate() + additionalNights)
-    const newCheckOut = newCheckOutDate.toISOString()
+    const newCheckOut = addNightsISO(booking.checkOut, additionalNights)
 
     // เช็คชน booking อื่นในห้องเดียวกัน ช่วงระหว่าง oldCheckOut → newCheckOut (ข้ามตัวเอง)
     if (roomHasConflict(state.bookings, booking.roomId, oldCheckOut, newCheckOut, bookingId)) {
       return { ok: false, error: 'มีการจองอื่นทับช่วงวันที่ขยาย' }
     }
 
-    // คำนวณราคาเพิ่ม (dynamic pricing ของวันที่เพิ่ม)
+    // ราคาเพิ่ม = ราคารายคืนจริงของวันที่เพิ่ม (ผ่าน source เดียวกับตอนสร้าง booking)
     const room = state.rooms.find((r) => r.id === booking.roomId)
     if (!room) return { ok: false, error: 'ไม่พบห้อง' }
-    let extraPrice = 0
-    const d = new Date(oldCheckOut)
-    for (let i = 0; i < additionalNights; i++) {
-      const day = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
-      const matches = mockDynamicPricing.filter(
-        (r) => r.roomType === room.type && r.startDate <= day && r.endDate >= day
-      )
-      const sorted = [...matches].sort((a, b) => {
-        const aLen = new Date(a.endDate).getTime() - new Date(a.startDate).getTime()
-        const bLen = new Date(b.endDate).getTime() - new Date(b.startDate).getTime()
-        return aLen - bLen
-      })
-      extraPrice += sorted[0]?.price ?? room.pricePerNight
-      d.setUTCDate(d.getUTCDate() + 1)
-    }
+    const extraPrice = calcBookingTotal(room.type, oldCheckOut, newCheckOut, room.pricePerNight)
 
     set((s) => ({
       bookings: s.bookings.map((b) =>
@@ -512,7 +612,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     return { ok: true }
   },
 
-  moveBooking: (bookingId, newRoomId) => {
+  moveBooking: (bookingId, newRoomId, reprice = false) => {
     const state = get()
     const booking = state.bookings.find((b) => b.id === bookingId)
     if (!booking) return { ok: false, error: 'ไม่พบการจอง' }
@@ -545,8 +645,33 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         }
       : null
 
+    // คิดราคาใหม่ตามประเภทห้องใหม่ (ผ่าน source เดียวกับสร้าง/ขยาย/early-checkout)
+    // ถ้า reprice=false → คงราคาเดิม (อัพเกรด/ย้ายฟรี)
+    const newTotal = reprice
+      ? calcBookingTotal(newRoom.type, booking.checkIn, booking.checkOut, newRoom.pricePerNight)
+      : booking.totalAmount
+    const overpaid = reprice ? Math.max(0, booking.paidAmount - newTotal) : 0
+    const refundPayment: import('@/types').Payment | null = overpaid > 0
+      ? { id: `pay${Date.now()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการย้ายห้อง (ราคาใหม่ต่ำกว่ายอดที่จ่าย)' }
+      : null
+
     set((s) => ({
-      bookings: s.bookings.map((b) => (b.id === bookingId ? { ...b, roomId: newRoomId } : b)),
+      bookings: s.bookings.map((b) =>
+        b.id === bookingId
+          ? {
+              ...b,
+              roomId: newRoomId,
+              ...(reprice
+                ? {
+                    totalAmount: newTotal,
+                    roomTypeAtBooking: newRoom.type,
+                    paidAmount: Math.min(b.paidAmount, newTotal),
+                    payments: refundPayment ? [...(b.payments ?? []), refundPayment] : b.payments,
+                  }
+                : {}),
+            }
+          : b
+      ),
       rooms: s.rooms.map((r) => {
         if (wasCheckedIn) {
           if (r.id === booking.roomId) {
@@ -560,6 +685,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       }),
       housekeepingTasks: newTask ? [...s.housekeepingTasks, newTask] : s.housekeepingTasks,
     }))
+    if (overpaid > 0) {
+      get().logAudit({
+        category: 'payment', action: 'refund',
+        summary: `คืนเงินจากย้ายห้อง ${overpaid.toLocaleString()} บาท`,
+        entityId: bookingId,
+      })
+    }
     return { ok: true }
   },
 
@@ -574,8 +706,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const actualNights = Math.max(1, Math.round(ms / 86400000))
     if (actualNights >= b.nights) return { ok: false, error: 'ยังไม่ถึงกำหนด — ไม่ใช่การออกก่อนกำหนด' }
 
-    const avgNightly = b.nights > 0 ? b.totalAmount / b.nights : b.totalAmount
-    const newTotal = Math.round(avgNightly * actualNights)
+    // ยอดใหม่ = ราคารายคืนจริงของคืนที่พักจริง (checkIn → checkIn+actualNights) ผ่าน source เดียว
+    // กับตอนสร้าง/ขยาย booking — ไม่ใช้ราคาเฉลี่ย ทำให้ถูกต้องเมื่อใช้ dynamic pricing
+    const room = state.rooms.find((r) => r.id === b.roomId)
+    const actualCheckOut = addNightsISO(b.checkIn, actualNights)
+    const newTotal = room
+      ? calcBookingTotal(room.type, b.checkIn, actualCheckOut, room.pricePerNight)
+      : Math.round((b.nights > 0 ? b.totalAmount / b.nights : b.totalAmount) * actualNights)
     const now = new Date().toISOString()
     // จ่ายมาเกินยอดใหม่ → คืนเงินส่วนเกิน (บันทึก payment ติดลบ เหมือน flow ยกเลิก)
     const overpaid = Math.max(0, b.paidAmount - newTotal)
@@ -597,6 +734,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           : x
       ),
     }))
+    if (overpaid > 0) {
+      get().logAudit({
+        category: 'payment', action: 'refund',
+        summary: `คืนเงินออกก่อนกำหนด ${overpaid.toLocaleString()} บาท`,
+        entityId: bookingId,
+      })
+    }
     return { ok: true, newNights: actualNights, newTotal, refunded: overpaid }
   },
 
@@ -643,10 +787,11 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       return { housekeepingTasks: updatedTasks, rooms: updatedRooms }
     }),
 
-  addMaintenanceLog: (logData) =>
+  // ── maintenance dual-write (Tier A) — maintenanceLogs ย้ายไปตาราง; rooms-side-effect ยัง blob (Tier B) ──
+  addMaintenanceLog: (logData) => {
+    const newLog: MaintenanceLog = { ...logData, id: `m${Date.now()}` }
     set((state) => {
-      const newLog = { ...logData, id: `m${Date.now()}` }
-      // ตั้งห้องเป็น maintenance ทันทีถ้า issue ยังไม่ resolved
+      // ตั้งห้องเป็น maintenance ทันทีถ้า issue ยังไม่ resolved (rooms = blob path)
       const updatedRooms = newLog.status !== 'resolved'
         ? state.rooms.map((r) =>
             r.id === newLog.roomId && r.status !== 'occupied'
@@ -654,22 +799,21 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
               : r
           )
         : state.rooms
-      return {
-        maintenanceLogs: [newLog, ...state.maintenanceLogs],
-        rooms: updatedRooms,
-      }
-    }),
+      return { maintenanceLogs: [newLog, ...state.maintenanceLogs], rooms: updatedRooms }
+    })
+    void supabase.from('maintenance_logs').insert(maintLogRow(newLog)).then(reportMaintenanceError)
+  },
 
-  updateMaintenanceStatus: (logId, status) =>
+  updateMaintenanceStatus: (logId, status) => {
+    const now = new Date().toISOString()
     set((state) => {
-      const now = new Date().toISOString()
       const log = state.maintenanceLogs.find((l) => l.id === logId)
       const updatedLogs = state.maintenanceLogs.map((l) =>
         l.id === logId
           ? { ...l, status, resolvedAt: status === 'resolved' ? now : l.resolvedAt }
           : l
       )
-      // เมื่อ resolved + ไม่มี maintenance อื่นค้างของห้องนี้ → คืนห้องเป็น available
+      // เมื่อ resolved + ไม่มี maintenance อื่นค้างของห้องนี้ → คืนห้องเป็น available (rooms = blob path)
       let updatedRooms = state.rooms
       if (status === 'resolved' && log) {
         const hasOtherOpen = updatedLogs.some(
@@ -684,13 +828,18 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         }
       }
       return { maintenanceLogs: updatedLogs, rooms: updatedRooms }
-    }),
+    })
+    // dual-write status (+ resolved_at เฉพาะตอน resolved); rooms ไม่ dual-write (ยัง blob)
+    const patch: Record<string, unknown> = { status, writer_id: CLIENT_ID }
+    if (status === 'resolved') patch.resolved_at = now
+    void supabase.from('maintenance_logs').update(patch).eq('id', logId).then(reportMaintenanceError)
+  },
 
-  removeMaintenanceLog: (logId) =>
+  removeMaintenanceLog: (logId) => {
     set((state) => {
       const log = state.maintenanceLogs.find((l) => l.id === logId)
       const updatedLogs = state.maintenanceLogs.filter((l) => l.id !== logId)
-      // ถ้าห้องอยู่ในสถานะ maintenance และไม่มี log ค้างอื่น → คืนห้องเป็น available
+      // ถ้าห้องอยู่ในสถานะ maintenance และไม่มี log ค้างอื่น → คืนห้องเป็น available (rooms = blob path)
       let updatedRooms = state.rooms
       if (log) {
         const hasOtherOpen = updatedLogs.some(
@@ -705,41 +854,86 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         }
       }
       return { maintenanceLogs: updatedLogs, rooms: updatedRooms }
-    }),
+    })
+    // soft-delete (กัน §3c resurrection + เก็บ history) — UI ลบออกจาก state แล้ว
+    void supabase.from('maintenance_logs')
+      .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+      .eq('id', logId).then(reportMaintenanceError)
+  },
 
-  addInventoryItem: (itemData) =>
-    set((state) => ({
-      inventoryItems: [...state.inventoryItems, { ...itemData, id: `inv${Date.now()}` }],
-    })),
+  // ── inventory dual-write (Tier A, strangler) — blob ยังเป็นแหล่งจริงช่วง dual-write ──
+  addInventoryItem: (itemData) => {
+    const newItem: InventoryItem = { ...itemData, id: `inv${Date.now()}` }
+    set((state) => ({ inventoryItems: [...state.inventoryItems, newItem] }))
+    void supabase.from('inventory_items').insert(inventoryItemRow(newItem)).then(reportInventoryError)
+  },
 
-  updateInventoryItem: (id, updates) =>
+  updateInventoryItem: (id, updates) => {
     set((state) => ({
       inventoryItems: state.inventoryItems.map((item) =>
         item.id === id ? { ...item, ...updates } : item
       ),
-    })),
+    }))
+    // map เฉพาะฟิลด์ที่เปลี่ยน → snake_case + writer_id เสมอ
+    const patch: Record<string, unknown> = { writer_id: CLIENT_ID }
+    if (updates.name !== undefined) patch.name = updates.name
+    if (updates.category !== undefined) patch.category = updates.category
+    if (updates.unit !== undefined) patch.unit = updates.unit
+    if (updates.currentStock !== undefined) patch.current_stock = updates.currentStock
+    if (updates.minStock !== undefined) patch.min_stock = updates.minStock
+    if (updates.maxStock !== undefined) patch.max_stock = updates.maxStock
+    if (updates.costPerUnit !== undefined) patch.cost_per_unit = updates.costPerUnit
+    if (updates.supplier !== undefined) patch.supplier = updates.supplier ?? null
+    if (updates.lastRestocked !== undefined) patch.last_restocked = updates.lastRestocked
+    if (updates.notes !== undefined) patch.notes = updates.notes ?? null
+    void supabase.from('inventory_items').update(patch).eq('id', id).then(reportInventoryError)
+  },
 
-  deleteInventoryItem: (id) =>
+  deleteInventoryItem: (id, staffId, reason = 'waste') => {
+    const item = get().inventoryItems.find((i) => i.id === id)
+    const now = new Date().toISOString()
+    // ถ้ายังมีสต็อกค้าง → บันทึก write-off ยอดที่เหลือ ก่อนลบ เพื่อให้ ledger ครบ
+    // (ไม่งั้นสต็อกที่เหลือหายจากบัญชีเงียบ ๆ — มีแค่ audit log ว่า "ลบรายการ")
+    // เหตุผลกำหนด tx type: ของเสีย→'waste' (นับเข้ารายงานของเสีย); โอนออก/เลิกใช้→'adjust' (neutral ไม่เฟ้อรายงาน)
+    const reasonText = reason === 'transfer' ? 'โอนออก/ย้ายคลัง' : reason === 'discontinue' ? 'เลิกใช้รายการ' : 'ตัดเป็นของเสีย'
+    const writeOffTx: InventoryTransaction | null = item && item.currentStock > 0
+      ? {
+          id: `itx${Date.now()}`, itemId: id, type: reason === 'waste' ? 'waste' : 'adjust', quantity: -item.currentStock,
+          performedBy: staffId, date: now, notes: `${reasonText} (ลบรายการ "${item.name}")`,
+        }
+      : null
     set((state) => ({
-      inventoryItems: state.inventoryItems.filter((item) => item.id !== id),
-    })),
+      inventoryItems: state.inventoryItems.filter((i) => i.id !== id),
+      inventoryTransactions: writeOffTx
+        ? [writeOffTx, ...state.inventoryTransactions]
+        : state.inventoryTransactions,
+    }))
+    // dual-write write-off ก่อน (item ยังอยู่ใน table แบบ soft-delete → FK item_id ครบ)
+    if (writeOffTx) pushInventoryTx(writeOffTx)
+    // soft-delete (กัน §3c resurrection); ตั้ง current_stock=0 ให้แถวที่เก็บไว้ตรงกับ ledger
+    void supabase.from('inventory_items')
+      .update({ current_stock: 0, deleted_at: now, writer_id: CLIENT_ID })
+      .eq('id', id).then(reportInventoryError)
+  },
 
-  restockItem: (itemId, quantity, staffId, notes) =>
-    set((state) => {
-      if (quantity <= 0) return {} // กันเติมสต็อกค่าติดลบ/ศูนย์
-      const now = new Date().toISOString()
-      const tx: InventoryTransaction = {
-        id: `itx${Date.now()}`, itemId, type: 'restock', quantity, performedBy: staffId, date: now, notes,
-      }
-      return {
-        inventoryItems: state.inventoryItems.map((item) =>
-          item.id === itemId
-            ? { ...item, currentStock: item.currentStock + quantity, lastRestocked: now }
-            : item
-        ),
-        inventoryTransactions: [tx, ...state.inventoryTransactions],
-      }
-    }),
+  restockItem: (itemId, quantity, staffId, notes) => {
+    if (quantity <= 0) return // กันเติมสต็อกค่าติดลบ/ศูนย์
+    const item = get().inventoryItems.find((i) => i.id === itemId)
+    if (!item) return
+    const now = new Date().toISOString()
+    const newStock = item.currentStock + quantity
+    const tx: InventoryTransaction = {
+      id: `itx${Date.now()}`, itemId, type: 'restock', quantity, performedBy: staffId, date: now, notes,
+    }
+    set((state) => ({
+      inventoryItems: state.inventoryItems.map((it) =>
+        it.id === itemId ? { ...it, currentStock: newStock, lastRestocked: now } : it
+      ),
+      inventoryTransactions: [tx, ...state.inventoryTransactions],
+    }))
+    pushInventoryStock(itemId, newStock, now)
+    pushInventoryTx(tx)
+  },
 
   useInventoryItem: (itemId, quantity, staffId, referenceId, notes) => {
     const state = get()
@@ -750,34 +944,38 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       return { ok: false, error: `สต็อก "${item.name}" ไม่พอ (มี ${item.currentStock} ต้องการ ${quantity})` }
     }
     const now = new Date().toISOString()
+    const newStock = item.currentStock - quantity
     const tx: InventoryTransaction = {
       id: `itx${Date.now()}`, itemId, type: 'use', quantity: -quantity, performedBy: staffId, date: now, referenceId, notes,
     }
     set((s) => ({
       inventoryItems: s.inventoryItems.map((it) =>
-        it.id === itemId ? { ...it, currentStock: it.currentStock - quantity } : it
+        it.id === itemId ? { ...it, currentStock: newStock } : it
       ),
       inventoryTransactions: [tx, ...s.inventoryTransactions],
     }))
+    pushInventoryStock(itemId, newStock)
+    pushInventoryTx(tx)
     return { ok: true }
   },
 
-  adjustStock: (itemId, newQuantity, staffId, notes) =>
-    set((state) => {
-      const now = new Date().toISOString()
-      const item = state.inventoryItems.find((i) => i.id === itemId)
-      if (!item) return {}
-      const diff = newQuantity - item.currentStock
-      const tx: InventoryTransaction = {
-        id: `itx${Date.now()}`, itemId, type: 'adjust', quantity: diff, performedBy: staffId, date: now, notes,
-      }
-      return {
-        inventoryItems: state.inventoryItems.map((i) =>
-          i.id === itemId ? { ...i, currentStock: newQuantity } : i
-        ),
-        inventoryTransactions: [tx, ...state.inventoryTransactions],
-      }
-    }),
+  adjustStock: (itemId, newQuantity, staffId, notes) => {
+    const item = get().inventoryItems.find((i) => i.id === itemId)
+    if (!item) return
+    const now = new Date().toISOString()
+    const diff = newQuantity - item.currentStock
+    const tx: InventoryTransaction = {
+      id: `itx${Date.now()}`, itemId, type: 'adjust', quantity: diff, performedBy: staffId, date: now, notes,
+    }
+    set((state) => ({
+      inventoryItems: state.inventoryItems.map((i) =>
+        i.id === itemId ? { ...i, currentStock: newQuantity } : i
+      ),
+      inventoryTransactions: [tx, ...state.inventoryTransactions],
+    }))
+    pushInventoryStock(itemId, newQuantity)
+    pushInventoryTx(tx)
+  },
 
   addCorporateAccount: (accountData) =>
     set((state) => ({
@@ -859,20 +1057,54 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     }),
 
   // ===== Expense actions =====
-  addExpense: (expense) =>
-    set((state) => ({
-      expenses: [{ ...expense, id: `exp${Date.now()}`, createdAt: new Date().toISOString() }, ...state.expenses],
-    })),
+  // dual-write ขึ้นตาราง expenses (relational migration Tier A, strangler) — แพทเทิร์นเดียวกับ logAudit
+  // blob ยังเป็นแหล่งจริงช่วง dual-write → write ที่ fail แค่ทำให้ตารางคลาดเคลื่อน 1 แถว (rollback ฟรี)
+  // แต่ "ห้าม fire-and-forget เงียบ" — fail แล้วต้องเตือน (กันข้อมูลหายเงียบหลัง cutover)
+  addExpense: (expense) => {
+    const newExpense: Expense = { ...expense, id: `exp${Date.now()}`, createdAt: new Date().toISOString() }
+    set((state) => ({ expenses: [newExpense, ...state.expenses] }))
+    void supabase
+      .from('expenses')
+      .insert({
+        id: newExpense.id,
+        date: newExpense.date,
+        category: newExpense.category,
+        description: newExpense.description,
+        payee: newExpense.payee ?? null,
+        amount: newExpense.amount,
+        note: newExpense.note ?? null,
+        receipt_path: newExpense.receiptPath ?? null,
+        writer_id: CLIENT_ID,
+      })
+      .then(reportExpenseError)
+  },
 
-  updateExpense: (id, updates) =>
+  updateExpense: (id, updates) => {
     set((state) => ({
       expenses: state.expenses.map((e) => (e.id === id ? { ...e, ...updates } : e)),
-    })),
+    }))
+    // map เฉพาะฟิลด์ที่เปลี่ยน → snake_case (undefined ไม่ถูกส่ง) + writer_id เสมอ
+    const patch: Record<string, unknown> = { writer_id: CLIENT_ID }
+    if (updates.date !== undefined) patch.date = updates.date
+    if (updates.category !== undefined) patch.category = updates.category
+    if (updates.description !== undefined) patch.description = updates.description
+    if (updates.payee !== undefined) patch.payee = updates.payee ?? null
+    if (updates.amount !== undefined) patch.amount = updates.amount
+    if (updates.note !== undefined) patch.note = updates.note ?? null
+    if (updates.receiptPath !== undefined) patch.receipt_path = updates.receiptPath ?? null
+    void supabase.from('expenses').update(patch).eq('id', id).then(reportExpenseError)
+  },
 
-  deleteExpense: (id) =>
-    set((state) => ({
-      expenses: state.expenses.filter((e) => e.id !== id),
-    })),
+  deleteExpense: (id) => {
+    set((state) => ({ expenses: state.expenses.filter((e) => e.id !== id) }))
+    // soft-delete: ตั้ง deleted_at แทนลบแถวจริง → กัน §3c resurrection + เก็บ history
+    // (UI ลบออกจาก state แล้ว; hydrate/seed กรอง deleted_at IS NULL จึงไม่โผล่กลับ)
+    void supabase
+      .from('expenses')
+      .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+      .eq('id', id)
+      .then(reportExpenseError)
+  },
 
   // ===== User / account actions =====
   addUser: (userData) => {
@@ -954,35 +1186,48 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     }),
 
   recordPayment: (bookingId, amount, method, staffId, notes) => {
-    const state = get()
-    const booking = state.bookings.find((b) => b.id === bookingId)
-    if (!booking) return { ok: false, error: 'ไม่พบการจอง' }
     if (amount <= 0) return { ok: false, error: 'จำนวนเงินต้องมากกว่า 0' }
-    // คำนวณยอดคงค้าง (helper กลาง ใช้เกณฑ์เดียวกับทุกหน้า)
-    const outstanding = calcOutstanding(booking, state.bookingAddOns)
-    if (outstanding <= 0) return { ok: false, error: 'การจองนี้ชำระครบแล้ว' }
-    if (amount > outstanding) return { ok: false, error: `เกินยอดค้างชำระ (สูงสุด ${outstanding.toLocaleString()} บาท)` }
-
-    set((s) => ({
-      bookings: s.bookings.map((b) => {
-        if (b.id !== bookingId) return b
-        const payment: import('@/types').Payment = {
-          id: `pay${Date.now()}`,
-          amount,
-          method: method as import('@/types').PaymentMethod,
-          date: new Date().toISOString(),
-          staffId,
-          notes,
-        }
-        return {
-          ...b,
-          paidAmount: b.paidAmount + amount,
-          paymentMethod: method as import('@/types').PaymentMethod,
-          payments: [...(b.payments ?? []), payment],
-        }
-      }),
-    }))
-    return { ok: true }
+    // ตรวจ outstanding + apply ใน set() เดียว (atomic) — กัน double-submit จ่ายเกิน:
+    // ถ้าแยก get()→ตรวจ→set() สอง submit เร็ว ๆ จะผ่าน check บน outstanding ตัวเดิมทั้งคู่ → จ่ายเกิน
+    let result: { ok: true } | { ok: false; error: string } = { ok: true }
+    set((s) => {
+      const booking = s.bookings.find((b) => b.id === bookingId)
+      if (!booking) {
+        result = { ok: false, error: 'ไม่พบการจอง' }
+        return {}
+      }
+      // คำนวณยอดคงค้างจาก state ปัจจุบันใน set() (helper กลาง ใช้เกณฑ์เดียวกับทุกหน้า)
+      const outstanding = calcOutstanding(booking, s.bookingAddOns)
+      if (outstanding <= 0) {
+        result = { ok: false, error: 'การจองนี้ชำระครบแล้ว' }
+        return {}
+      }
+      if (amount > outstanding) {
+        result = { ok: false, error: `เกินยอดค้างชำระ (สูงสุด ${outstanding.toLocaleString()} บาท)` }
+        return {}
+      }
+      const payment: import('@/types').Payment = {
+        id: `pay${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        amount,
+        method: method as import('@/types').PaymentMethod,
+        date: new Date().toISOString(),
+        staffId,
+        notes,
+      }
+      return {
+        bookings: s.bookings.map((b) =>
+          b.id === bookingId
+            ? {
+                ...b,
+                paidAmount: b.paidAmount + amount,
+                paymentMethod: method as import('@/types').PaymentMethod,
+                payments: [...(b.payments ?? []), payment],
+              }
+            : b
+        ),
+      }
+    })
+    return result
   },
 
   requestAddOn: (bookingId, addOnItemId, quantity, staffId, notes) => {
@@ -1007,27 +1252,33 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   },
 
   fulfillAddOn: (addOnId, staffId) => {
-    const state = get()
-    const addOn = state.bookingAddOns.find((a) => a.id === addOnId)
-    if (!addOn) return { ok: false, error: 'ไม่พบรายการ Add-on' }
-    if (addOn.status !== 'requested') return { ok: false, error: 'รายการนี้ดำเนินการไปแล้ว' }
-    const item = state.addOnItems.find((a) => a.id === addOn.addOnItemId)
-    const now = new Date().toISOString()
-
-    // ตรวจสต็อกก่อน ถ้าไม่พอ → block
-    if (item?.inventoryItemId && item.inventoryQtyPerUnit > 0) {
-      const deduct = item.inventoryQtyPerUnit * addOn.quantity
-      const inv = state.inventoryItems.find((i) => i.id === item.inventoryItemId)
-      if (!inv || inv.currentStock < deduct) {
-        return { ok: false, error: `สต็อก "${item.name}" ไม่พอ (มี ${inv?.currentStock ?? 0} ต้องการ ${deduct})` }
-      }
-    }
-
+    // ตรวจสถานะ + สต็อก แล้วตัดสต็อก ใน set() เดียว (atomic) — กัน fulfill 2 รายการรัว ๆ
+    // ที่ดึงของชิ้นเดียวกัน: ถ้าตรวจสต็อกนอก set() ทั้งคู่ผ่าน check บน stock เดิม → ตัดเกิน stock ติดลบ
+    let result: { ok: true } | { ok: false; error: string } = { ok: true }
+    // side-effect ฝั่ง inventory (ตัดสต็อก) ที่ต้อง dual-write ขึ้นตารางหลัง set() — bookingAddOns ยัง blob (Tier C)
+    let invFx: { itemId: string; newStock: number; tx: InventoryTransaction } | null = null
     set((s) => {
+      const addOn = s.bookingAddOns.find((a) => a.id === addOnId)
+      if (!addOn) {
+        result = { ok: false, error: 'ไม่พบรายการ Add-on' }
+        return {}
+      }
+      if (addOn.status !== 'requested') {
+        result = { ok: false, error: 'รายการนี้ดำเนินการไปแล้ว' }
+        return {}
+      }
+      const item = s.addOnItems.find((a) => a.id === addOn.addOnItemId)
+      const now = new Date().toISOString()
+
       let updatedItems = s.inventoryItems
       let updatedTx = s.inventoryTransactions
       if (item?.inventoryItemId && item.inventoryQtyPerUnit > 0) {
         const deduct = item.inventoryQtyPerUnit * addOn.quantity
+        const inv = s.inventoryItems.find((i) => i.id === item.inventoryItemId)
+        if (!inv || inv.currentStock < deduct) {
+          result = { ok: false, error: `สต็อก "${item.name}" ไม่พอ (มี ${inv?.currentStock ?? 0} ต้องการ ${deduct})` }
+          return {}
+        }
         const invTx: InventoryTransaction = {
           id: `itx${Date.now()}`, itemId: item.inventoryItemId, type: 'use',
           quantity: -deduct, referenceId: addOnId, performedBy: staffId, date: now,
@@ -1039,6 +1290,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             : i
         )
         updatedTx = [invTx, ...s.inventoryTransactions]
+        invFx = { itemId: item.inventoryItemId, newStock: inv.currentStock - deduct, tx: invTx }
       }
       return {
         bookingAddOns: s.bookingAddOns.map((a) =>
@@ -1048,10 +1300,29 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         inventoryTransactions: updatedTx,
       }
     })
-    return { ok: true }
+    // TS ไม่ widen invFx ที่ assign ใน closure → cast คืน type ก่อน truthiness guard
+    const fx = invFx as { itemId: string; newStock: number; tx: InventoryTransaction } | null
+    if (result.ok && fx) {
+      pushInventoryStock(fx.itemId, fx.newStock)
+      pushInventoryTx(fx.tx)
+    }
+    if (result.ok) {
+      const s = get()
+      const ao = s.bookingAddOns.find((a) => a.id === addOnId)
+      const item = ao ? s.addOnItems.find((i) => i.id === ao.addOnItemId) : null
+      s.logAudit({
+        category: 'inventory', action: 'fulfill_addon',
+        summary: `จัดการ Add-on "${item?.name ?? ao?.addOnItemId ?? addOnId}"${ao ? ` x${ao.quantity}` : ''}${fx ? ' · ตัดสต็อก' : ''}`,
+        entityId: addOnId,
+      })
+    }
+    return result
   },
 
-  cancelAddOn: (addOnId) =>
+  cancelAddOn: (addOnId) => {
+    // side-effect ฝั่ง inventory (คืนสต็อก) ที่ต้อง dual-write ขึ้นตารางหลัง set()
+    let invFx: { itemId: string; newStock: number; tx: InventoryTransaction } | null = null
+    let refundAudit = 0 // เงินคืนส่วนเกินจากการยกเลิก add-on → log audit หลัง set()
     set((state) => {
       const addOn = state.bookingAddOns.find((a) => a.id === addOnId)
       if (!addOn) return {}
@@ -1065,6 +1336,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       let updatedTx = state.inventoryTransactions
       if (wasFulfilled && item?.inventoryItemId && item.inventoryQtyPerUnit > 0) {
         const restore = item.inventoryQtyPerUnit * addOn.quantity
+        const inv = state.inventoryItems.find((i) => i.id === item.inventoryItemId)
         const invTx: InventoryTransaction = {
           id: `itx${Date.now()}`, itemId: item.inventoryItemId, type: 'adjust',
           quantity: restore, referenceId: addOnId, performedBy: 'system',
@@ -1077,6 +1349,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             : i
         )
         updatedTx = [invTx, ...state.inventoryTransactions]
+        if (inv) invFx = { itemId: item.inventoryItemId, newStock: inv.currentStock + restore, tx: invTx }
       }
 
       // คืนเงินส่วนที่จ่ายเกิน ถ้า add-on นี้ถูกชำระไปแล้ว (paidAmount เกินยอดที่ต้องจ่ายหลังยกเลิก)
@@ -1086,11 +1359,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       let updatedCorpTx = state.corporateTransactions
       if (booking) {
         const otherAddOnTotal = state.bookingAddOns
-          .filter((a) => a.bookingId === booking.id && a.id !== addOnId && a.status !== 'cancelled')
+          .filter((a) => a.bookingId === booking.id && a.id !== addOnId && addOnCountsTowardCharge(a.status))
           .reduce((s, a) => s + a.totalPrice, 0)
         const newCharge = booking.totalAmount + otherAddOnTotal
         const overpaid = Math.max(0, booking.paidAmount - newCharge)
         if (overpaid > 0) {
+          refundAudit = overpaid
           const refundPayment: import('@/types').Payment = {
             id: `pay${Date.now()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash',
             date: now, staffId: 'system', notes: `คืนเงินจากการยกเลิก Add-on: ${item?.name ?? addOn.addOnItemId}`,
@@ -1134,7 +1408,19 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         corporateAccounts: updatedCorpAccounts,
         corporateTransactions: updatedCorpTx,
       }
-    }),
+    })
+    const fx = invFx as { itemId: string; newStock: number; tx: InventoryTransaction } | null
+    if (fx) {
+      pushInventoryStock(fx.itemId, fx.newStock)
+      pushInventoryTx(fx.tx)
+    }
+    if (refundAudit > 0) {
+      get().logAudit({
+        category: 'payment', action: 'refund',
+        summary: `คืนเงินจากการยกเลิก Add-on ${refundAudit.toLocaleString()} บาท`,
+      })
+    }
+  },
 }), {
   name: 'hotel-pms-storage',
   storage: createJSONStorage(() => supabaseStorage),
@@ -1142,10 +1428,34 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
   // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
   skipHydration: true,
-  // เผื่อ field ใหม่ (เช่น auditLogs, payments) ที่ user เคย save ก่อนเพิ่มไว้
+  // ── relational migration: auditLogs (Phase 1) + expenses/inventory/maintenance (Tier A) + add_on_items (Tier B) ย้ายไปตารางจริงแล้ว ──
+  // partialize = ตัด slice เหล่านี้ออกจากสิ่งที่เขียนลง blob → ตารางเป็นเจ้าของคนเดียว
+  // (กัน app_state full-state sync / union-merge มาทับ-หรือชุบชีวิต สิ่งที่ per-table sync เพิ่ง apply)
+  partialize: (state) => ({
+    rooms: state.rooms,
+    guests: state.guests,
+    bookings: state.bookings,
+    invoices: state.invoices,
+    housekeepingTasks: state.housekeepingTasks,
+    staff: state.staff,
+    users: state.users,
+    corporateAccounts: state.corporateAccounts,
+    corporateTransactions: state.corporateTransactions,
+    bookingAddOns: state.bookingAddOns,
+  }),
+  // blob เก่าอาจยังพก slice ที่ย้ายแล้วติดมา — บังคับใช้ค่าใน current (ปล่อยให้ seed จากตารางเติม)
+  // ไม่งั้นแถวที่ลบไป (soft-delete) จะถูก rehydrate จาก blob เก่ามาชุบชีวิตก่อน seed ทับ
   merge: (persisted, current) => {
     const p = (persisted ?? {}) as Partial<typeof current>
-    return { ...current, ...p, auditLogs: p.auditLogs ?? current.auditLogs ?? [] }
+    return {
+      ...current, ...p,
+      auditLogs: current.auditLogs ?? [],
+      expenses: current.expenses ?? [],
+      inventoryItems: current.inventoryItems ?? [],
+      inventoryTransactions: current.inventoryTransactions ?? [],
+      maintenanceLogs: current.maintenanceLogs ?? [],
+      addOnItems: current.addOnItems ?? [],
+    }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading
   onRehydrateStorage: () => (_state, error) => {

@@ -2,7 +2,8 @@
 import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, toLocalDateKey, bookingRevenue } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime, getPaymentMethodLabel, toLocalDateKey, eventDay, sumRealizedRevenue } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import { downloadExcel, dateStamp } from '@/lib/export-excel'
 import type { InvoiceStatus, CorporateAccount } from '@/types'
 import {
@@ -58,8 +59,13 @@ export default function FinancePage() {
   const [depositAmount, setDepositAmount] = useState(0)
   const [depositNote, setDepositNote] = useState('')
   const [historyAccount, setHistoryAccount] = useState<CorporateAccount | null>(null)
+  const corpTrapRef = useFocusTrap<HTMLDivElement>(showCorpForm, () => setShowCorpForm(false))
+  const depositTrapRef = useFocusTrap<HTMLDivElement>(!!depositDialog, () => setDepositDialog(null))
+  const historyTrapRef = useFocusTrap<HTMLDivElement>(!!historyAccount, () => setHistoryAccount(null))
 
-  const totalRevenue = invoices.filter((i) => i.status === 'paid').reduce((s, i) => s + i.total, 0)
+  // รายได้รับรู้ทั้งหมด — เกณฑ์เดียวกับ dashboard/reports/daily-report และกราฟ 7 วันด้านล่าง
+  // (รับรู้ตอนเช็คเอาท์) เพื่อไม่ให้เลข "รายได้" ในหน้าเดียวขัดกันเอง
+  const totalRevenue = sumRealizedRevenue(bookings, bookingAddOns)
   // รอชำระ = เฉพาะส่วนที่ยังไม่จ่ายของแต่ละใบ (ยอดใบ − ยอดที่จ่ายของ booking นั้น) ไม่ใช่ยอดเต็มใบ
   const pendingAmount = invoices
     .filter((i) => i.status !== 'paid' && i.status !== 'refunded')
@@ -73,9 +79,7 @@ export default function FinancePage() {
     const d = new Date()
     d.setDate(d.getDate() - (6 - i))
     const day = toLocalDateKey(d)
-    const revenue = bookings
-      .filter((b) => b.status === 'checked_out' && b.checkOut.startsWith(day))
-      .reduce((s, b) => s + bookingRevenue(b, bookingAddOns), 0)
+    const revenue = sumRealizedRevenue(bookings, bookingAddOns, (b) => b.checkOut.startsWith(day))
     return { date: format(parseISO(day), 'dd MMM', { locale: th }), รายได้: revenue }
   })
 
@@ -119,7 +123,7 @@ export default function FinancePage() {
   async function exportInvoices() {
     // กรองตามช่วงวันที่ออกใบ (ถ้าระบุ)
     const filtered = invoices.filter((inv) => {
-      const day = inv.issuedAt.split('T')[0]
+      const day = eventDay(inv.issuedAt)
       if (exportFrom && day < exportFrom) return false
       if (exportTo && day > exportTo) return false
       return true
@@ -183,9 +187,9 @@ export default function FinancePage() {
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
 
         {/* KPI Cards */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
-            <div className="text-sm text-slate-500 mb-2">รายได้ที่ชำระแล้ว</div>
+            <div className="text-sm text-slate-500 mb-2">รายได้รับรู้ทั้งหมด</div>
             <div className="text-2xl font-bold text-emerald-600">{formatCurrency(totalRevenue)}</div>
           </div>
           <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
@@ -303,7 +307,7 @@ export default function FinancePage() {
         {activeTab === 'corporate' && (
           <div className="space-y-5">
             {/* KPI */}
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
                 <div className="text-sm text-slate-500 mb-2">บัญชีที่ใช้งาน</div>
                 <div className="text-2xl font-bold text-slate-800">{corporateAccounts.filter((a) => a.status === 'active').length}</div>
@@ -401,50 +405,50 @@ export default function FinancePage() {
 
       {/* Add corporate account dialog */}
       {showCorpForm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowCorpForm(false)}>
+          <div ref={corpTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">เพิ่มบัญชีองค์กร</h2>
               <button onClick={() => setShowCorpForm(false)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ชื่อบริษัท *</label>
-                <input value={corpForm.companyName} onChange={(e) => setCorpForm({ ...corpForm, companyName: e.target.value })}
+                <label htmlFor="fin-corp-name" className="block text-sm font-medium text-slate-700 mb-1.5">ชื่อบริษัท *</label>
+                <input id="fin-corp-name" value={corpForm.companyName} onChange={(e) => setCorpForm({ ...corpForm, companyName: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="บริษัท ... จำกัด" />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ผู้ติดต่อ *</label>
-                  <input value={corpForm.contactPerson} onChange={(e) => setCorpForm({ ...corpForm, contactPerson: e.target.value })}
+                  <label htmlFor="fin-corp-contact" className="block text-sm font-medium text-slate-700 mb-1.5">ผู้ติดต่อ *</label>
+                  <input id="fin-corp-contact" value={corpForm.contactPerson} onChange={(e) => setCorpForm({ ...corpForm, contactPerson: e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">เบอร์โทร</label>
-                  <input value={corpForm.contactPhone} onChange={(e) => setCorpForm({ ...corpForm, contactPhone: e.target.value })}
+                  <label htmlFor="fin-corp-phone" className="block text-sm font-medium text-slate-700 mb-1.5">เบอร์โทร</label>
+                  <input id="fin-corp-phone" value={corpForm.contactPhone} onChange={(e) => setCorpForm({ ...corpForm, contactPhone: e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">อีเมล</label>
-                  <input value={corpForm.contactEmail} onChange={(e) => setCorpForm({ ...corpForm, contactEmail: e.target.value })}
+                  <label htmlFor="fin-corp-email" className="block text-sm font-medium text-slate-700 mb-1.5">อีเมล</label>
+                  <input id="fin-corp-email" value={corpForm.contactEmail} onChange={(e) => setCorpForm({ ...corpForm, contactEmail: e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">เลขประจำตัวผู้เสียภาษี</label>
-                  <input value={corpForm.taxId} onChange={(e) => setCorpForm({ ...corpForm, taxId: e.target.value })}
+                  <label htmlFor="fin-corp-taxid" className="block text-sm font-medium text-slate-700 mb-1.5">เลขประจำตัวผู้เสียภาษี</label>
+                  <input id="fin-corp-taxid" value={corpForm.taxId} onChange={(e) => setCorpForm({ ...corpForm, taxId: e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ที่อยู่</label>
-                <input value={corpForm.address} onChange={(e) => setCorpForm({ ...corpForm, address: e.target.value })}
+                <label htmlFor="fin-corp-address" className="block text-sm font-medium text-slate-700 mb-1.5">ที่อยู่</label>
+                <input id="fin-corp-address" value={corpForm.address} onChange={(e) => setCorpForm({ ...corpForm, address: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
-                <input value={corpForm.notes} onChange={(e) => setCorpForm({ ...corpForm, notes: e.target.value })}
+                <label htmlFor="fin-corp-notes" className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
+                <input id="fin-corp-notes" value={corpForm.notes} onChange={(e) => setCorpForm({ ...corpForm, notes: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
               </div>
             </div>
@@ -469,8 +473,8 @@ export default function FinancePage() {
 
       {/* Deposit dialog */}
       {depositDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDepositDialog(null)}>
+          <div ref={depositTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">ฝากเงิน: {depositDialog.companyName}</h2>
               <button onClick={() => setDepositDialog(null)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
@@ -481,13 +485,13 @@ export default function FinancePage() {
                 <span className="font-semibold text-emerald-700">{formatCurrency(depositDialog.availableBalance)}</span>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนเงิน (บาท) *</label>
-                <input type="number" min={1} value={depositAmount || ''} onChange={(e) => setDepositAmount(+e.target.value)}
+                <label htmlFor="fin-deposit-amount" className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนเงิน (บาท) *</label>
+                <input id="fin-deposit-amount" type="number" min={1} value={depositAmount || ''} onChange={(e) => setDepositAmount(+e.target.value)}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="0.00" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
-                <input value={depositNote} onChange={(e) => setDepositNote(e.target.value)}
+                <label htmlFor="fin-deposit-note" className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
+                <input id="fin-deposit-note" value={depositNote} onChange={(e) => setDepositNote(e.target.value)}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" placeholder="ไม่บังคับ" />
               </div>
               {depositAmount > 0 && (
@@ -518,8 +522,8 @@ export default function FinancePage() {
 
       {/* Transaction history dialog */}
       {historyAccount && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setHistoryAccount(null)}>
+          <div ref={historyTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100 shrink-0">
               <h2 className="font-semibold text-slate-800">ประวัติธุรกรรม: {historyAccount.companyName}</h2>
               <button onClick={() => setHistoryAccount(null)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>

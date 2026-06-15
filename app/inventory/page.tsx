@@ -3,9 +3,11 @@ import { useState } from 'react'
 import { useHotelStore } from '@/lib/store'
 import Header from '@/components/layout/Header'
 import { formatCurrency, formatDateTime } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { InventoryCategory, InventoryItem, InventoryUnit, InventoryTransaction } from '@/types'
 import { Plus, X, AlertTriangle, RefreshCw, Minus, Edit2, Trash2, History, Search } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
+import { useConfirm } from '@/components/ConfirmProvider'
 import { toast } from 'sonner'
 
 const txTypeLabel: Record<InventoryTransaction['type'], string> = {
@@ -30,7 +32,8 @@ const unitLabels: Record<InventoryUnit, string> = {
 
 function getStockLevel(item: InventoryItem): 'critical' | 'low' | 'ok' {
   if (item.currentStock <= item.minStock) return 'critical'
-  const pct = item.currentStock / item.maxStock
+  // กัน maxStock = 0/ไม่ตั้งค่า → หารไม่ลงตัว (NaN/Infinity) ถือว่าไม่มีเป้าหมายสูงสุด = ok
+  const pct = item.maxStock > 0 ? item.currentStock / item.maxStock : 1
   if (pct < 0.25) return 'low'
   return 'ok'
 }
@@ -51,6 +54,7 @@ export default function InventoryPage() {
   const { inventoryItems, inventoryTransactions, staff, addInventoryItem, updateInventoryItem, deleteInventoryItem, restockItem, adjustStock, logAudit } = store
   const consumeInventory = store.useInventoryItem
   const { user } = useAuthStore()
+  const confirm = useConfirm()
 
   const [activeTab, setActiveTab] = useState<'all' | InventoryCategory>('all')
   const [showAddDialog, setShowAddDialog] = useState(false)
@@ -60,7 +64,12 @@ export default function InventoryPage() {
   const [stockNote, setStockNote] = useState('')
   const [form, setForm] = useState(emptyForm)
   const [deleteConfirm, setDeleteConfirm] = useState<InventoryItem | null>(null)
+  const [deleteReason, setDeleteReason] = useState<'waste' | 'transfer' | 'discontinue'>('waste')
   const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null)
+  const addTrapRef = useFocusTrap<HTMLDivElement>(showAddDialog, () => { setShowAddDialog(false); setEditItem(null) })
+  const stockTrapRef = useFocusTrap<HTMLDivElement>(!!stockDialog, () => setStockDialog(null))
+  const deleteTrapRef = useFocusTrap<HTMLDivElement>(!!deleteConfirm, () => setDeleteConfirm(null))
+  const historyTrapRef = useFocusTrap<HTMLDivElement>(!!historyItem, () => setHistoryItem(null))
   const [historyType, setHistoryType] = useState<'all' | InventoryTransaction['type']>('all')
   const [historySearch, setHistorySearch] = useState('')
 
@@ -92,6 +101,8 @@ export default function InventoryPage() {
 
   function handleSaveItem() {
     if (!form.name) return
+    if (form.maxStock <= 0) { toast.error('สต็อกสูงสุดต้องมากกว่า 0'); return }
+    if (form.minStock > form.maxStock) { toast.error('สต็อกขั้นต่ำต้องไม่เกินสต็อกสูงสุด'); return }
     if (editItem) {
       updateInventoryItem(editItem.id, form)
       toast.success('บันทึกการแก้ไขแล้ว')
@@ -104,12 +115,22 @@ export default function InventoryPage() {
     setForm(emptyForm)
   }
 
+  const deleteReasonLabels: Record<'waste' | 'transfer' | 'discontinue', string> = {
+    waste: 'ของเสีย/ทิ้ง', transfer: 'โอนออก/ย้ายคลัง', discontinue: 'เลิกใช้รายการ',
+  }
+
   function handleDelete() {
-    if (!deleteConfirm) return
-    deleteInventoryItem(deleteConfirm.id)
-    logAudit({ category: 'inventory', action: 'delete', summary: `ลบรายการ "${deleteConfirm.name}"`, entityId: deleteConfirm.id })
+    if (!deleteConfirm || !user) return
+    const hasStock = deleteConfirm.currentStock > 0
+    deleteInventoryItem(deleteConfirm.id, user.staff.id, deleteReason)
+    logAudit({
+      category: 'inventory', action: 'delete',
+      summary: `ลบรายการ "${deleteConfirm.name}"${hasStock ? ` (${deleteReasonLabels[deleteReason]})` : ''}`,
+      entityId: deleteConfirm.id,
+    })
     toast.success(`ลบ "${deleteConfirm.name}" แล้ว`)
     setDeleteConfirm(null)
+    setDeleteReason('waste')
   }
 
   function openEdit(item: InventoryItem) {
@@ -122,9 +143,11 @@ export default function InventoryPage() {
     setShowAddDialog(true)
   }
 
-  function handleStockAction() {
+  async function handleStockAction() {
     if (!stockDialog || !user) return
-    const { item, mode } = stockDialog
+    const { mode } = stockDialog
+    // ใช้ค่าสด (กันคิดส่วนต่าง adjust จาก snapshot เก่าเมื่ออีกแท็บแก้)
+    const item = inventoryItems.find((i) => i.id === stockDialog.item.id) ?? stockDialog.item
     if (mode === 'restock') {
       restockItem(item.id, stockQty, user.staff.id, stockNote || undefined)
       logAudit({ category: 'inventory', action: 'restock', summary: `เติมสต็อก ${item.name} +${stockQty}`, entityId: item.id })
@@ -138,6 +161,16 @@ export default function InventoryPage() {
       logAudit({ category: 'inventory', action: 'use', summary: `เบิก ${item.name} -${stockQty}`, entityId: item.id })
       toast.success(`เบิก ${item.name} -${stockQty} ${unitLabels[item.unit]}`)
     } else {
+      const diff = stockQty - item.currentStock
+      // ปรับลดสต็อก = ตัดของหายถาวร → ยืนยันก่อน (กันพิมพ์พลาด เช่น 40 → 4)
+      if (diff < 0) {
+        const ok = await confirm({
+          title: 'ยืนยันการปรับลดสต็อก',
+          message: `ปรับ "${item.name}" จาก ${item.currentStock} → ${stockQty} ${unitLabels[item.unit]} (ลด ${Math.abs(diff)} ${unitLabels[item.unit]})\nตัดสต็อกออกถาวร ยืนยันหรือไม่?`,
+          danger: true,
+        })
+        if (!ok) return
+      }
       adjustStock(item.id, stockQty, user.staff.id, stockNote || undefined)
       logAudit({ category: 'inventory', action: 'adjust', summary: `ปรับสต็อก ${item.name} เป็น ${stockQty}`, entityId: item.id })
       toast.success(`ปรับสต็อก ${item.name} เป็น ${stockQty} ${unitLabels[item.unit]}`)
@@ -206,7 +239,7 @@ export default function InventoryPage() {
                 {filtered.map((item) => {
                   const level = getStockLevel(item)
                   const colors = stockColors[level]
-                  const pct = Math.min(100, Math.round((item.currentStock / item.maxStock) * 100))
+                  const pct = item.maxStock > 0 ? Math.min(100, Math.round((item.currentStock / item.maxStock) * 100)) : 100
                   return (
                     <tr key={item.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-4 py-3">
@@ -271,7 +304,7 @@ export default function InventoryPage() {
                             <Edit2 size={14} />
                           </button>
                           <button
-                            onClick={() => setDeleteConfirm(item)}
+                            onClick={() => { setDeleteReason('waste'); setDeleteConfirm(item) }}
                             title="ลบ"
                             className="p-1.5 rounded hover:bg-red-50 text-slate-400 hover:text-red-600 transition-colors"
                           >
@@ -359,22 +392,22 @@ export default function InventoryPage() {
 
       {/* Add/Edit Dialog */}
       {showAddDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { setShowAddDialog(false); setEditItem(null) }}>
+          <div ref={addTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">{editItem ? 'แก้ไขสินค้า' : 'เพิ่มสินค้าใหม่'}</h2>
               <button onClick={() => { setShowAddDialog(false); setEditItem(null) }} className="p-2 rounded-lg hover:bg-slate-100 transition-colors"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ชื่อสินค้า *</label>
-                <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
+                <label htmlFor="inv-name" className="block text-sm font-medium text-slate-700 mb-1.5">ชื่อสินค้า *</label>
+                <input id="inv-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="เช่น สบู่ก้อน" />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">หมวดหมู่</label>
-                  <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value as InventoryCategory })}
+                  <label htmlFor="inv-category" className="block text-sm font-medium text-slate-700 mb-1.5">หมวดหมู่</label>
+                  <select id="inv-category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value as InventoryCategory })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                     <option value="room_amenities">อุปกรณ์ห้องพัก</option>
                     <option value="minibar">มินิบาร์</option>
@@ -382,8 +415,8 @@ export default function InventoryPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">หน่วย</label>
-                  <select value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value as InventoryUnit })}
+                  <label htmlFor="inv-unit" className="block text-sm font-medium text-slate-700 mb-1.5">หน่วย</label>
+                  <select id="inv-unit" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value as InventoryUnit })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                     <option value="piece">ชิ้น</option>
                     <option value="bottle">ขวด</option>
@@ -396,36 +429,36 @@ export default function InventoryPage() {
               </div>
               <div className="grid grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">สต็อกปัจจุบัน</label>
-                  <input type="number" min={0} value={form.currentStock} onChange={(e) => setForm({ ...form, currentStock: +e.target.value })}
+                  <label htmlFor="inv-current" className="block text-sm font-medium text-slate-700 mb-1.5">สต็อกปัจจุบัน</label>
+                  <input id="inv-current" type="number" min={0} value={form.currentStock} onChange={(e) => setForm({ ...form, currentStock: +e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ขั้นต่ำ</label>
-                  <input type="number" min={0} value={form.minStock} onChange={(e) => setForm({ ...form, minStock: +e.target.value })}
+                  <label htmlFor="inv-min" className="block text-sm font-medium text-slate-700 mb-1.5">ขั้นต่ำ</label>
+                  <input id="inv-min" type="number" min={0} value={form.minStock} onChange={(e) => setForm({ ...form, minStock: +e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">สูงสุด</label>
-                  <input type="number" min={0} value={form.maxStock} onChange={(e) => setForm({ ...form, maxStock: +e.target.value })}
+                  <label htmlFor="inv-max" className="block text-sm font-medium text-slate-700 mb-1.5">สูงสุด</label>
+                  <input id="inv-max" type="number" min={0} value={form.maxStock} onChange={(e) => setForm({ ...form, maxStock: +e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ต้นทุน/หน่วย (บาท)</label>
-                  <input type="number" min={0} value={form.costPerUnit} onChange={(e) => setForm({ ...form, costPerUnit: +e.target.value })}
+                  <label htmlFor="inv-cost" className="block text-sm font-medium text-slate-700 mb-1.5">ต้นทุน/หน่วย (บาท)</label>
+                  <input id="inv-cost" type="number" min={0} value={form.costPerUnit} onChange={(e) => setForm({ ...form, costPerUnit: +e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">ผู้จัดจำหน่าย</label>
-                  <input value={form.supplier} onChange={(e) => setForm({ ...form, supplier: e.target.value })}
+                  <label htmlFor="inv-supplier" className="block text-sm font-medium text-slate-700 mb-1.5">ผู้จัดจำหน่าย</label>
+                  <input id="inv-supplier" value={form.supplier} onChange={(e) => setForm({ ...form, supplier: e.target.value })}
                     className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" placeholder="ชื่อบริษัท" />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
-                <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                <label htmlFor="inv-notes" className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
+                <input id="inv-notes" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
               </div>
             </div>
@@ -438,49 +471,64 @@ export default function InventoryPage() {
       )}
 
       {/* Stock action dialog */}
-      {stockDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+      {stockDialog && (() => {
+        // ใช้ค่าสต็อกสดจาก store (ไม่ใช่ snapshot ตอนเปิด) — กันโชว์เลขเก่าเมื่ออีกแท็บเบิก/เติม
+        const liveItem = inventoryItems.find((i) => i.id === stockDialog.item.id) ?? stockDialog.item
+        const adjustNoteMissing = stockDialog.mode === 'adjust' && (stockQty === liveItem.currentStock || !stockNote.trim())
+        return (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setStockDialog(null)}>
+          <div ref={stockTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">
-                {stockDialog.mode === 'restock' ? 'เติมสต็อก' : stockDialog.mode === 'use' ? 'ใช้สต็อก' : 'ปรับสต็อก'}: {stockDialog.item.name}
+                {stockDialog.mode === 'restock' ? 'เติมสต็อก' : stockDialog.mode === 'use' ? 'ใช้สต็อก' : 'ปรับสต็อก'}: {liveItem.name}
               </h2>
               <button onClick={() => setStockDialog(null)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
               <div className="flex justify-between text-sm text-slate-600 bg-slate-50 rounded-lg px-4 py-3">
                 <span>สต็อกปัจจุบัน</span>
-                <span className="font-semibold">{stockDialog.item.currentStock} {unitLabels[stockDialog.item.unit]}</span>
+                <span className="font-semibold">{liveItem.currentStock} {unitLabels[liveItem.unit]}</span>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                <label htmlFor="inv-stock-qty" className="block text-sm font-medium text-slate-700 mb-1.5">
                   {stockDialog.mode === 'adjust' ? 'สต็อกใหม่' : 'จำนวน'}
                 </label>
-                <input
+                <input id="inv-stock-qty"
                   type="number"
                   min={0}
-                  max={stockDialog.mode === 'use' ? stockDialog.item.currentStock : undefined}
+                  max={stockDialog.mode === 'use' ? liveItem.currentStock : undefined}
                   value={stockQty}
                   onChange={(e) => {
                     const v = Math.max(0, +e.target.value)
-                    setStockQty(stockDialog.mode === 'use' ? Math.min(stockDialog.item.currentStock, v) : v)
+                    setStockQty(stockDialog.mode === 'use' ? Math.min(liveItem.currentStock, v) : v)
                   }}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 {stockDialog.mode === 'use' && (
-                  <p className="text-xs text-slate-400 mt-1.5">ใช้ได้สูงสุด {stockDialog.item.currentStock} {unitLabels[stockDialog.item.unit]}</p>
+                  <p className="text-xs text-slate-400 mt-1.5">ใช้ได้สูงสุด {liveItem.currentStock} {unitLabels[liveItem.unit]}</p>
+                )}
+                {stockDialog.mode === 'adjust' && stockQty !== liveItem.currentStock && (
+                  <p className={`text-xs mt-1.5 font-medium ${stockQty < liveItem.currentStock ? 'text-red-600' : 'text-emerald-600'}`}>
+                    จะปรับ {stockQty > liveItem.currentStock ? '+' : ''}{stockQty - liveItem.currentStock} {unitLabels[liveItem.unit]}
+                  </p>
                 )}
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
-                <input value={stockNote} onChange={(e) => setStockNote(e.target.value)}
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" placeholder="ไม่บังคับ" />
+                <label htmlFor="inv-stock-note" className="block text-sm font-medium text-slate-700 mb-1.5">
+                  หมายเหตุ{stockDialog.mode === 'adjust' && <span className="text-red-500"> *</span>}
+                </label>
+                <input id="inv-stock-note" value={stockNote} onChange={(e) => setStockNote(e.target.value)}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none"
+                  placeholder={stockDialog.mode === 'adjust' ? 'เช่น นับสต็อกจริง / ของแตก / ของหาย' : 'ไม่บังคับ'} />
+                {stockDialog.mode === 'adjust' && (
+                  <p className="text-xs text-slate-400 mt-1.5">ระบุเหตุผลที่ปรับยอด (จำเป็นสำหรับการปรับสต็อก)</p>
+                )}
               </div>
               {/* Recent transactions for this item */}
-              {inventoryTransactions.filter((t) => t.itemId === stockDialog.item.id).length > 0 && (
+              {inventoryTransactions.filter((t) => t.itemId === liveItem.id).length > 0 && (
                 <div>
                   <div className="text-xs font-medium text-slate-500 mb-2">ประวัติล่าสุด</div>
-                  {inventoryTransactions.filter((t) => t.itemId === stockDialog.item.id).slice(0, 3).map((tx) => (
+                  {inventoryTransactions.filter((t) => t.itemId === liveItem.id).slice(0, 3).map((tx) => (
                     <div key={tx.id} className="flex justify-between text-xs text-slate-500 py-1 border-b border-slate-50">
                       <span>{{ restock: 'เติม', use: 'ใช้', adjust: 'ปรับ', waste: 'เสีย' }[tx.type]}</span>
                       <span className={tx.quantity > 0 ? 'text-emerald-600' : 'text-red-600'}>{tx.quantity > 0 ? '+' : ''}{tx.quantity}</span>
@@ -494,19 +542,21 @@ export default function InventoryPage() {
               <button onClick={() => setStockDialog(null)} className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>
               <button
                 onClick={handleStockAction}
-                className={`px-5 py-2.5 text-white rounded-lg text-sm font-medium ${stockDialog.mode === 'restock' ? 'bg-emerald-500 hover:bg-emerald-600' : stockDialog.mode === 'use' ? 'bg-amber-500 hover:bg-amber-600' : 'bg-blue-500 hover:bg-blue-600'}`}
+                disabled={adjustNoteMissing}
+                className={`px-5 py-2.5 text-white rounded-lg text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed ${stockDialog.mode === 'restock' ? 'bg-emerald-500 hover:bg-emerald-600' : stockDialog.mode === 'use' ? 'bg-amber-500 hover:bg-amber-600' : 'bg-blue-500 hover:bg-blue-600'}`}
               >
                 ยืนยัน
               </button>
             </div>
           </div>
         </div>
-      )}
+        )
+      })()}
 
       {/* Delete confirm */}
       {deleteConfirm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDeleteConfirm(null)}>
+          <div ref={deleteTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="p-5 border-b border-slate-100">
               <div className="flex items-center gap-2 text-red-600 mb-1">
                 <AlertTriangle size={18} />
@@ -515,7 +565,31 @@ export default function InventoryPage() {
               <p className="text-sm text-slate-600 mt-2">
                 ลบรายการ <span className="font-semibold">&ldquo;{deleteConfirm.name}&rdquo;</span> ออกจากคลังถาวร?
               </p>
-              <p className="text-xs text-slate-400 mt-1">การกระทำนี้ย้อนกลับไม่ได้</p>
+              {deleteConfirm.currentStock > 0 && (
+                <div className="mt-3">
+                  <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-950/40 rounded-md px-2 py-1.5">
+                    มีสต็อกเหลือ {deleteConfirm.currentStock} {unitLabels[deleteConfirm.unit]} — จะถูกตัดออกและบันทึกในประวัติ (เหตุผล: {deleteReasonLabels[deleteReason]})
+                  </p>
+                  <div className="mt-2">
+                    <span className="block text-xs font-medium text-slate-600 mb-1.5">เหตุผลที่ตัดสต็อก</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(['waste', 'transfer', 'discontinue'] as const).map((r) => (
+                        <button
+                          key={r}
+                          onClick={() => setDeleteReason(r)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${deleteReason === r ? 'bg-slate-800 text-white border-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-400'}`}
+                        >
+                          {deleteReasonLabels[r]}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-slate-400 mt-1.5">
+                      {deleteReason === 'waste' ? 'นับเข้ารายงานของเสีย' : 'ไม่นับเป็นของเสีย (ลงประวัติแบบปรับยอด)'}
+                    </p>
+                  </div>
+                </div>
+              )}
+              <p className="text-xs text-slate-400 mt-2">การกระทำนี้ย้อนกลับไม่ได้</p>
             </div>
             <div className="flex justify-end gap-3 p-4">
               <button onClick={() => setDeleteConfirm(null)} className="px-4 py-2 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>
@@ -528,11 +602,12 @@ export default function InventoryPage() {
       {/* Per-item full history ledger */}
       {historyItem && (() => {
         const ledger = itemHistory(historyItem)
-        const restockTotal = ledger.filter((r) => r.tx.quantity > 0).reduce((s, r) => s + r.tx.quantity, 0)
-        const outTotal = ledger.filter((r) => r.tx.quantity < 0).reduce((s, r) => s + r.tx.quantity, 0)
+        // แยกตามชนิดรายการ (ไม่ใช่เครื่องหมาย) — adjust = ปรับยอด reconcile ไม่นับเป็นรับเข้า/จ่ายออกจริง
+        const restockTotal = ledger.filter((r) => r.tx.type === 'restock').reduce((s, r) => s + r.tx.quantity, 0)
+        const outTotal = ledger.filter((r) => r.tx.type === 'use' || r.tx.type === 'waste').reduce((s, r) => s + r.tx.quantity, 0)
         return (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setHistoryItem(null)}>
+            <div ref={historyTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col focus:outline-none" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between p-5 border-b border-slate-100">
                 <div>
                   <h2 className="font-semibold text-slate-800 flex items-center gap-2">

@@ -85,7 +85,7 @@ let saveErrorHandler: SaveErrorHandler | null = null
 export function registerSaveErrorHandler(fn: SaveErrorHandler) {
   saveErrorHandler = fn
 }
-function reportSaveError(context: string, message: string) {
+export function reportSaveError(context: string, message: string) {
   console.error(`[supabaseStorage] ${context}:`, message)
   saveErrorHandler?.(message)
 }
@@ -122,9 +122,15 @@ function mergeState(
       out[key] = mergeById(l, r)
     }
   }
-  if (Array.isArray(out.auditLogs)) {
-    out.auditLogs = (out.auditLogs as unknown[]).slice(0, 500)
-  }
+  // auditLogs (Phase 1) + expenses/inventory/maintenance (Tier A) + add_on_items (Tier B) ย้ายไปตารางจริงแล้ว — ไม่ให้ blob path
+  // (CAS union-merge/write-back) ยุ่งกับมัน; per-table sync เป็นเจ้าของ slice เหล่านี้คนเดียว
+  // (สำคัญกับ mutable+soft-delete เป็นพิเศษ: union-merge เคยชุบชีวิตแถวที่ soft-delete ไปแล้ว = §3c)
+  delete out.auditLogs
+  delete out.expenses
+  delete out.inventoryItems
+  delete out.inventoryTransactions
+  delete out.maintenanceLogs
+  delete out.addOnItems
   return out
 }
 

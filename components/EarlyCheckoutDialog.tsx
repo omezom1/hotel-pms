@@ -1,11 +1,13 @@
 'use client'
 import { CalendarClock, X } from 'lucide-react'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 
 // ถามเมื่อเช็คเอาต์ก่อนวันกำหนด — จะปรับยอดตามจำนวนคืนจริงหรือคิดตามยอดเดิม
 export default function EarlyCheckoutDialog({
   guestName,
   roomNumber,
   remainingNights,
+  canRefund = true,
   onAdjust,
   onKeepFull,
   onClose,
@@ -13,13 +15,15 @@ export default function EarlyCheckoutDialog({
   guestName: string
   roomNumber: string
   remainingNights: number
+  canRefund?: boolean
   onAdjust: () => void
   onKeepFull: () => void
   onClose: () => void
 }) {
+  const trapRef = useFocusTrap<HTMLDivElement>(true, onClose)
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+      <div ref={trapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md focus:outline-none" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between p-5 border-b border-slate-100">
           <div className="flex items-center gap-2 text-blue-600">
             <CalendarClock size={18} />
@@ -36,11 +40,14 @@ export default function EarlyCheckoutDialog({
           <p className="text-xs text-slate-500">
             ถ้าปรับยอด: ค่าห้องคิดตามคืนจริง และคืนเงินส่วนเกินที่จ่ายไว้ (ถ้ามี) ให้อัตโนมัติ
           </p>
+          {!canRefund && (
+            <p className="text-xs text-red-600">การปรับยอดอาจคืนเงิน — ต้องมีสิทธิ์จัดการการเงิน</p>
+          )}
         </div>
         <div className="flex flex-col sm:flex-row sm:justify-end gap-2 px-5 py-4 border-t border-slate-100">
           <button onClick={onClose} className="px-4 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>
           <button onClick={onKeepFull} className="px-4 py-2.5 border border-slate-300 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-50">คิดยอดเดิม</button>
-          <button onClick={onAdjust} className="px-4 py-2.5 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium">ปรับยอดตามคืนจริง</button>
+          <button onClick={onAdjust} disabled={!canRefund} title={!canRefund ? 'ต้องมีสิทธิ์จัดการการเงินเพื่อคืนเงิน' : undefined} className="px-4 py-2.5 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed">ปรับยอดตามคืนจริง</button>
         </div>
       </div>
     </div>

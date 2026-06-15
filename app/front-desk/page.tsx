@@ -1,32 +1,37 @@
 'use client'
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useHotelStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
 import Header from '@/components/layout/Header'
-import { formatCurrency, formatDate, getBookingSourceLabel, getRoomTypeLabel, calcBookingTotal, todayLocal, getGuestDisplayName, calcOutstanding, maxNightsBeforeConflict, calendarDateToISO } from '@/lib/utils'
+import { formatCurrency, formatDate, getBookingSourceLabel, getRoomTypeLabel, calcBookingTotal, todayLocal, getGuestDisplayName, calcOutstanding, maxNightsBeforeConflict, calendarDateToISO, roomHasConflict } from '@/lib/utils'
 import type { PaymentMethod } from '@/types'
 import { BedDouble, UserPlus, CheckCircle2, Clock, AlertTriangle, LogIn, X } from 'lucide-react'
 import CheckoutConfirmDialog from '@/components/CheckoutConfirmDialog'
 import EarlyCheckoutDialog from '@/components/EarlyCheckoutDialog'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import { toast } from 'sonner'
 
 export default function FrontDeskPage() {
-  const { rooms, guests, bookings, bookingAddOns, updateBookingStatus, createBooking, addGuest, recordPayment, adjustForEarlyCheckout, logAudit } = useHotelStore()
+  const { rooms, guests, bookings, bookingAddOns, updateBookingStatus, createBooking, recordPayment, adjustForEarlyCheckout, logAudit } = useHotelStore()
   const { user } = useAuthStore()
+  // คืนเงิน (ปรับยอด early-checkout) ต้องมีสิทธิ์การเงิน
+  const canRefund = user?.staff.permissions.canManageFinance ?? false
 
   const [walkInRoomId, setWalkInRoomId] = useState<string | null>(null)
+  const walkInBusy = useRef(false) // กัน double-submit walk-in (สร้าง guest/booking ซ้ำ)
   const [form, setForm] = useState({
     guestId: '', nights: 1, adults: 1, children: 0,
     paymentMethod: 'cash' as PaymentMethod,
     payMode: 'full' as 'full' | 'deposit', deposit: 0,
   })
   const [newGuestMode, setNewGuestMode] = useState(false)
-  const [newGuest, setNewGuest] = useState({ name: '', phone: '', nationality: 'ไทย' })
+  const [newGuest, setNewGuest] = useState({ name: '', phone: '', nationality: 'ไทย', idNumber: '' })
   const [payDialog, setPayDialog] = useState<{ bookingId: string; outstanding: number } | null>(null)
   const [payAmount, setPayAmount] = useState(0)
   const [payMethod, setPayMethod] = useState<PaymentMethod>('cash')
-  const [checkoutTarget, setCheckoutTarget] = useState<{ bookingId: string; gName: string; roomNo: string; outstanding: number } | null>(null)
+  const [checkoutTarget, setCheckoutTarget] = useState<{ bookingId: string; gName: string; roomNo: string; outstanding: number; corporateCharge?: { amount: number; company: string } | null } | null>(null)
   const [earlyTarget, setEarlyTarget] = useState<{ bookingId: string; gName: string; roomNo: string; remaining: number } | null>(null)
+  const payTrapRef = useFocusTrap<HTMLDivElement>(!!payDialog, () => setPayDialog(null))
 
   function outstandingOf(bookingId: string) {
     const b = bookings.find((x) => x.id === bookingId)
@@ -83,7 +88,13 @@ export default function FrontDeskPage() {
     if (outstanding > 0) {
       const gName = b ? getGuestDisplayName(b, guests) : '-'
       const roomNo = rooms.find((x) => x.id === b?.roomId)?.number ?? '-'
-      setCheckoutTarget({ bookingId, gName, roomNo, outstanding })
+      // booking องค์กรที่เครดิตพอ → เช็คเอาต์จะตัดเครดิตอัตโนมัติ ไม่ใช่ค้างชำระจริง → แจ้งให้ชัด
+      let corporateCharge: { amount: number; company: string } | null = null
+      if (b?.corporateAccountId) {
+        const acc = st.corporateAccounts.find((a) => a.id === b.corporateAccountId)
+        if (acc && acc.availableBalance >= outstanding) corporateCharge = { amount: outstanding, company: acc.companyName }
+      }
+      setCheckoutTarget({ bookingId, gName, roomNo, outstanding, corporateCharge })
       return
     }
     doCheckOut(bookingId)
@@ -91,6 +102,7 @@ export default function FrontDeskPage() {
 
   function handleEarlyAdjust() {
     if (!earlyTarget) return
+    if (!canRefund) { toast.error('ต้องมีสิทธิ์จัดการการเงินเพื่อปรับยอด/คืนเงิน'); return }
     const res = adjustForEarlyCheckout(earlyTarget.bookingId)
     if (res.ok) {
       logAudit({ category: 'booking', action: 'early_checkout', summary: `ออกก่อนกำหนด — ปรับเป็น ${res.newNights} คืน`, entityId: earlyTarget.bookingId })
@@ -134,6 +146,7 @@ export default function FrontDeskPage() {
   }
 
   function handleWalkIn() {
+    if (walkInBusy.current) return // กดซ้ำระหว่างทำรายการ → ข้าม (กัน guest/booking ซ้ำ)
     if (!walkInRoomId || !user) return
     const room = rooms.find((r) => r.id === walkInRoomId)
     if (!room) return
@@ -141,27 +154,11 @@ export default function FrontDeskPage() {
       toast.error('จำนวนผู้เข้าพักเกินความจุห้อง')
       return
     }
+    if (newGuestMode && !newGuest.name) return
+    if (!newGuestMode && !form.guestId) return
 
-    // ถ้าโหมดเพิ่มลูกค้าใหม่ → สร้าง guest ก่อน
-    let guestId = form.guestId
-    if (newGuestMode) {
-      if (!newGuest.name) return
-      guestId = addGuest({
-        name: newGuest.name,
-        email: '',
-        phone: newGuest.phone,
-        nationality: newGuest.nationality,
-        idNumber: '',
-        preferences: { pillow: null, floor: null, foodAllergies: [], specialRequests: [], smokingRoom: false, bedType: null },
-        totalStays: 0,
-        totalSpend: 0,
-        joinedAt: new Date().toISOString(),
-      })
-      toast.success(`เพิ่มลูกค้า "${newGuest.name}" แล้ว`)
-    }
-
-    if (!guestId) return
-
+    walkInBusy.current = true
+    try {
     // ตรึงเป็น "วันปฏิทิน" (UTC-midnight) เหมือน create-booking — กัน timezone off-by-one
     // (เวลาเช็คอินจริงยังอยู่ใน audit log + payment record)
     const checkInDate = new Date()
@@ -169,12 +166,29 @@ export default function FrontDeskPage() {
     const checkOutDate = new Date(checkInDate)
     checkOutDate.setDate(checkOutDate.getDate() + form.nights)
     const checkOut = calendarDateToISO(checkOutDate)
+
+    // เช็ค conflict ก่อนสร้าง guest — กันสร้าง guest ขยะ + toast หลอกเมื่อห้องชนการจองอื่น
+    // (createBooking ยังตรวจซ้ำแบบ atomic อีกชั้นเป็น safety net)
+    if (roomHasConflict(bookings, walkInRoomId, checkIn, checkOut)) {
+      toast.error('ห้องนี้มีการจองอื่นทับช่วงวันที่เลือกแล้ว')
+      return
+    }
+
+    // ลูกค้าใหม่ (walk-in) = แขกชั่วคราว → เก็บเป็น guestSnapshot บน booking ไม่บันทึกลง CRM
+    // (dropdown "เลือกลูกค้าเดิม" จึงมีแค่ลูกค้าประจำ — ลูกค้าประจำเพิ่มผ่านหน้าลูกค้าเอง)
+    const guestId = newGuestMode ? undefined : form.guestId
+    const guestSnapshot = newGuestMode
+      ? { name: newGuest.name, phone: newGuest.phone, nationality: newGuest.nationality, idNumber: newGuest.idNumber || undefined }
+      : undefined
+    if (!newGuestMode && !guestId) return
+
     const total = calcBookingTotal(room.type, checkIn, checkOut, room.pricePerNight)
     // ชำระเต็ม หรือ มัดจำ (ระบุยอด, clamp ไม่ให้เกินยอดรวม/ติดลบ) — ที่เหลือเป็นยอดค้างชำระ
     const paid = form.payMode === 'deposit' ? Math.min(Math.max(0, form.deposit), total) : total
     const result = createBooking({
       roomId: walkInRoomId,
       guestId,
+      guestSnapshot,
       checkIn,
       checkOut,
       nights: form.nights,
@@ -194,10 +208,13 @@ export default function FrontDeskPage() {
     setWalkInRoomId(null)
     setForm({ guestId: '', nights: 1, adults: 1, children: 0, paymentMethod: 'cash', payMode: 'full', deposit: 0 })
     setNewGuestMode(false)
-    setNewGuest({ name: '', phone: '', nationality: 'ไทย' })
+    setNewGuest({ name: '', phone: '', nationality: 'ไทย', idNumber: '' })
     const guestName = guests.find((x) => x.id === guestId)?.name ?? newGuest.name ?? '-'
     logAudit({ category: 'booking', action: 'walk_in', summary: `Walk-in ${guestName} ห้อง ${room.number} ${form.nights} คืน` })
     toast.success(`Walk-in สำเร็จ ห้อง ${room.number}`)
+    } finally {
+      walkInBusy.current = false
+    }
   }
 
   return (
@@ -208,9 +225,9 @@ export default function FrontDeskPage() {
         {/* KPI */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
-            { label: 'รอเช็คอิน', value: checkInsRemaining, sub: `เช็คอินไปแล้ว ${checkInsDoneToday}`, color: 'text-blue-600', bg: 'bg-blue-50 border-blue-100' },
-            { label: 'รอเช็คเอาต์', value: checkOutsRemaining, sub: `เช็คเอาต์ไปแล้ว ${checkOutsDoneToday}`, color: 'text-amber-600', bg: 'bg-amber-50 border-amber-100' },
-            { label: 'ห้องว่างตอนนี้', value: availableRooms.length, sub: 'พร้อมรับ walk-in', color: 'text-emerald-600', bg: 'bg-emerald-50 border-emerald-100' },
+            { label: 'รอเช็คอิน', value: checkInsRemaining, sub: `เช็คอินไปแล้ว ${checkInsDoneToday}`, color: 'text-blue-600', bg: 'bg-blue-50 border-blue-100 dark:bg-blue-950/40 dark:border-blue-900' },
+            { label: 'รอเช็คเอาต์', value: checkOutsRemaining, sub: `เช็คเอาต์ไปแล้ว ${checkOutsDoneToday}`, color: 'text-amber-600', bg: 'bg-amber-50 border-amber-100 dark:bg-amber-950/40 dark:border-amber-900' },
+            { label: 'ห้องว่างตอนนี้', value: availableRooms.length, sub: 'พร้อมรับ walk-in', color: 'text-emerald-600', bg: 'bg-emerald-50 border-emerald-100 dark:bg-emerald-950/40 dark:border-emerald-900' },
             { label: 'คิวรอเช็คอินทั้งหมด', value: checkInQueue.length, sub: 'รวมล่วงหน้า', color: 'text-slate-700', bg: 'bg-slate-50 border-slate-100' },
           ].map(({ label, value, sub, color, bg }) => (
             <div key={label} className={`${bg} rounded-xl p-4 border`}>
@@ -379,7 +396,7 @@ export default function FrontDeskPage() {
                                 setWalkInRoomId(room.id)
                                 setForm({ guestId: '', nights: 1, adults: 1, children: 0, paymentMethod: 'cash', payMode: 'full', deposit: 0 })
                                 setNewGuestMode(true)
-                                setNewGuest({ name: '', phone: '', nationality: 'ไทย' })
+                                setNewGuest({ name: '', phone: '', nationality: 'ไทย', idNumber: '' })
                               }
                             }}
                             className="shrink-0 flex items-center gap-1.5 px-3 py-2 min-h-[40px] bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-medium transition-colors"
@@ -403,21 +420,28 @@ export default function FrontDeskPage() {
                                 <input
                                   value={newGuest.name}
                                   onChange={(e) => setNewGuest({ ...newGuest, name: e.target.value })}
-                                  placeholder="ชื่อ-นามสกุล *"
+                                  placeholder="ชื่อ-นามสกุล *" aria-label="ชื่อ-นามสกุลลูกค้าใหม่"
                                   className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                                   autoFocus
                                 />
                                 <input
                                   value={newGuest.phone}
                                   onChange={(e) => setNewGuest({ ...newGuest, phone: e.target.value })}
-                                  placeholder="เบอร์โทร"
+                                  placeholder="เบอร์โทร" aria-label="เบอร์โทรลูกค้าใหม่"
                                   className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                                />
+                                <input
+                                  value={newGuest.idNumber}
+                                  onChange={(e) => setNewGuest({ ...newGuest, idNumber: e.target.value })}
+                                  placeholder="เลขบัตรประชาชน / พาสปอร์ต" aria-label="เลขบัตรประชาชนหรือพาสปอร์ตลูกค้าใหม่"
+                                  className="col-span-2 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                                 />
                               </div>
                             ) : (
                               <select
                                 value={form.guestId}
                                 onChange={(e) => setForm({ ...form, guestId: e.target.value })}
+                                aria-label="เลือกลูกค้าเดิม"
                                 className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                               >
                                 <option value="">เลือกลูกค้า</option>
@@ -428,22 +452,22 @@ export default function FrontDeskPage() {
                             )}
                             <div className="grid grid-cols-3 gap-2">
                               <div>
-                                <label className="block text-[11px] text-slate-500 mb-0.5">คืน</label>
-                                <input type="number" min={1} max={30} value={form.nights}
+                                <label htmlFor="fd-walkin-nights" className="block text-[11px] text-slate-500 mb-0.5">คืน</label>
+                                <input id="fd-walkin-nights" type="number" min={1} max={30} value={form.nights}
                                   onChange={(e) => setForm({ ...form, nights: Math.max(1, +e.target.value) })}
                                   className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
                                 />
                               </div>
                               <div>
-                                <label className="block text-[11px] text-slate-500 mb-0.5">ผู้ใหญ่</label>
-                                <input type="number" min={1} max={10} value={form.adults}
+                                <label htmlFor="fd-walkin-adults" className="block text-[11px] text-slate-500 mb-0.5">ผู้ใหญ่</label>
+                                <input id="fd-walkin-adults" type="number" min={1} max={10} value={form.adults}
                                   onChange={(e) => setForm({ ...form, adults: Math.max(1, +e.target.value) })}
                                   className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
                                 />
                               </div>
                               <div>
-                                <label className="block text-[11px] text-slate-500 mb-0.5">เด็ก</label>
-                                <input type="number" min={0} max={10} value={form.children}
+                                <label htmlFor="fd-walkin-children" className="block text-[11px] text-slate-500 mb-0.5">เด็ก</label>
+                                <input id="fd-walkin-children" type="number" min={0} max={10} value={form.children}
                                   onChange={(e) => setForm({ ...form, children: Math.max(0, +e.target.value) })}
                                   className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
                                 />
@@ -468,8 +492,8 @@ export default function FrontDeskPage() {
                               )
                             })()}
                             <div>
-                              <label className="block text-[11px] text-slate-500 mb-0.5">ชำระ</label>
-                              <select
+                              <label htmlFor="fd-walkin-method" className="block text-[11px] text-slate-500 mb-0.5">ชำระ</label>
+                              <select id="fd-walkin-method"
                                 value={form.paymentMethod}
                                 onChange={(e) => setForm({ ...form, paymentMethod: e.target.value as PaymentMethod })}
                                 className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none"
@@ -493,7 +517,7 @@ export default function FrontDeskPage() {
                                     <div className="flex gap-1 bg-slate-100 p-1 rounded-lg">
                                       {([['full', 'ชำระเต็ม'], ['deposit', 'มัดจำ']] as const).map(([mode, label]) => (
                                         <button key={mode} type="button"
-                                          onClick={() => setForm({ ...form, payMode: mode, deposit: mode === 'deposit' ? form.deposit : 0 })}
+                                          onClick={() => setForm({ ...form, payMode: mode, deposit: mode === 'deposit' ? (form.deposit || Math.min(room.pricePerNight, total)) : 0 })}
                                           className={`flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${form.payMode === mode ? 'bg-white shadow-sm text-slate-800' : 'text-slate-500'}`}>
                                           {label}
                                         </button>
@@ -502,8 +526,8 @@ export default function FrontDeskPage() {
                                   </div>
                                   {form.payMode === 'deposit' && (
                                     <div>
-                                      <label className="block text-[11px] text-slate-500 mb-0.5">เงินมัดจำ (บาท)</label>
-                                      <input type="number" min={0} max={total} value={form.deposit || ''}
+                                      <label htmlFor="fd-walkin-deposit" className="block text-[11px] text-slate-500 mb-0.5">เงินมัดจำ (บาท)</label>
+                                      <input id="fd-walkin-deposit" type="number" min={0} max={total} value={form.deposit || ''}
                                         onChange={(e) => setForm({ ...form, deposit: Math.max(0, +e.target.value) })}
                                         placeholder="0" className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
                                     </div>
@@ -552,8 +576,8 @@ export default function FrontDeskPage() {
 
       {/* Quick payment dialog */}
       {payDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setPayDialog(null)}>
+          <div ref={payTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-sm focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">บันทึกรับชำระเงิน</h2>
               <button onClick={() => setPayDialog(null)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
@@ -564,16 +588,21 @@ export default function FrontDeskPage() {
                 <span className="font-bold text-red-600">{formatCurrency(payDialog.outstanding)}</span>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนที่รับ (บาท)</label>
-                <input
+                <label htmlFor="fd-pay-amount" className="block text-sm font-medium text-slate-700 mb-1.5">จำนวนที่รับ (บาท)</label>
+                <input id="fd-pay-amount"
                   type="number" min={1} max={payDialog.outstanding} value={payAmount}
                   onChange={(e) => setPayAmount(Math.min(payDialog.outstanding, Math.max(0, +e.target.value)))}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
+                {payAmount > 0 && payAmount < payDialog.outstanding && (
+                  <p className="text-xs text-amber-600 mt-1.5">
+                    ชำระบางส่วน — ยังค้างอีก {formatCurrency(payDialog.outstanding - payAmount)} (แขกจะเช็คเอาต์พร้อมยอดค้าง)
+                  </p>
+                )}
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทาง</label>
-                <select value={payMethod} onChange={(e) => setPayMethod(e.target.value as PaymentMethod)}
+                <label htmlFor="fd-pay-method" className="block text-sm font-medium text-slate-700 mb-1.5">ช่องทาง</label>
+                <select id="fd-pay-method" value={payMethod} onChange={(e) => setPayMethod(e.target.value as PaymentMethod)}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                   <option value="cash">เงินสด</option>
                   <option value="credit_card">บัตรเครดิต</option>
@@ -599,6 +628,7 @@ export default function FrontDeskPage() {
           guestName={earlyTarget.gName}
           roomNumber={earlyTarget.roomNo}
           remainingNights={earlyTarget.remaining}
+          canRefund={canRefund}
           onClose={() => setEarlyTarget(null)}
           onAdjust={handleEarlyAdjust}
           onKeepFull={() => { const id = earlyTarget.bookingId; setEarlyTarget(null); proceedCheckOut(id) }}
@@ -610,6 +640,7 @@ export default function FrontDeskPage() {
           guestName={checkoutTarget.gName}
           roomNumber={checkoutTarget.roomNo}
           outstanding={checkoutTarget.outstanding}
+          corporateCharge={checkoutTarget.corporateCharge}
           onClose={() => setCheckoutTarget(null)}
           onPayFirst={() => {
             setPayDialog({ bookingId: checkoutTarget.bookingId, outstanding: checkoutTarget.outstanding })

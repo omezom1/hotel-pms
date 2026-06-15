@@ -132,7 +132,15 @@ export default function CalendarPage() {
                   const cellBg = isToday ? 'bg-amber-50 dark:bg-amber-500/15' : isWeekend ? 'bg-slate-50/40 dark:bg-slate-700/25' : ''
 
                   if (!booking) {
-                    return <div key={i} className={`w-12 shrink-0 border-r border-slate-100 ${cellBg}`} />
+                    // คลิกช่องว่าง = สร้างจองห้องนี้วันนี้ (prefill ที่หน้า /bookings)
+                    return (
+                      <Link
+                        key={i}
+                        href={`/bookings?roomId=${room.id}&date=${key}`}
+                        title={`สร้างการจอง ห้อง ${room.number} · ${key}`}
+                        className={`w-12 shrink-0 border-r border-slate-100 hover:bg-amber-100/60 transition-colors ${cellBg}`}
+                      />
+                    )
                   }
 
                   const guestName = getGuestDisplayName(booking, guests)

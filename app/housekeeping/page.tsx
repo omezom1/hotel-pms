@@ -5,6 +5,7 @@ import { useAuthStore } from '@/lib/auth-store'
 import { useConfirm } from '@/components/ConfirmProvider'
 import Header from '@/components/layout/Header'
 import { formatDateTime, getPriorityLabel, getRoomStatusLabel } from '@/lib/utils'
+import { useFocusTrap } from '@/lib/useFocusTrap'
 import type { HousekeepingStatus } from '@/types'
 import { Plus, X, Clock, CheckCircle2, Circle } from 'lucide-react'
 import { toast } from 'sonner'
@@ -28,6 +29,7 @@ export default function HousekeepingPage() {
   const confirm = useConfirm()
   const [showModal, setShowModal] = useState(false)
   const [form, setForm] = useState({ roomId: '', staffId: '', priority: 'normal', notes: '', scheduledAt: '' })
+  const trapRef = useFocusTrap<HTMLDivElement>(showModal, () => setShowModal(false))
   const [showAllTasks, setShowAllTasks] = useState(false)
 
   const housekeepers = staff.filter((s) => s.role === 'housekeeper')
@@ -139,16 +141,16 @@ export default function HousekeepingPage() {
 
       {/* Add Task Modal */}
       {showModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowModal(false)}>
+          <div ref={trapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md focus:outline-none" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
               <h2 className="font-semibold text-slate-800">มอบหมายงานทำความสะอาด</h2>
               <button onClick={() => setShowModal(false)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
             </div>
             <div className="p-5 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ห้องพัก *</label>
-                <select value={form.roomId} onChange={(e) => setForm({ ...form, roomId: e.target.value })}
+                <label htmlFor="hk-room" className="block text-sm font-medium text-slate-700 mb-1.5">ห้องพัก *</label>
+                <select id="hk-room" value={form.roomId} onChange={(e) => setForm({ ...form, roomId: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                   <option value="">เลือกห้อง</option>
                   {[...rooms].sort((a, b) => (a.status === 'occupied' ? 1 : 0) - (b.status === 'occupied' ? 1 : 0)).map((r) => (
@@ -162,16 +164,16 @@ export default function HousekeepingPage() {
                 )}
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">มอบหมายให้ *</label>
-                <select value={form.staffId} onChange={(e) => setForm({ ...form, staffId: e.target.value })}
+                <label htmlFor="hk-staff" className="block text-sm font-medium text-slate-700 mb-1.5">มอบหมายให้ *</label>
+                <select id="hk-staff" value={form.staffId} onChange={(e) => setForm({ ...form, staffId: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                   <option value="">เลือกพนักงาน</option>
                   {housekeepers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">ความสำคัญ</label>
-                <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}
+                <label htmlFor="hk-priority" className="block text-sm font-medium text-slate-700 mb-1.5">ความสำคัญ</label>
+                <select id="hk-priority" value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none">
                   <option value="low">ต่ำ</option>
                   <option value="normal">ปกติ</option>
@@ -180,8 +182,8 @@ export default function HousekeepingPage() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
-                <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                <label htmlFor="hk-notes" className="block text-sm font-medium text-slate-700 mb-1.5">หมายเหตุ</label>
+                <textarea id="hk-notes" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })}
                   rows={2} className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none resize-none" />
               </div>
             </div>

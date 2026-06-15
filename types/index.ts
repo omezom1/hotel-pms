@@ -57,6 +57,7 @@ export interface GuestSnapshot {
 export interface Booking {
   id: string
   roomId: string
+  roomTypeAtBooking?: RoomType  // snapshot ประเภทห้องตอนจอง — ใช้แยกรายได้ตามประเภทให้ถูกแม้ย้ายห้องข้ามประเภทภายหลัง
   guestId?: string          // optional: ถ้าเป็นลูกค้าประจำ
   guestSnapshot?: GuestSnapshot  // optional: ถ้าเป็นแขกชั่วคราว (ไม่บันทึก CRM)
   checkIn: string
@@ -140,6 +141,7 @@ export interface Expense {
   payee?: string        // ผู้รับเงิน
   amount: number
   note?: string
+  receiptPath?: string   // path ของรูปบิล/ใบเสร็จใน Supabase Storage bucket 'receipts' (optional)
   createdAt: string
 }
 

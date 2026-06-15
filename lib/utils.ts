@@ -17,12 +17,14 @@ const day = (iso: string) => iso.split('T')[0]
 //  status ใช้ exhaustive switch: เพิ่มสถานะใหม่ใน types แล้ว build จะแตกที่นี่จุดเดียว
 // ============================================================
 
-// add-on นี้ต้องคิดเงินไหม (requested/fulfilled = คิด, cancelled = ไม่คิด)
+// add-on นี้ต้องคิดเงินไหม (fulfilled = คิด, requested/cancelled = ไม่คิด)
+// นโยบาย: คิดเงินเฉพาะ add-on ที่ "จัดให้แล้ว" (fulfilled) — ที่ลูกค้าแค่ร้องขอ (requested)
+// ยังไม่จัดให้ ยังไม่คิดเงิน เพื่อกันเก็บเกินถ้ายกเลิกภายหลัง. คุมที่จุดเดียวนี้ให้ทั้งแอปตรงกัน
 export function addOnCountsTowardCharge(status: BookingAddOn['status']): boolean {
   switch (status) {
-    case 'requested':
     case 'fulfilled':
       return true
+    case 'requested':
     case 'cancelled':
       return false
     default: {
@@ -51,7 +53,7 @@ export function isActiveReservation(status: BookingStatus): boolean {
 }
 
 // ===== ยอดค้างชำระ / add-on (single source of truth) =====
-// รวม add-on ที่ยังไม่ถูกยกเลิก (requested + fulfilled) — ใช้เกณฑ์เดียวกันทุกหน้า
+// รวมเฉพาะ add-on ที่จัดให้แล้ว (fulfilled) ตาม addOnCountsTowardCharge — ใช้เกณฑ์เดียวกันทุกหน้า
 export function calcAddOnTotal(bookingId: string, addOns: BookingAddOn[]): number {
   return addOns
     .filter((a) => a.bookingId === bookingId && addOnCountsTowardCharge(a.status))
@@ -68,10 +70,46 @@ export function bookingRevenue(booking: Booking, addOns: BookingAddOn[]): number
   return booking.totalAmount + calcAddOnTotal(booking.id, addOns)
 }
 
+// === รายได้ที่ "รับรู้แล้ว" (single source of truth) ===
+// กฎธุรกิจ: รับรู้รายได้เมื่อแขกเช็คเอาท์ (status === 'checked_out') เท่านั้น
+// booking ที่ยัง pending/confirmed/checked_in = ยอดจองในมือ ยังไม่ใช่รายได้จริง
+// ⚠️ ทุกหน้าที่รวม "รายได้" ต้องผ่าน isRealizedRevenue/sumRealizedRevenue เท่านั้น
+//    ห้าม inline `status === 'checked_out'` หรือ `status !== 'cancelled'` เองอีก (เลขจะเพี้ยนข้ามหน้า)
+export function isRealizedRevenue(b: Booking): boolean {
+  switch (b.status) {
+    case 'checked_out':
+      return true
+    case 'pending':
+    case 'confirmed':
+    case 'checked_in':
+    case 'cancelled':
+      return false
+    default: {
+      const _exhaustive: never = b.status
+      return _exhaustive
+    }
+  }
+}
+
+// รวมรายได้รับรู้ของชุด booking; ส่ง predicate เพิ่ม (เช่นกรองตามวัน) ผ่าน extra ได้
+export function sumRealizedRevenue(
+  bookings: Booking[], addOns: BookingAddOn[], extra?: (b: Booking) => boolean
+): number {
+  return bookings
+    .filter((b) => isRealizedRevenue(b) && (extra ? extra(b) : true))
+    .reduce((s, b) => s + bookingRevenue(b, addOns), 0)
+}
+
 // ===== การครอบครองห้อง / ชนกันของการจอง (single source of truth) =====
 // (display) booking นี้เป็นการจอง active บน "วัน" ที่กำหนดไหม — ใช้กับปฏิทิน/grid
 export function bookingActiveOnDay(b: Booking, dayKey: string): boolean {
   return isActiveReservation(b.status) && day(b.checkIn) <= dayKey && day(b.checkOut) > dayKey
+}
+
+// จำนวนห้องที่ "ขายได้จริง" = ตัดห้องปิดปรับปรุง (maintenance) ออก — ห้องปิดปรับปรุงไม่ใช่ห้องที่ขายได้
+// ใช้เป็นตัวหารมาตรฐานของ occupancy ทุกหน้า (dashboard/reports/daily-report) ให้เลขตรงกันทุกที่
+export function sellableRoomCount(rooms: { status: string }[]): number {
+  return rooms.filter((r) => r.status !== 'maintenance').length
 }
 
 // (stats) booking นี้ครอบครองคืนของ "วัน" ที่กำหนดไหม — ใช้กับ occupancy/รายงาน
@@ -157,6 +195,14 @@ export function calcNights(checkIn: string, checkOut: string): number {
   return differenceInDays(parseISO(checkOut), parseISO(checkIn))
 }
 
+// บวก n คืนเข้า "วัน" ของ ISO โดยตรึง UTC-midnight — แทน epoch math (+n*86400000) หรือ
+// local setDate() ที่เปราะข้าม timezone (จะเลื่อนวันใน TZ ติดลบ). ให้ทั้งระบบบวกวันแบบเดียวกัน
+export function addNightsISO(iso: string, nights: number): string {
+  const d = new Date(`${iso.split('T')[0]}T00:00:00.000Z`)
+  d.setUTCDate(d.getUTCDate() + nights)
+  return d.toISOString()
+}
+
 // Date object → YYYY-MM-DD ตามเวลาท้องถิ่น
 export function toLocalDateKey(d: Date): string {
   const yyyy = d.getFullYear()
@@ -169,6 +215,23 @@ export function toLocalDateKey(d: Date): string {
 // ซึ่งจะให้ UTC date และผิดในช่วงข้ามคืนของไทย (00:00–06:59)
 export function todayLocal(): string {
   return toLocalDateKey(new Date())
+}
+
+// ====== แปลง ISO → "วัน" (YYYY-MM-DD): มี 2 ความหมายที่ต้องแยกให้ชัด ======
+// อย่า inline split('T')[0] กับ field วันที่อีก — เลือกใช้ helper ให้ถูกชนิด:
+//
+// • calendarDay  = field ที่เป็น "วันปฏิทิน" เก็บแบบ UTC-midnight (checkIn/checkOut/expense.date)
+//   อ่าน UTC ตรง ๆ ถูกต้องและไม่ขึ้นกับ timezone (คู่กับ calendarDateToISO)
+//
+// • eventDay     = timestamp "จริง" ที่เก็บด้วย new Date().toISOString()
+//   (payment.date / createdAt / fulfilledAt / completedAt / reportedAt / issuedAt)
+//   ต้องแปลงเป็นเวลาท้องถิ่นก่อน ไม่งั้นเหตุการณ์ช่วงข้ามคืนไทย (00:00–06:59) จะตกเป็น
+//   UTC ของ "เมื่อวาน" → ถูกนับผิดวัน (เช่น ยอดรับเงินสุทธิวันนี้กลายเป็น 0)
+export function calendarDay(iso: string): string {
+  return iso.split('T')[0]
+}
+export function eventDay(iso: string): string {
+  return toLocalDateKey(new Date(iso))
 }
 
 // ราคา/คืน ของ room type ในวันนั้น (เลือก rule ที่ช่วงวันสั้นที่สุด = เฉพาะเจาะจงที่สุด)
