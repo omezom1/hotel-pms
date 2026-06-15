@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-06-12
+> อัปเดตล่าสุด: 2026-06-16
 
 ---
 
@@ -74,9 +74,11 @@
   - `NEXT_PUBLIC_SUPABASE_URL`
   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
   - ค่าอยู่ในไฟล์ `.env.local` (gitignore — ไม่ขึ้น GitHub) ต้องใส่มือใน Vercel
-- **บั๊กที่เคยเจอ (2026-06-01):** ถ้า env var หาย build จะ **error ตอน prerender**
-  `Error: supabaseUrl is required` เพราะ `lib/supabase.ts` สร้าง client ตอน build time
-  (หน้าเป็น static) → แก้โดยใส่ env var แล้ว **Redeploy** (NEXT_PUBLIC ฝังตอน build เท่านั้น)
+- **บั๊กที่เคยเจอ (2026-06-01) — ✅ แก้ถาวรในโค้ดแล้ว (2026-06-15):** เดิมถ้า env var หาย build
+  **error ตอน prerender** `Error: supabaseUrl is required` เพราะ `lib/supabase.ts` สร้าง client ตอน
+  build time. **แก้:** ใส่ placeholder fallback (`'https://placeholder.supabase.co'` / `'placeholder-anon-key'`)
+  ใน `createClient` → build/prerender ไม่ throw แม้ env ว่าง (Preview build เขียวโดยไม่ต้องตั้ง Preview env);
+  Production (main) ยัง bake ค่าจริงตอน build ตามเดิม → runtime ไม่กระทบ
 - git push: เครื่องนี้ตั้ง credential.helper ชี้ Windows GCM แล้ว (`git config --global`
   `credential.helper '!"/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe"'`)
   — เครื่องใหม่ (notebook) ต้องตั้งเอง + ก๊อป `.env.local` มาด้วยมือ
@@ -258,14 +260,25 @@
 - tsc clean (4 errors เดิม). branch **นำ origin 28 commits, ยังไม่ push** (gh ยังไม่ auth)
 - ⏳ **NEXT:** push/PR · migration **Tier B/guests** (mutable + side-effect checkout totalStays/totalSpend → dual-write แบบ maintenance, reconcile await-ก่อน-rehydrate)
 
+### 2026-06-15/16 (PR #8 merged + env-fix + tsc cleanup + security bcrypt + 3 agent ใหม่)
+- **PR #8 merged → main** (squash `42f7960`, branch `fix/revenue-consolidation-double-submit` ลบแล้ว) — รวมงานสะสม 30 commits (revenue/QA/a11y + Tier A/B + ops-review). **gh authed แล้ว** (omezom1). production deploy เขียว
+- **แก้ CI ที่ block PR:** `lib/supabase.ts` ใส่ placeholder fallback ให้ `createClient` ไม่ throw ตอน build เมื่อ env ว่าง (Preview build เดิมพังที่ prerender `/_not-found`) — Production ยัง bake ค่าจริง. **ปลด env-var build bug ถาวร** (ดู §4b)
+- **เคลียร์ 4 pre-existing tsc errors:** bookings type `DateRange` ด้วย `DateRangeProps` (เลิก @ts-ignore) + `supabase/seed.ts` ลบ dead `mockOTAChannels` block → `tsc --noEmit` = **0 source errors**
+- **+3 review agents** ใน `.claude/agents/`: `hotel-pms-security-auditor` (orange), `hotel-pms-design-reviewer` (pink), `hotel-pms-product-strategist` (cyan) — read-only, รันครบทั้ง 3 ได้ findings (product: เครื่องคิดราคา seasonal มีแล้วแค่ไม่มี UI → แนะ Seasonal Rate Manager; design: dark-mode "สีเน้น" หลุด → 3 ของกลาง useChartTheme/iconChip/StatusBadge; security: ดูด้านล่าง)
+- **🔐 Security work (branch `security/bcrypt-passwords-audit`, commit `58bfe4d`, ยังไม่ push/PR):** ทิศที่เลือก = **คงเป็น public portfolio demo ข้อมูลปลอม** (ไม่ทำ Supabase Auth lockdown ใหญ่)
+  - **bcrypt hashing** (`lib/auth-utils.ts`: hashPassword/verifyPassword/isHashed) — login เทียบ bcrypt, addUser/updateUser hash ตอนเขียน, seed เก็บ hash, verifyPassword มี plaintext fallback. **migrate ของจริงบน production แล้ว** ผ่าน MCP execute_sql: `app_state` blob (state.users, v→78) + ตาราง relational `users` → 6 hashed/0 plaintext (login demo เดิมยังเข้าได้)
+  - **audit log** 6 account actions (addUser/updateUser/deleteUser/addStaff/updateStaff/deleteStaff) category `'auth'`
+  - verify: tsc 0, build 22/22, 6 demo logins ผ่าน. guests เป็น mock ไม่มี PII จริง
+- ⏳ **NEXT:** push/PR security branch · migration **Tier B/guests** · (เลือกได้) Seasonal Rate Manager / dark-mode polish
+
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
 2. **bookings/rooms ยังเป็น blob** (ไม่ได้แยก relational ตามตั้งใจเดิม) — ถ้าจะทำ "ถูก 100%"
    (รวมแก้ปัญหา delete ถูกชุบชีวิตในข้อ 3c) ต้องย้าย cluster ที่พัวพันทั้งกลุ่ม
    (bookings, rooms, invoices, housekeeping, guests, corporate, payments, addons) เป็น
    proper tables + Postgres RPC ให้ checkout/cancel เป็น transaction เดียว = งานใหญ่
-3. ความปลอดภัย: RLS เป็น anon full access (ใครมี URL+key เข้าได้เต็ม) — เหมาะงานภายในเท่านั้น
-4. รหัสผ่านเก็บเป็น plaintext ใน blob (demo) — production ควร hash (bcrypt) + ไม่ส่งกลับ client
+3. **ความปลอดภัย: RLS เป็น anon full access** ทุกตาราง + blob (`USING(true)` role public/anon) — security-auditor (2026-06-15) verify แล้วว่า **เว็บ public จริง = ใครเปิดเว็บ+ดึง anon key ก็ select/insert/update/delete ได้ทุกแถว** (รวม PII guests, ลบ audit ได้). **ทิศที่ผู้ใช้เลือก: คงเป็น public portfolio demo ข้อมูลปลอม** → ยอมรับ exposure ของ "ข้อมูลปลอม" ไว้ก่อน. ถ้าจะใช้จริง = ต้องทำ **Supabase Auth จริง → เปลี่ยน policy `anon`→`authenticated` → per-role RLS → RPC** (งานใหญ่, เลื่อน). หมายเหตุ: `audit_logs` ควรเป็น insert-only, `receipts` bucket ยัง list ได้ (backlog เล็ก)
+4. ~~รหัสผ่าน plaintext~~ → ✅ (2026-06-15) **hash ด้วย bcrypt แล้ว** (`lib/auth-utils.ts`); blob + ตาราง relational `users` migrate เป็น hash หมด (0 plaintext). export ตัด password อยู่แล้ว. account actions มี audit ครบ. ดูรายละเอียด §5 entry 2026-06-15/16
 5. **VAT 7% ในใบแจ้งหนี้** — ยังไม่ทำ (`tax: 0` ตายตัว) ผู้ใช้ขอเลื่อนไว้ก่อน
 6. ~~**accessibility** focus-trap + `<label htmlFor>`~~ → ✅ (2026-06-06) เพิ่ม hook กลาง
    `lib/useFocusTrap.ts` (ขัง Tab/Shift+Tab + Esc ปิด + คืนโฟกัสเดิม + เคารพ autoFocus เดิม)
