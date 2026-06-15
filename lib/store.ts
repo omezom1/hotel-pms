@@ -11,6 +11,7 @@ import type {
 } from '@/types'
 import { useAuthStore } from './auth-store'
 import { addNightsISO, addOnCountsTowardCharge, calcAddOnTotal, calcBookingTotal, calcOutstanding, roomHasConflict, todayLocal } from './utils'
+import { hashPassword } from './auth-utils'
 import {
   mockRooms, mockGuests, mockBookings, mockInvoices,
   mockHousekeepingTasks, mockMaintenanceLogs, mockStaff, mockUsers,
@@ -1115,8 +1116,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (state.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
       return { ok: false, error: 'ชื่อผู้ใช้นี้ถูกใช้แล้ว' }
     }
-    const newUser: User = { ...userData, username, id: `u${Date.now()}` }
+    const newUser: User = { ...userData, username, id: `u${Date.now()}`, password: hashPassword(userData.password) }
     set((s) => ({ users: [...s.users, newUser] }))
+    get().logAudit({
+      category: 'auth', action: 'add-user',
+      summary: `สร้างบัญชีผู้ใช้ "${username}"`, entityId: newUser.id,
+    })
     return { ok: true }
   },
 
@@ -1130,12 +1135,28 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       }
       updates = { ...updates, username }
     }
+    const passwordChanged = updates.password !== undefined && updates.password !== ''
+    if (passwordChanged) {
+      updates = { ...updates, password: hashPassword(updates.password as string) }
+    }
     set((s) => ({ users: s.users.map((u) => (u.id === id ? { ...u, ...updates } : u)) }))
+    const target = state.users.find((u) => u.id === id)
+    get().logAudit({
+      category: 'auth', action: 'update-user',
+      summary: `แก้บัญชีผู้ใช้ "${updates.username ?? target?.username ?? id}"${passwordChanged ? ' (เปลี่ยนรหัสผ่าน)' : ''}`,
+      entityId: id,
+    })
     return { ok: true }
   },
 
-  deleteUser: (id) =>
-    set((state) => ({ users: state.users.filter((u) => u.id !== id) })),
+  deleteUser: (id) => {
+    const target = get().users.find((u) => u.id === id)
+    set((state) => ({ users: state.users.filter((u) => u.id !== id) }))
+    get().logAudit({
+      category: 'auth', action: 'delete-user',
+      summary: `ลบบัญชีผู้ใช้ "${target?.username ?? id}"`, entityId: id,
+    })
+  },
 
   recordLogin: (userId) =>
     set((state) => ({
@@ -1147,16 +1168,39 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   addStaff: (staffData) => {
     const id = `s${Date.now()}`
     set((state) => ({ staff: [...state.staff, { ...staffData, id }] }))
+    get().logAudit({
+      category: 'auth', action: 'add-staff',
+      summary: `เพิ่มพนักงาน "${staffData.name}" (${staffData.role})`, entityId: id,
+    })
     return id
   },
 
-  updateStaff: (id, updates) =>
+  updateStaff: (id, updates) => {
+    const prev = get().staff.find((s) => s.id === id)
     set((state) => ({
       staff: state.staff.map((s) => (s.id === id ? { ...s, ...updates } : s)),
-    })),
+    }))
+    const roleChanged = updates.role !== undefined && updates.role !== prev?.role
+    const permsChanged = updates.permissions !== undefined
+    const detail = [
+      roleChanged ? `เปลี่ยนตำแหน่ง→${updates.role}` : null,
+      permsChanged ? 'ปรับสิทธิ์' : null,
+    ].filter(Boolean).join(', ')
+    get().logAudit({
+      category: 'auth', action: 'update-staff',
+      summary: `แก้ข้อมูลพนักงาน "${updates.name ?? prev?.name ?? id}"${detail ? ` (${detail})` : ''}`,
+      entityId: id,
+    })
+  },
 
-  deleteStaff: (id) =>
-    set((state) => ({ staff: state.staff.filter((s) => s.id !== id) })),
+  deleteStaff: (id) => {
+    const target = get().staff.find((s) => s.id === id)
+    set((state) => ({ staff: state.staff.filter((s) => s.id !== id) }))
+    get().logAudit({
+      category: 'auth', action: 'delete-staff',
+      summary: `ลบพนักงาน "${target?.name ?? id}"`, entityId: id,
+    })
+  },
 
   // สำรองข้อมูล: คืนเฉพาะ state ที่เป็นข้อมูล (ตัด function ออก)
   // หมายเหตุ: ตัดรหัสผ่านออกจาก users — ไฟล์ backup ไม่ควรมี plaintext password
