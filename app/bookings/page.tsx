@@ -12,9 +12,9 @@ import { Plus, Search, X, Eye, Ban } from 'lucide-react'
 import { toast } from 'sonner'
 import Link from 'next/link'
 import dynamic from 'next/dynamic'
+import type { DateRangeProps } from 'react-date-range'
 import { th } from 'date-fns/locale'
-// @ts-ignore
-const DateRange = dynamic(() => import('react-date-range').then((m: any) => m.DateRange), { ssr: false })
+const DateRange = dynamic<DateRangeProps>(() => import('react-date-range').then((m) => m.DateRange), { ssr: false })
 
 const addDays = (d: Date, n: number) => { const x = new Date(d); x.setDate(x.getDate() + n); return x }
 

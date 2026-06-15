@@ -24,7 +24,6 @@ import {
   mockCorporateTransactions,
   mockAddOnItems,
   mockBookingAddOns,
-  mockOTAChannels,
 } from '../lib/mock-data'
 
 // ── Supabase client (reads env vars at runtime) ──────────────
@@ -264,19 +263,6 @@ async function seed(): Promise<void> {
     fulfilled_at:   ba.fulfilledAt ?? null,
     fulfilled_by:   ba.fulfilledBy ?? null,
     notes:          ba.notes ?? null,
-  })))
-
-  // 15. OTA CHANNELS — no foreign key dependencies
-  await upsert('ota_channels', mockOTAChannels.map(o => ({
-    id:               o.id,
-    name:             o.name,
-    logo:             o.logo,
-    is_connected:     o.isConnected,
-    last_sync:        o.lastSync,
-    inventory_mapped: o.inventoryMapped,
-    total_rooms:      o.totalRooms,
-    pending_bookings: o.pendingBookings,
-    commission:       o.commission,
   })))
 
   console.log('\n=== Seed completed successfully ===\n')
