@@ -65,6 +65,7 @@
 - `009_inventory_realtime.sql` — **Tier A** (inventory, 2 entity): เพิ่ม `writer_id` ให้ `inventory_items` (mutable, soft-delete) + `inventory_transactions` (ledger append-only), เปิด realtime publication + replica identity full ทั้งคู่ — ✅ รันแล้ว (2026-06-10)
 - `010_maintenance_realtime.sql` — **Tier A** (maintenance_logs, mutable+soft-delete): เพิ่ม `writer_id`, **DROP FK `maintenance_logs_room_id_fkey`** (rooms ยัง blob/orphan — ใส่กลับเมื่อย้าย rooms ใน Tier B), เปิด realtime + replica identity full — ✅ รันแล้ว (2026-06-10)
 - `011_add_on_items_realtime.sql` — **Tier B kickoff** (add_on_items, read-only catalog): เพิ่ม `writer_id`, เปิด realtime + replica identity full (คง FK `inventory_item_id→inventory_items` ไว้ — parent ย้ายแล้ว valid) — ✅ รันแล้ว (2026-06-10, **ผ่าน MCP execute_sql**)
+- `012_rls_lockdown.sql` — **P2 security (interim, no Supabase Auth)**: ปิด anon access. **orphan tables 12 ตัว** (users/guests/bookings/invoices/payments/staff/corporate_*/rooms/housekeeping_tasks/booking_add_ons/ota_channels — แอปไม่แตะ, `.from()` อยู่ใน `lib/supabase-api.ts` ที่ dead code) → DROP policy (RLS เปิด+ไม่มี policy = ปิดสนิท, ข้อมูลยังอยู่ reversible). **active tables** จำกัด command `TO anon`: audit_logs/inventory_transactions = select+insert (append-only กันแก้/ลบกลบรอย), expenses/inventory_items/maintenance_logs/add_on_items = select+insert+update (soft-delete). **app_state คง anon ALL** (irreducible). — ✅ รันแล้ว (2026-06-18, **ผ่าน MCP execute_sql**)
 > **อัปเดต 2026-06-10:** MCP `execute_sql` **รัน DDL ได้** (ใช้สิทธิ์ management ไม่ใช่ anon key) — ไม่ต้องไปวางใน Dashboard เองอีก. (กฎเก่าว่า "MCP ถูกบล็อก" ใช้กับ `apply_migration` tool เท่านั้น; `execute_sql` รัน ALTER/DO/etc. ได้)
 
 ## 4b. Deployment (Vercel) — ⚠️ ตั้งค่าครั้งเดียว อย่าลืม
@@ -271,13 +272,21 @@
   - verify: tsc 0, build 22/22, 6 demo logins ผ่าน. guests เป็น mock ไม่มี PII จริง
 - ⏳ **NEXT:** push/PR security branch · migration **Tier B/guests** · (เลือกได้) Seasonal Rate Manager / dark-mode polish
 
+### 2026-06-18 (Security P1/P2 interim hardening — branch `security/p1-p2-hardening`)
+**เปลี่ยนทิศจาก "ยอมรับ exposure" (2026-06-15/16) มา = ล็อกจริง** (ผู้ใช้เลือก "Security P1/P2"). ฐานจาก branch bcrypt เดิม (commit `58bfe4d` = P1 hash + audit account actions, ยังไม่ merge → main ยังเป็น plaintext-compare)
+- **🚨 พบระเบิดเวลา:** main (deploy บน production) เทียบ plaintext แต่ blob/users ถูก hash ไปแล้ว (2026-06-15) → **login บน production พังอยู่** จนกว่าจะ merge โค้ด bcrypt เข้า main. (verify ด้วย node: bcrypt.compareSync admin123/reception/account กับ hash จริงใน seed → MATCH, รหัสผิด → no-match)
+- **P2-RLS (commit `74bf69b`, `012_rls_lockdown.sql` รันบน live DB):** ปิด anon orphan 12 ตาราง + จำกัด active tables — ดู §4 migration 012. **verify (จำลอง role anon ผ่าน MCP):** users/guests/bookings/payments = 0 แถว, app_state/audit_logs/expenses ยังเข้าได้. `get_advisors(security)`: ช่องโหว่ anon-rw บน PII/orphan **หายหมด** (เหลือ INFO `rls_enabled_no_policy` = ปิดที่ตั้งใจ; WARN `rls_policy_always_true` เหลือบน active tables + app_state = residual ที่ยอมรับ)
+- **P2-authz (commit `6264357`, `lib/store.ts`):** เพิ่ม `hasPerm()` + guard 6 account/staff action ด้วย `canManageStaff` (กัน bypass ผ่าน devtools). `updateUser` อนุญาต self-edit (ChangePasswordButton ทุกคนใช้ได้) แต่ห้ามแตะบัญชีคนอื่น/ย้าย staffId. = defense-in-depth ไม่ใช่ boundary จริง
+- **residual risk (บันทึกชัด):** `app_state` blob ยังเปิด anon (แอปต้องอ่านตอน boot/login) → คนมี public key ยังดึงข้อมูลทั้งก้อนผ่าน blob ได้. ปิด 100% = ต้อง **Supabase Auth จริง** (งานก้อนถัดไป). + P3 ค้าง: receipts bucket list ได้, session ไม่มี expiry/revoke
+- tsc clean (0 errors). ⏳ **NEXT:** push branch + PR เข้า main (gh authed) → **redeploy Vercel = ปลด login พัง** → verify login prod
+
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
 2. **bookings/rooms ยังเป็น blob** (ไม่ได้แยก relational ตามตั้งใจเดิม) — ถ้าจะทำ "ถูก 100%"
    (รวมแก้ปัญหา delete ถูกชุบชีวิตในข้อ 3c) ต้องย้าย cluster ที่พัวพันทั้งกลุ่ม
    (bookings, rooms, invoices, housekeeping, guests, corporate, payments, addons) เป็น
    proper tables + Postgres RPC ให้ checkout/cancel เป็น transaction เดียว = งานใหญ่
-3. **ความปลอดภัย: RLS เป็น anon full access** ทุกตาราง + blob (`USING(true)` role public/anon) — security-auditor (2026-06-15) verify แล้วว่า **เว็บ public จริง = ใครเปิดเว็บ+ดึง anon key ก็ select/insert/update/delete ได้ทุกแถว** (รวม PII guests, ลบ audit ได้). **ทิศที่ผู้ใช้เลือก: คงเป็น public portfolio demo ข้อมูลปลอม** → ยอมรับ exposure ของ "ข้อมูลปลอม" ไว้ก่อน. ถ้าจะใช้จริง = ต้องทำ **Supabase Auth จริง → เปลี่ยน policy `anon`→`authenticated` → per-role RLS → RPC** (งานใหญ่, เลื่อน). หมายเหตุ: `audit_logs` ควรเป็น insert-only, `receipts` bucket ยัง list ได้ (backlog เล็ก)
+3. **ความปลอดภัย: RLS** — 🔶 **2026-06-18 ทำ interim hardening แล้ว** (branch `security/p1-p2-hardening`, migration 012): ปิด anon บน orphan/PII tables ทั้งหมด + จำกัด active tables + audit_logs insert-only (กันลบกลบรอย) + store-side permission guards. ดู §5 entry 2026-06-18. **เหลือ residual ที่ปิดไม่ได้แบบ anon-only:** `app_state` blob ยังเปิด anon (แอปต้องอ่าน) = ใครมี public key ยังดึงข้อมูลทั้งก้อนผ่าน blob ได้. **ปิด 100% = ต้อง Supabase Auth จริง → `anon`→`authenticated` → per-role RLS → RPC** (งานใหญ่, ก้อนถัดไป). P3 ค้าง: `receipts` bucket ยัง list ได้, session ไม่มี expiry/revoke
 4. ~~รหัสผ่าน plaintext~~ → ✅ (2026-06-15) **hash ด้วย bcrypt แล้ว** (`lib/auth-utils.ts`); blob + ตาราง relational `users` migrate เป็น hash หมด (0 plaintext). export ตัด password อยู่แล้ว. account actions มี audit ครบ. ดูรายละเอียด §5 entry 2026-06-15/16
 5. **VAT 7% ในใบแจ้งหนี้** — ยังไม่ทำ (`tax: 0` ตายตัว) ผู้ใช้ขอเลื่อนไว้ก่อน
 6. ~~**accessibility** focus-trap + `<label htmlFor>`~~ → ✅ (2026-06-06) เพิ่ม hook กลาง
