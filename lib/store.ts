@@ -5,7 +5,7 @@ import { supabaseStorage, registerStateApplier, reportSaveError, CLIENT_ID } fro
 import { supabase } from './supabase'
 import type {
   Room, Guest, Booking, Invoice, InvoiceItem, InvoiceStatus, HousekeepingTask,
-  MaintenanceLog, Staff, RoomStatus, BookingStatus, HousekeepingStatus, MaintenanceStatus,
+  MaintenanceLog, Staff, StaffPermissions, RoomStatus, BookingStatus, HousekeepingStatus, MaintenanceStatus,
   InventoryItem, InventoryTransaction, CorporateAccount, CorporateTransaction,
   AddOnItem, BookingAddOn, AuditLog, AuditCategory, Expense, User
 } from '@/types'
@@ -18,6 +18,13 @@ import {
   mockInventoryItems, mockInventoryTransactions, mockCorporateAccounts, mockCorporateTransactions,
   mockAddOnItems, mockBookingAddOns, mockExpenses, shiftMockDates
 } from './mock-data'
+
+// Defense-in-depth: ตรวจสิทธิ์ระดับ store action กันเลี่ยงผ่าน UI (เช่นเรียกตรงจาก devtools).
+// หมายเหตุ: ยังไม่ใช่ security boundary จริง — boundary จริงต้องบังคับที่ DB (Supabase Auth + RLS per-role).
+// hasPermission คืน false เมื่อไม่มีผู้ใช้ล็อกอิน → ปลอดภัยโดย default
+function hasPerm(key: keyof StaffPermissions): boolean {
+  try { return useAuthStore.getState().hasPermission(key) } catch { return false }
+}
 
 // dual-write helper: รายงาน error ของการเขียนตาราง expenses (relational migration Tier A)
 // 23505 = PK ซ้ำ (echo/retry) → idempotent ไม่ถือเป็นความผิดพลาด; อื่น ๆ เตือนผู้ใช้
@@ -1109,6 +1116,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
 
   // ===== User / account actions =====
   addUser: (userData) => {
+    if (!hasPerm('canManageStaff')) return { ok: false, error: 'ไม่มีสิทธิ์จัดการบัญชีผู้ใช้' }
     const state = get()
     const username = userData.username.trim()
     if (!username) return { ok: false, error: 'ต้องระบุชื่อผู้ใช้' }
@@ -1126,6 +1134,14 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   },
 
   updateUser: (id, updates) => {
+    // อนุญาตให้แก้บัญชี "ตัวเอง" ได้ (เช่น เปลี่ยนรหัสผ่านผ่าน ChangePasswordButton)
+    // แต่แก้บัญชีคนอื่น หรือย้าย staffId (= เปลี่ยนสิทธิ์ตัวเอง) ต้องมี canManageStaff
+    const currentUserId = useAuthStore.getState().user?.userId
+    const isSelf = currentUserId === id
+    const reassignsStaff = updates.staffId !== undefined
+    if ((!isSelf || reassignsStaff) && !hasPerm('canManageStaff')) {
+      return { ok: false, error: 'ไม่มีสิทธิ์จัดการบัญชีผู้ใช้' }
+    }
     const state = get()
     if (updates.username !== undefined) {
       const username = updates.username.trim()
@@ -1150,6 +1166,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   },
 
   deleteUser: (id) => {
+    if (!hasPerm('canManageStaff')) { console.warn('[security] deleteUser ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return }
     const target = get().users.find((u) => u.id === id)
     set((state) => ({ users: state.users.filter((u) => u.id !== id) }))
     get().logAudit({
@@ -1166,6 +1183,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     })),
 
   addStaff: (staffData) => {
+    if (!hasPerm('canManageStaff')) { console.warn('[security] addStaff ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return '' }
     const id = `s${Date.now()}`
     set((state) => ({ staff: [...state.staff, { ...staffData, id }] }))
     get().logAudit({
@@ -1176,6 +1194,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   },
 
   updateStaff: (id, updates) => {
+    if (!hasPerm('canManageStaff')) { console.warn('[security] updateStaff ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return }
     const prev = get().staff.find((s) => s.id === id)
     set((state) => ({
       staff: state.staff.map((s) => (s.id === id ? { ...s, ...updates } : s)),
@@ -1194,6 +1213,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   },
 
   deleteStaff: (id) => {
+    if (!hasPerm('canManageStaff')) { console.warn('[security] deleteStaff ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return }
     const target = get().staff.find((s) => s.id === id)
     set((state) => ({ staff: state.staff.filter((s) => s.id !== id) }))
     get().logAudit({
