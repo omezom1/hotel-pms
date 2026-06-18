@@ -237,14 +237,17 @@ export const mockStaff: Staff[] = [
 ]
 
 // ===== Users สำหรับ Login =====
-// หมายเหตุ: ใน production ควรใช้ hashed password (bcrypt) — นี่เป็น demo
+// รหัสผ่านเก็บเป็น bcrypt hash (ไม่ใช่ plaintext) — verify ด้วย lib/auth-utils.ts
+// Demo credentials (plaintext) สำหรับลองเข้าระบบ:
+//   admin/admin123 · reception/reception · accountant/account
+//   nida/nida123 · mali/mali123 · somsak/somsak123
 export const mockUsers: User[] = [
-  { id: 'u001', username: 'admin',        password: 'admin123',  staffId: 's001' },
-  { id: 'u002', username: 'reception',    password: 'reception', staffId: 's002' },
-  { id: 'u003', username: 'accountant',   password: 'account',   staffId: 's003' },
-  { id: 'u004', username: 'nida',         password: 'nida123',   staffId: 's004' },
-  { id: 'u005', username: 'mali',         password: 'mali123',   staffId: 's005' },
-  { id: 'u006', username: 'somsak',       password: 'somsak123', staffId: 's006' },
+  { id: 'u001', username: 'admin',        password: '$2b$10$55iY2DWPrKuE8h5HmklJiO90nUdZx9uHIzlxJ0I0vS6VWXMlb034K', staffId: 's001' },
+  { id: 'u002', username: 'reception',    password: '$2b$10$2n6qW9cBaqQ8hwCqJeR1POUAuCEVoF8sv.G57IfqNCZRtMgEwQAMm', staffId: 's002' },
+  { id: 'u003', username: 'accountant',   password: '$2b$10$46xzHXE3uS2oupMzyhIGEuwcEEmUGxbd8W5a69SURkzdn3prq5R4.', staffId: 's003' },
+  { id: 'u004', username: 'nida',         password: '$2b$10$dXWxvL5ynqbCcoSaY2pYZ.P2DWS7x1ZXtiWfAu6sx2G.QMK.lgj9C', staffId: 's004' },
+  { id: 'u005', username: 'mali',         password: '$2b$10$LttAAyo8xxFZpA62NTS0WuVU5Atd/EZxsdPrRVVmZvY5qNIR7zxgu', staffId: 's005' },
+  { id: 'u006', username: 'somsak',       password: '$2b$10$uRTXc830uhj6It.cp5Yxru3rZ4oKPHSSgktnWECY0nc6IJ6xP/7Sa', staffId: 's006' },
 ]
 
 

@@ -5,18 +5,26 @@ import { supabaseStorage, registerStateApplier, reportSaveError, CLIENT_ID } fro
 import { supabase } from './supabase'
 import type {
   Room, Guest, Booking, Invoice, InvoiceItem, InvoiceStatus, HousekeepingTask,
-  MaintenanceLog, Staff, RoomStatus, BookingStatus, HousekeepingStatus, MaintenanceStatus,
+  MaintenanceLog, Staff, StaffPermissions, RoomStatus, BookingStatus, HousekeepingStatus, MaintenanceStatus,
   InventoryItem, InventoryTransaction, CorporateAccount, CorporateTransaction,
   AddOnItem, BookingAddOn, AuditLog, AuditCategory, Expense, User, DynamicPricing
 } from '@/types'
 import { useAuthStore } from './auth-store'
 import { addNightsISO, addOnCountsTowardCharge, calcAddOnTotal, calcBookingTotal, calcOutstanding, getRoomTypeLabel, roomHasConflict, todayLocal } from './utils'
+import { hashPassword } from './auth-utils'
 import {
   mockRooms, mockGuests, mockBookings, mockInvoices,
   mockHousekeepingTasks, mockMaintenanceLogs, mockStaff, mockUsers,
   mockInventoryItems, mockInventoryTransactions, mockCorporateAccounts, mockCorporateTransactions,
   mockAddOnItems, mockBookingAddOns, mockExpenses, mockDynamicPricing, shiftMockDates
 } from './mock-data'
+
+// Defense-in-depth: ตรวจสิทธิ์ระดับ store action กันเลี่ยงผ่าน UI (เช่นเรียกตรงจาก devtools).
+// หมายเหตุ: ยังไม่ใช่ security boundary จริง — boundary จริงต้องบังคับที่ DB (Supabase Auth + RLS per-role).
+// hasPermission คืน false เมื่อไม่มีผู้ใช้ล็อกอิน → ปลอดภัยโดย default
+function hasPerm(key: keyof StaffPermissions): boolean {
+  try { return useAuthStore.getState().hasPermission(key) } catch { return false }
+}
 
 // dual-write helper: รายงาน error ของการเขียนตาราง expenses (relational migration Tier A)
 // 23505 = PK ซ้ำ (echo/retry) → idempotent ไม่ถือเป็นความผิดพลาด; อื่น ๆ เตือนผู้ใช้
@@ -1115,6 +1123,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
 
   // ===== User / account actions =====
   addUser: (userData) => {
+    if (!hasPerm('canManageStaff')) return { ok: false, error: 'ไม่มีสิทธิ์จัดการบัญชีผู้ใช้' }
     const state = get()
     const username = userData.username.trim()
     if (!username) return { ok: false, error: 'ต้องระบุชื่อผู้ใช้' }
@@ -1122,12 +1131,24 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (state.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
       return { ok: false, error: 'ชื่อผู้ใช้นี้ถูกใช้แล้ว' }
     }
-    const newUser: User = { ...userData, username, id: `u${Date.now()}` }
+    const newUser: User = { ...userData, username, id: `u${Date.now()}`, password: hashPassword(userData.password) }
     set((s) => ({ users: [...s.users, newUser] }))
+    get().logAudit({
+      category: 'auth', action: 'add-user',
+      summary: `สร้างบัญชีผู้ใช้ "${username}"`, entityId: newUser.id,
+    })
     return { ok: true }
   },
 
   updateUser: (id, updates) => {
+    // อนุญาตให้แก้บัญชี "ตัวเอง" ได้ (เช่น เปลี่ยนรหัสผ่านผ่าน ChangePasswordButton)
+    // แต่แก้บัญชีคนอื่น หรือย้าย staffId (= เปลี่ยนสิทธิ์ตัวเอง) ต้องมี canManageStaff
+    const currentUserId = useAuthStore.getState().user?.userId
+    const isSelf = currentUserId === id
+    const reassignsStaff = updates.staffId !== undefined
+    if ((!isSelf || reassignsStaff) && !hasPerm('canManageStaff')) {
+      return { ok: false, error: 'ไม่มีสิทธิ์จัดการบัญชีผู้ใช้' }
+    }
     const state = get()
     if (updates.username !== undefined) {
       const username = updates.username.trim()
@@ -1137,12 +1158,29 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       }
       updates = { ...updates, username }
     }
+    const passwordChanged = updates.password !== undefined && updates.password !== ''
+    if (passwordChanged) {
+      updates = { ...updates, password: hashPassword(updates.password as string) }
+    }
     set((s) => ({ users: s.users.map((u) => (u.id === id ? { ...u, ...updates } : u)) }))
+    const target = state.users.find((u) => u.id === id)
+    get().logAudit({
+      category: 'auth', action: 'update-user',
+      summary: `แก้บัญชีผู้ใช้ "${updates.username ?? target?.username ?? id}"${passwordChanged ? ' (เปลี่ยนรหัสผ่าน)' : ''}`,
+      entityId: id,
+    })
     return { ok: true }
   },
 
-  deleteUser: (id) =>
-    set((state) => ({ users: state.users.filter((u) => u.id !== id) })),
+  deleteUser: (id) => {
+    if (!hasPerm('canManageStaff')) { console.warn('[security] deleteUser ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return }
+    const target = get().users.find((u) => u.id === id)
+    set((state) => ({ users: state.users.filter((u) => u.id !== id) }))
+    get().logAudit({
+      category: 'auth', action: 'delete-user',
+      summary: `ลบบัญชีผู้ใช้ "${target?.username ?? id}"`, entityId: id,
+    })
+  },
 
   recordLogin: (userId) =>
     set((state) => ({
@@ -1152,18 +1190,44 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     })),
 
   addStaff: (staffData) => {
+    if (!hasPerm('canManageStaff')) { console.warn('[security] addStaff ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return '' }
     const id = `s${Date.now()}`
     set((state) => ({ staff: [...state.staff, { ...staffData, id }] }))
+    get().logAudit({
+      category: 'auth', action: 'add-staff',
+      summary: `เพิ่มพนักงาน "${staffData.name}" (${staffData.role})`, entityId: id,
+    })
     return id
   },
 
-  updateStaff: (id, updates) =>
+  updateStaff: (id, updates) => {
+    if (!hasPerm('canManageStaff')) { console.warn('[security] updateStaff ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return }
+    const prev = get().staff.find((s) => s.id === id)
     set((state) => ({
       staff: state.staff.map((s) => (s.id === id ? { ...s, ...updates } : s)),
-    })),
+    }))
+    const roleChanged = updates.role !== undefined && updates.role !== prev?.role
+    const permsChanged = updates.permissions !== undefined
+    const detail = [
+      roleChanged ? `เปลี่ยนตำแหน่ง→${updates.role}` : null,
+      permsChanged ? 'ปรับสิทธิ์' : null,
+    ].filter(Boolean).join(', ')
+    get().logAudit({
+      category: 'auth', action: 'update-staff',
+      summary: `แก้ข้อมูลพนักงาน "${updates.name ?? prev?.name ?? id}"${detail ? ` (${detail})` : ''}`,
+      entityId: id,
+    })
+  },
 
-  deleteStaff: (id) =>
-    set((state) => ({ staff: state.staff.filter((s) => s.id !== id) })),
+  deleteStaff: (id) => {
+    if (!hasPerm('canManageStaff')) { console.warn('[security] deleteStaff ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return }
+    const target = get().staff.find((s) => s.id === id)
+    set((state) => ({ staff: state.staff.filter((s) => s.id !== id) }))
+    get().logAudit({
+      category: 'auth', action: 'delete-staff',
+      summary: `ลบพนักงาน "${target?.name ?? id}"`, entityId: id,
+    })
+  },
 
   // สำรองข้อมูล: คืนเฉพาะ state ที่เป็นข้อมูล (ตัด function ออก)
   // หมายเหตุ: ตัดรหัสผ่านออกจาก users — ไฟล์ backup ไม่ควรมี plaintext password
