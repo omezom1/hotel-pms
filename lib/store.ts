@@ -7,16 +7,16 @@ import type {
   Room, Guest, Booking, Invoice, InvoiceItem, InvoiceStatus, HousekeepingTask,
   MaintenanceLog, Staff, StaffPermissions, RoomStatus, BookingStatus, HousekeepingStatus, MaintenanceStatus,
   InventoryItem, InventoryTransaction, CorporateAccount, CorporateTransaction,
-  AddOnItem, BookingAddOn, AuditLog, AuditCategory, Expense, User
+  AddOnItem, BookingAddOn, AuditLog, AuditCategory, Expense, User, DynamicPricing
 } from '@/types'
 import { useAuthStore } from './auth-store'
-import { addNightsISO, addOnCountsTowardCharge, calcAddOnTotal, calcBookingTotal, calcOutstanding, roomHasConflict, todayLocal } from './utils'
+import { addNightsISO, addOnCountsTowardCharge, calcAddOnTotal, calcBookingTotal, calcOutstanding, getRoomTypeLabel, roomHasConflict, todayLocal } from './utils'
 import { hashPassword } from './auth-utils'
 import {
   mockRooms, mockGuests, mockBookings, mockInvoices,
   mockHousekeepingTasks, mockMaintenanceLogs, mockStaff, mockUsers,
   mockInventoryItems, mockInventoryTransactions, mockCorporateAccounts, mockCorporateTransactions,
-  mockAddOnItems, mockBookingAddOns, mockExpenses, shiftMockDates
+  mockAddOnItems, mockBookingAddOns, mockExpenses, mockDynamicPricing, shiftMockDates
 } from './mock-data'
 
 // Defense-in-depth: ตรวจสิทธิ์ระดับ store action กันเลี่ยงผ่าน UI (เช่นเรียกตรงจาก devtools).
@@ -100,6 +100,7 @@ interface HotelStore {
   bookingAddOns: BookingAddOn[]
   expenses: Expense[]
   auditLogs: AuditLog[]
+  dynamicPricing: DynamicPricing[]
 
   // Cloud hydration (Supabase storage โหลดแบบ async — ต้องรอให้เสร็จก่อนใช้งาน)
   _hasHydrated: boolean
@@ -173,6 +174,11 @@ interface HotelStore {
   requestAddOn: (bookingId: string, addOnItemId: string, quantity: number, staffId: string, notes?: string) => { ok: boolean; error?: string }
   fulfillAddOn: (addOnId: string, staffId: string) => { ok: boolean; error?: string }
   cancelAddOn: (addOnId: string) => void
+
+  // Seasonal/dynamic pricing actions (จัดการราคาตามช่วงวัน)
+  addPricingRule: (rule: Omit<DynamicPricing, 'id'>) => { ok: boolean; error?: string }
+  updatePricingRule: (id: string, updates: Partial<Omit<DynamicPricing, 'id'>>) => { ok: boolean; error?: string }
+  deletePricingRule: (id: string) => void
 }
 
 export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
@@ -193,6 +199,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   bookingAddOns: shiftMockDates(mockBookingAddOns),
   expenses: shiftMockDates(mockExpenses),
   auditLogs: [],
+  dynamicPricing: mockDynamicPricing,
 
   _hasHydrated: false,
   setHasHydrated: (v) => set({ _hasHydrated: v }),
@@ -603,7 +610,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     // ราคาเพิ่ม = ราคารายคืนจริงของวันที่เพิ่ม (ผ่าน source เดียวกับตอนสร้าง booking)
     const room = state.rooms.find((r) => r.id === booking.roomId)
     if (!room) return { ok: false, error: 'ไม่พบห้อง' }
-    const extraPrice = calcBookingTotal(room.type, oldCheckOut, newCheckOut, room.pricePerNight)
+    const extraPrice = calcBookingTotal(room.type, oldCheckOut, newCheckOut, room.pricePerNight, get().dynamicPricing)
 
     set((s) => ({
       bookings: s.bookings.map((b) =>
@@ -656,7 +663,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     // คิดราคาใหม่ตามประเภทห้องใหม่ (ผ่าน source เดียวกับสร้าง/ขยาย/early-checkout)
     // ถ้า reprice=false → คงราคาเดิม (อัพเกรด/ย้ายฟรี)
     const newTotal = reprice
-      ? calcBookingTotal(newRoom.type, booking.checkIn, booking.checkOut, newRoom.pricePerNight)
+      ? calcBookingTotal(newRoom.type, booking.checkIn, booking.checkOut, newRoom.pricePerNight, get().dynamicPricing)
       : booking.totalAmount
     const overpaid = reprice ? Math.max(0, booking.paidAmount - newTotal) : 0
     const refundPayment: import('@/types').Payment | null = overpaid > 0
@@ -719,7 +726,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const room = state.rooms.find((r) => r.id === b.roomId)
     const actualCheckOut = addNightsISO(b.checkIn, actualNights)
     const newTotal = room
-      ? calcBookingTotal(room.type, b.checkIn, actualCheckOut, room.pricePerNight)
+      ? calcBookingTotal(room.type, b.checkIn, actualCheckOut, room.pricePerNight, get().dynamicPricing)
       : Math.round((b.nights > 0 ? b.totalAmount / b.nights : b.totalAmount) * actualNights)
     const now = new Date().toISOString()
     // จ่ายมาเกินยอดใหม่ → คืนเงินส่วนเกิน (บันทึก payment ติดลบ เหมือน flow ยกเลิก)
@@ -1485,6 +1492,57 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       })
     }
   },
+
+  // ===== Seasonal / dynamic pricing actions =====
+  addPricingRule: (rule) => {
+    const name = rule.name?.trim()
+    if (!name) return { ok: false, error: 'ต้องระบุชื่อช่วงราคา' }
+    if (!rule.startDate || !rule.endDate) return { ok: false, error: 'ต้องระบุวันเริ่มและวันสิ้นสุด' }
+    if (rule.startDate > rule.endDate) return { ok: false, error: 'วันเริ่มต้องไม่หลังวันสิ้นสุด' }
+    if (!(rule.price > 0)) return { ok: false, error: 'ราคาต้องมากกว่า 0' }
+    const newRule: DynamicPricing = {
+      ...rule, name, id: `dp${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      description: rule.description?.trim() || undefined,
+    }
+    set((s) => ({ dynamicPricing: [...s.dynamicPricing, newRule] }))
+    get().logAudit({
+      category: 'room', action: 'add-rate',
+      summary: `เพิ่มช่วงราคา "${name}" (${getRoomTypeLabel(rule.roomType)}) ${rule.startDate}–${rule.endDate} = ${rule.price.toLocaleString()} บาท/คืน`,
+      entityId: newRule.id,
+    })
+    return { ok: true }
+  },
+
+  updatePricingRule: (id, updates) => {
+    const existing = get().dynamicPricing.find((r) => r.id === id)
+    if (!existing) return { ok: false, error: 'ไม่พบช่วงราคานี้' }
+    const merged = { ...existing, ...updates }
+    if (updates.name !== undefined && !updates.name.trim()) return { ok: false, error: 'ต้องระบุชื่อช่วงราคา' }
+    if (merged.startDate > merged.endDate) return { ok: false, error: 'วันเริ่มต้องไม่หลังวันสิ้นสุด' }
+    if (!(merged.price > 0)) return { ok: false, error: 'ราคาต้องมากกว่า 0' }
+    const clean: Partial<DynamicPricing> = { ...updates }
+    if (updates.name !== undefined) clean.name = updates.name.trim()
+    if (updates.description !== undefined) clean.description = updates.description.trim() || undefined
+    set((s) => ({ dynamicPricing: s.dynamicPricing.map((r) => (r.id === id ? { ...r, ...clean } : r)) }))
+    get().logAudit({
+      category: 'room', action: 'update-rate',
+      summary: `แก้ช่วงราคา "${merged.name}" (${getRoomTypeLabel(merged.roomType)}) ${merged.startDate}–${merged.endDate} = ${merged.price.toLocaleString()} บาท/คืน`,
+      entityId: id,
+    })
+    return { ok: true }
+  },
+
+  deletePricingRule: (id) => {
+    const target = get().dynamicPricing.find((r) => r.id === id)
+    set((s) => ({ dynamicPricing: s.dynamicPricing.filter((r) => r.id !== id) }))
+    if (target) {
+      get().logAudit({
+        category: 'room', action: 'delete-rate',
+        summary: `ลบช่วงราคา "${target.name}" (${getRoomTypeLabel(target.roomType)})`,
+        entityId: id,
+      })
+    }
+  },
 }), {
   name: 'hotel-pms-storage',
   storage: createJSONStorage(() => supabaseStorage),
@@ -1506,6 +1564,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     corporateAccounts: state.corporateAccounts,
     corporateTransactions: state.corporateTransactions,
     bookingAddOns: state.bookingAddOns,
+    dynamicPricing: state.dynamicPricing,
   }),
   // blob เก่าอาจยังพก slice ที่ย้ายแล้วติดมา — บังคับใช้ค่าใน current (ปล่อยให้ seed จากตารางเติม)
   // ไม่งั้นแถวที่ลบไป (soft-delete) จะถูก rehydrate จาก blob เก่ามาชุบชีวิตก่อน seed ทับ

@@ -34,7 +34,7 @@ const addOnStatusLabels: Record<string, string> = {
 
 export default function BookingDetailPage() {
   const { id } = useParams<{ id: string }>()
-  const { bookings, rooms, guests, addOnItems, bookingAddOns, invoices, corporateAccounts, updateBookingStatus, cancelBooking, requestAddOn, cancelAddOn, recordPayment, extendBooking, moveBooking, updateBooking, adjustForEarlyCheckout, logAudit } = useHotelStore()
+  const { bookings, rooms, guests, addOnItems, bookingAddOns, invoices, corporateAccounts, dynamicPricing, updateBookingStatus, cancelBooking, requestAddOn, cancelAddOn, recordPayment, extendBooking, moveBooking, updateBooking, adjustForEarlyCheckout, logAudit } = useHotelStore()
   const { user } = useAuthStore()
   const confirm = useConfirm()
   // คืนเงิน (cancel/early-checkout/cancel-addon/move-reprice) ต้องมีสิทธิ์การเงิน
@@ -159,7 +159,7 @@ export default function BookingDetailPage() {
     if (!newRoomId || !booking) return
     const newRoom = rooms.find((x) => x.id === newRoomId)
     if (!newRoom) return
-    const newTotal = calcBookingTotal(newRoom.type, booking.checkIn, booking.checkOut, newRoom.pricePerNight)
+    const newTotal = calcBookingTotal(newRoom.type, booking.checkIn, booking.checkOut, newRoom.pricePerNight, dynamicPricing)
     // ราคาต่างจากยอดเดิม → ถามก่อนว่าจะปรับราคาใหม่หรือคงราคาเดิม
     if (newTotal !== booking.totalAmount) {
       setMoveReprice({ roomId: newRoomId, roomNumber: newRoom.number, oldTotal: booking.totalAmount, newTotal })

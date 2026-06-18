@@ -12,7 +12,7 @@ import { useFocusTrap } from '@/lib/useFocusTrap'
 import { toast } from 'sonner'
 
 export default function FrontDeskPage() {
-  const { rooms, guests, bookings, bookingAddOns, updateBookingStatus, createBooking, recordPayment, adjustForEarlyCheckout, logAudit } = useHotelStore()
+  const { rooms, guests, bookings, bookingAddOns, dynamicPricing, updateBookingStatus, createBooking, recordPayment, adjustForEarlyCheckout, logAudit } = useHotelStore()
   const { user } = useAuthStore()
   // คืนเงิน (ปรับยอด early-checkout) ต้องมีสิทธิ์การเงิน
   const canRefund = user?.staff.permissions.canManageFinance ?? false
@@ -182,7 +182,7 @@ export default function FrontDeskPage() {
       : undefined
     if (!newGuestMode && !guestId) return
 
-    const total = calcBookingTotal(room.type, checkIn, checkOut, room.pricePerNight)
+    const total = calcBookingTotal(room.type, checkIn, checkOut, room.pricePerNight, dynamicPricing)
     // ชำระเต็ม หรือ มัดจำ (ระบุยอด, clamp ไม่ให้เกินยอดรวม/ติดลบ) — ที่เหลือเป็นยอดค้างชำระ
     const paid = form.payMode === 'deposit' ? Math.min(Math.max(0, form.deposit), total) : total
     const result = createBooking({
@@ -507,7 +507,7 @@ export default function FrontDeskPage() {
                             {(() => {
                               const ci = calendarDateToISO(new Date())
                               const coDate = new Date(); coDate.setDate(coDate.getDate() + form.nights)
-                              const total = calcBookingTotal(room.type, ci, calendarDateToISO(coDate), room.pricePerNight)
+                              const total = calcBookingTotal(room.type, ci, calendarDateToISO(coDate), room.pricePerNight, dynamicPricing)
                               const paid = form.payMode === 'deposit' ? Math.min(Math.max(0, form.deposit), total) : total
                               const due = total - paid
                               return (
