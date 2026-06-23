@@ -8,7 +8,7 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem } from '@/types'
+import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest } from '@/types'
 import { toast } from 'sonner'
 
 const STORE_KEY = 'hotel-pms-storage'
@@ -125,6 +125,32 @@ function addOnItemToRow(a: AddOnItem) {
   }
 }
 
+// แปลงแถว guests (snake_case) → Guest (camelCase)
+function rowToGuest(r: Record<string, unknown>): Guest {
+  return {
+    id: String(r.id),
+    name: String(r.name ?? ''),
+    email: String(r.email ?? ''),
+    phone: String(r.phone ?? ''),
+    nationality: String(r.nationality ?? ''),
+    idNumber: String(r.id_number ?? ''),
+    preferences: (r.preferences ?? {}) as Guest['preferences'],
+    totalStays: Number(r.total_stays ?? 0),
+    totalSpend: Number(r.total_spend ?? 0),
+    joinedAt: String(r.joined_at ?? ''),
+  }
+}
+
+// แปลง Guest → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function guestToRow(g: Guest) {
+  return {
+    id: g.id, name: g.name, email: g.email, phone: g.phone,
+    nationality: g.nationality, id_number: g.idNumber, preferences: g.preferences,
+    total_stays: g.totalStays, total_spend: g.totalSpend, joined_at: g.joinedAt,
+    writer_id: CLIENT_ID,
+  }
+}
+
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -162,12 +188,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           const { _writer, ...envelope } = data
           const incoming = (envelope as { state?: Record<string, unknown> }).state
           if (!incoming) return
-          // auditLogs/expenses/inventory/maintenance/add_on_items ย้ายไปตารางจริงแล้ว — strip ออกจาก full-state sync ของ blob
+          // auditLogs/expenses/inventory/maintenance/add_on_items/guests ย้ายไปตารางจริงแล้ว — strip ออกจาก full-state sync ของ blob
           // (ไม่งั้นจะมาทับ/ชุบชีวิตสิ่งที่ per-table sync เพิ่ง apply → 2 แท็บไม่ตรงกัน)
           const {
             auditLogs: _migAudit, expenses: _migExp,
             inventoryItems: _migInvItems, inventoryTransactions: _migInvTx,
-            maintenanceLogs: _migMaint, addOnItems: _migAddOn,
+            maintenanceLogs: _migMaint, addOnItems: _migAddOn, guests: _migGuests,
             ...rest
           } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
@@ -423,6 +449,45 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
+    // ── guests relational sync (Tier B) — mutable (add/update) + side-effect totalStays/totalSpend ตอนเช็คเอาต์ ──
+    let guestsLive = false
+    type GuestEvent = { id: string; deleted: boolean; guest: Guest }
+    const guestsBuffer: GuestEvent[] = []
+    const applyGuestEvents = (events: GuestEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.guests.map((g) => [g.id, g]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.guest)
+          }
+          return { guests: Array.from(byId.values()) }
+        })
+      )
+    }
+    const guestsChannel = supabase
+      .channel('guests-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'guests' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: GuestEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            guest: rowToGuest(row),
+          }
+          if (!guestsLive) {
+            guestsBuffer.push(ev)
+            return
+          }
+          applyGuestEvents([ev])
+        }
+      )
+      .subscribe()
+
     // ⚠️ ต้อง AWAIT อ่าน app_state ให้เสร็จ "ก่อน" เรียก rehydrate (deterministic ไม่ใช่ race)
     // เหตุผล: rehydrate จะ trigger persist write ครั้งแรก (onRehydrateStorage setState _hasHydrated)
     // ที่ partialize ตัด migrated slice ทิ้งจาก blob. ถ้าอ่านหลัง/พร้อมกับ rehydrate อาจได้ค่าว่าง →
@@ -644,6 +709,47 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       addOnBuffer.length = 0
       addOnLive = true
+
+      // ── seed guests (Tier B) + one-time reconcile จาก blob ──
+      // เหมือน maintenance/add_on_items: ตาราง 001 มี orphan seed (g001–g006) ที่ stale
+      // (blob คือแหล่งจริง — ผู้ใช้แก้โปรไฟล์ + totalStays/totalSpend ขยับจาก checkout สะสมมา)
+      // → everWritten (writer_id) เป็น flag, reconcile จาก bootState (await อ่านก่อน rehydrate = pre-strip การันตี)
+      const { data: gData, error: gErr } = await supabase
+        .from('guests')
+        .select('*')
+        .is('deleted_at', null)
+        .order('name', { ascending: true })
+      if (gErr) {
+        console.error('[guests-sync] seed:', gErr.message)
+      } else {
+        let rows = gData ?? []
+        const everWritten = rows.some((r) => r.writer_id != null)
+        if (!everWritten) {
+          const blobGuests = (bootState.guests ?? []) as Guest[]
+          if (blobGuests.length > 0) {
+            const { error: upErr } = await supabase.from('guests')
+              .upsert(blobGuests.map(guestToRow), { onConflict: 'id' })
+            if (upErr) console.error('[guests-sync] reconcile upsert:', upErr.message)
+          }
+          // soft-delete orphan ที่ blob ไม่มี (รวมกรณี blobGuests ว่าง → เคลียร์ orphan ทั้งหมด)
+          const blobIds = new Set(blobGuests.map((g) => g.id))
+          const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+          if (orphanIds.length > 0) {
+            const { error: delErr } = await supabase.from('guests')
+              .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+              .in('id', orphanIds)
+            if (delErr) console.error('[guests-sync] reconcile soft-delete:', delErr.message)
+          }
+          const re = await supabase
+            .from('guests').select('*').is('deleted_at', null)
+            .order('name', { ascending: true })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ guests: rows.map(rowToGuest) }))
+        if (guestsBuffer.length) applyGuestEvents(guestsBuffer)
+      }
+      guestsBuffer.length = 0
+      guestsLive = true
     })()
 
     return () => {
@@ -654,6 +760,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(txChannel)
       supabase.removeChannel(maintenanceChannel)
       supabase.removeChannel(addOnChannel)
+      supabase.removeChannel(guestsChannel)
     }
   }, [])
 

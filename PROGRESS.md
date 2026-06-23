@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-06-16
+> อัปเดตล่าสุด: 2026-06-24
 
 ---
 
@@ -280,6 +280,17 @@
 - **residual risk (บันทึกชัด):** `app_state` blob ยังเปิด anon (แอปต้องอ่านตอน boot/login) → คนมี public key ยังดึงข้อมูลทั้งก้อนผ่าน blob ได้. ปิด 100% = ต้อง **Supabase Auth จริง** (งานก้อนถัดไป). + P3 ค้าง: receipts bucket list ได้, session ไม่มี expiry/revoke
 - tsc clean (0 errors). ⏳ **NEXT:** push branch + PR เข้า main (gh authed) → **redeploy Vercel = ปลด login พัง** → verify login prod
 
+### 2026-06-24 (Tier B ต่อ — guests cutover, verified)
+ต่อจาก add_on_items → **guests เป็น Tier B ตัวที่ 2** (mutable + side-effect totalStays/totalSpend ตอนเช็คเอาต์) — branch `feat/tierB-guests-migration` (แตกจาก main ที่ sync แล้ว; `feat/seasonal-rate-manager` merged ไปแล้ว #12)
+- **เคสเหมือน maintenance_logs เป๊ะ** (mutable + soft-delete + orphan seed เก่าในตาราง ต้อง reconcile จาก blob) **ต่างตรง side-effect ตอน checkout** + **ไม่มี FK ต้อง drop** (guests ไม่มี FK ขาออก; FK `bookings.guest_id→guests` เป็นฝั่ง parent การ upsert ไม่ละเมิด) + **ไม่มี `deleteGuest` action** (มีแค่ add/update)
+- **DDL `013_guests_realtime.sql`** — ✅ **รันผ่าน MCP execute_sql**: `writer_id` + realtime publication + replica identity full + **เปิด RLS anon กลับ** (012 ปิด orphan guests ไว้) เป็น `select+insert+update` (soft-delete=update, ไม่มี hard delete) ตามแพทเทิร์น active-table ใน 012. verify: has_writer_id=1, relreplident='f', in_realtime=true, 3 policy (no delete)
+- **dual-write** (`lib/store.ts`): helper `reportGuestError`(23505 idempotent)+`guestRow`; `addGuest`=insert, `updateGuest`=patch เฉพาะฟิลด์ที่เปลี่ยน (camel→snake), **checkout side-effect**=จับ closure-var `guestFx` ใน `set()` ของ `updateBookingStatus` (แพทเทิร์น `invFx`/`corpAudit`) แล้ว `.update({total_stays,total_spend,writer_id})` หลัง set(). `extend`/`earlyCheckout`/`cancel` ไม่แตะ guests
+- **per-table realtime** (`AppShell.tsx`): `guests-sync` (event '*', soft-delete→ลบ/อื่นๆ upsert by id) + mapper `rowToGuest`/`guestToRow` + reconcile-from-blob (everWritten guard, bootState await-ก่อน-rehydrate) + เพิ่ม guests ใน app_state-sync strip
+- **blob isolation 4 จุด**: partialize ตัด `guests`, merge บังคับ `current.guests ?? []`, app_state-sync strip, `mergeState` `delete out.guests`
+- **✅ verify ผ่าน browser จริง (CDP→Windows Chrome, ดู [[reference-browser-verify-handle]]):** login admin → AppShell reconcile รัน → /guests render ครบ 6 ราย. **MCP ยืนยัน reconcile ถูกต้อง:** orphan seed เก่า stale (g001 68400/g003 185000/g004 420000) ถูกเขียนทับด้วยค่าจริงจาก blob (g001 5000/g003 5500/g004 2000) ครบ 6 ราย, ทุกแถว writer_id stamped, ไม่มี soft-delete. reconcile upsert (insert+update) สำเร็จ = ยืนยัน RLS write ใหม่ทำงาน (dual-write paths ใช้ .insert/.update เดียวกัน)
+- tsc 0 error · build 22/22 routes ผ่าน. **⏳ ยังไม่ commit/push ตอนเขียนนี้** (working tree: 013 sql + store.ts + AppShell.tsx + supabase-storage.ts + PROGRESS.md)
+- ⏳ **NEXT:** commit + push/PR · Tier B ที่เหลือ: **staff** → **users** (auth) → **corporate** (accounts+tx, drop corp_tx FK→bookings/invoices) → **rooms ท้ายสุด** (พัวพัน updateRoomStatus; ย้ายเสร็จใส่ FK `maintenance_logs.room_id` กลับ)
+
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
 2. **bookings/rooms ยังเป็น blob** (ไม่ได้แยก relational ตามตั้งใจเดิม) — ถ้าจะทำ "ถูก 100%"
@@ -288,7 +299,7 @@
    proper tables + Postgres RPC ให้ checkout/cancel เป็น transaction เดียว = งานใหญ่
 3. **ความปลอดภัย: RLS** — 🔶 **2026-06-18 ทำ interim hardening แล้ว** (branch `security/p1-p2-hardening`, migration 012): ปิด anon บน orphan/PII tables ทั้งหมด + จำกัด active tables + audit_logs insert-only (กันลบกลบรอย) + store-side permission guards. ดู §5 entry 2026-06-18. **เหลือ residual ที่ปิดไม่ได้แบบ anon-only:** `app_state` blob ยังเปิด anon (แอปต้องอ่าน) = ใครมี public key ยังดึงข้อมูลทั้งก้อนผ่าน blob ได้. **ปิด 100% = ต้อง Supabase Auth จริง → `anon`→`authenticated` → per-role RLS → RPC** (งานใหญ่, ก้อนถัดไป). P3 ค้าง: `receipts` bucket ยัง list ได้, session ไม่มี expiry/revoke
 4. ~~รหัสผ่าน plaintext~~ → ✅ (2026-06-15) **hash ด้วย bcrypt แล้ว** (`lib/auth-utils.ts`); blob + ตาราง relational `users` migrate เป็น hash หมด (0 plaintext). export ตัด password อยู่แล้ว. account actions มี audit ครบ. ดูรายละเอียด §5 entry 2026-06-15/16
-5. **VAT 7% ในใบแจ้งหนี้** — ยังไม่ทำ (`tax: 0` ตายตัว) ผู้ใช้ขอเลื่อนไว้ก่อน
+5. ~~**VAT 7% ในใบแจ้งหนี้**~~ → ❌ **ยกเลิก/ไม่ทำ** (2026-06-23) — portfolio demo ข้อมูลปลอม ไม่ต้องใช้ใบกำกับภาษี (`tax: 0` คงไว้)
 6. ~~**accessibility** focus-trap + `<label htmlFor>`~~ → ✅ (2026-06-06) เพิ่ม hook กลาง
    `lib/useFocusTrap.ts` (ขัง Tab/Shift+Tab + Esc ปิด + คืนโฟกัสเดิม + เคารพ autoFocus เดิม)
    ใช้กับ **dialog ทุกตัว** (26 modal ใน 15 ไฟล์): component (Confirm/Checkout/EarlyCheckout/
