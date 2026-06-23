@@ -289,7 +289,18 @@
 - **blob isolation 4 จุด**: partialize ตัด `guests`, merge บังคับ `current.guests ?? []`, app_state-sync strip, `mergeState` `delete out.guests`
 - **✅ verify ผ่าน browser จริง (CDP→Windows Chrome, ดู [[reference-browser-verify-handle]]):** login admin → AppShell reconcile รัน → /guests render ครบ 6 ราย. **MCP ยืนยัน reconcile ถูกต้อง:** orphan seed เก่า stale (g001 68400/g003 185000/g004 420000) ถูกเขียนทับด้วยค่าจริงจาก blob (g001 5000/g003 5500/g004 2000) ครบ 6 ราย, ทุกแถว writer_id stamped, ไม่มี soft-delete. reconcile upsert (insert+update) สำเร็จ = ยืนยัน RLS write ใหม่ทำงาน (dual-write paths ใช้ .insert/.update เดียวกัน)
 - tsc 0 error · build 22/22 routes ผ่าน. **⏳ ยังไม่ commit/push ตอนเขียนนี้** (working tree: 013 sql + store.ts + AppShell.tsx + supabase-storage.ts + PROGRESS.md)
-- ⏳ **NEXT:** commit + push/PR · Tier B ที่เหลือ: **staff** → **users** (auth) → **corporate** (accounts+tx, drop corp_tx FK→bookings/invoices) → **rooms ท้ายสุด** (พัวพัน updateRoomStatus; ย้ายเสร็จใส่ FK `maintenance_logs.room_id` กลับ)
+- ✅ **commit `7012558` + push + PR #13** (base main, ยังไม่ merge — รอผู้ใช้กด = deploy prod)
+
+### 2026-06-24 (Tier B ต่อ — staff cutover, verified)
+ต่อจาก guests → **staff เป็น Tier B ตัวที่ 3** (mutable CRUD: add/update/**delete**) — branch `feat/tierB-staff-migration` (ซ้อนบน guests branch; base PR = guests branch, รอ #13 merge แล้ว rebase ลง main)
+- **ง่ายกว่า guests** (ไม่มี side-effect ตอน checkout) แต่ **มี `deleteStaff`** → ทำเป็น **soft-delete** ในตาราง (blob ยัง hard-filter; ตารางเก็บ deleted_at กัน §3c resurrection + history)
+- **ไม่มี FK ต้อง drop:** staff ไม่มี FK ขาออก; FK `users.staff_id→staff` เป็นฝั่ง parent (upsert/soft-delete ไม่ละเมิด; staff ย้ายก่อน users → ตอน users ย้าย parent มีครบ)
+- **DDL `014_staff_realtime.sql`** — ✅ **รันผ่าน MCP**: writer_id + realtime + replica identity full + RLS anon select/insert/update (no delete). verify: has_writer_id=1, relreplident='f', in_realtime=true, 3 policy
+- **dual-write** (`lib/store.ts`): helper `reportStaffError`+`staffRow`; addStaff=insert, updateStaff=patch เฉพาะฟิลด์เปลี่ยน (camel→snake; permissions jsonb, hireDate→hire_date, isActive→is_active), deleteStaff=soft-delete. permission guard `canManageStaff` + audit เดิมคงไว้
+- **per-table realtime** (`AppShell.tsx`): `staff-sync` + mapper `rowToStaff`/`staffToRow` + reconcile-from-blob (everWritten guard, bootState) + เพิ่ม staff ใน app_state-sync strip
+- **blob isolation 4 จุด**: partialize ตัด staff, merge `current.staff ?? []`, app_state-sync strip, `mergeState delete out.staff`
+- **✅ verify ผ่าน browser (CDP→Chrome):** login admin → reconcile รัน → /staff render ครบ 6 ราย; MCP ยืนยันทุกแถว writer_id stamped, ไม่มี soft-delete, ค่าตรง (blob==table อยู่แล้ว ไม่มี divergence). tsc 0 / build 22/22
+- ⏳ **NEXT:** commit + push/PR (stacked) · Tier B ที่เหลือ: **users** (auth — mutable + login เทียบ blob→ต้องระวัง) → **corporate** (accounts+tx, drop corp_tx FK→bookings/invoices) → **rooms ท้ายสุด** (พัวพัน updateRoomStatus; ย้ายเสร็จใส่ FK `maintenance_logs.room_id` กลับ)
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)

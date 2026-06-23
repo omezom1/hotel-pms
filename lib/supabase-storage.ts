@@ -132,6 +132,7 @@ function mergeState(
   delete out.maintenanceLogs
   delete out.addOnItems
   delete out.guests
+  delete out.staff
   return out
 }
 
