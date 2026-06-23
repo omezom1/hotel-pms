@@ -99,6 +99,21 @@ function guestRow(g: Guest) {
   }
 }
 
+// dual-write helper สำหรับ staff (Tier B) — mutable + soft-delete (แพทเทิร์น expenses/maintenance)
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportStaffError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('staff write', error.message)
+}
+
+// แปลง Staff → row (snake_case) สำหรับ insert (+ writer_id echo key)
+function staffRow(s: Staff) {
+  return {
+    id: s.id, name: s.name, role: s.role, email: s.email, phone: s.phone,
+    avatar: s.avatar ?? null, permissions: s.permissions,
+    hire_date: s.hireDate, is_active: s.isActive, writer_id: CLIENT_ID,
+  }
+}
+
 interface HotelStore {
   rooms: Room[]
   guests: Guest[]
@@ -1232,7 +1247,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   addStaff: (staffData) => {
     if (!hasPerm('canManageStaff')) { console.warn('[security] addStaff ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return '' }
     const id = `s${Date.now()}`
-    set((state) => ({ staff: [...state.staff, { ...staffData, id }] }))
+    const newStaff: Staff = { ...staffData, id }
+    set((state) => ({ staff: [...state.staff, newStaff] }))
+    // dual-write: insert ขึ้นตาราง staff (Tier B)
+    void supabase.from('staff').insert(staffRow(newStaff)).then(reportStaffError)
     get().logAudit({
       category: 'auth', action: 'add-staff',
       summary: `เพิ่มพนักงาน "${staffData.name}" (${staffData.role})`, entityId: id,
@@ -1246,6 +1264,17 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     set((state) => ({
       staff: state.staff.map((s) => (s.id === id ? { ...s, ...updates } : s)),
     }))
+    // dual-write: patch เฉพาะฟิลด์ที่เปลี่ยน (camel→snake) + writer_id echo key
+    const patch: Record<string, unknown> = { writer_id: CLIENT_ID }
+    if (updates.name !== undefined) patch.name = updates.name
+    if (updates.role !== undefined) patch.role = updates.role
+    if (updates.email !== undefined) patch.email = updates.email
+    if (updates.phone !== undefined) patch.phone = updates.phone
+    if (updates.avatar !== undefined) patch.avatar = updates.avatar ?? null
+    if (updates.permissions !== undefined) patch.permissions = updates.permissions
+    if (updates.hireDate !== undefined) patch.hire_date = updates.hireDate
+    if (updates.isActive !== undefined) patch.is_active = updates.isActive
+    void supabase.from('staff').update(patch).eq('id', id).then(reportStaffError)
     const roleChanged = updates.role !== undefined && updates.role !== prev?.role
     const permsChanged = updates.permissions !== undefined
     const detail = [
@@ -1263,6 +1292,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (!hasPerm('canManageStaff')) { console.warn('[security] deleteStaff ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return }
     const target = get().staff.find((s) => s.id === id)
     set((state) => ({ staff: state.staff.filter((s) => s.id !== id) }))
+    // dual-write: soft-delete (ไม่ลบแถวจริง — กัน §3c resurrection + เก็บ history)
+    void supabase.from('staff')
+      .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+      .eq('id', id).then(reportStaffError)
     get().logAudit({
       category: 'auth', action: 'delete-staff',
       summary: `ลบพนักงาน "${target?.name ?? id}"`, entityId: id,
@@ -1598,7 +1631,6 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     bookings: state.bookings,
     invoices: state.invoices,
     housekeepingTasks: state.housekeepingTasks,
-    staff: state.staff,
     users: state.users,
     corporateAccounts: state.corporateAccounts,
     corporateTransactions: state.corporateTransactions,
@@ -1618,6 +1650,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       maintenanceLogs: current.maintenanceLogs ?? [],
       addOnItems: current.addOnItems ?? [],
       guests: current.guests ?? [],
+      staff: current.staff ?? [],
     }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading
