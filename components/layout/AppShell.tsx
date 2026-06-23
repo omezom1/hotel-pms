@@ -8,7 +8,7 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest } from '@/types'
+import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff } from '@/types'
 import { toast } from 'sonner'
 
 const STORE_KEY = 'hotel-pms-storage'
@@ -151,6 +151,30 @@ function guestToRow(g: Guest) {
   }
 }
 
+// แปลงแถว staff (snake_case) → Staff (camelCase)
+function rowToStaff(r: Record<string, unknown>): Staff {
+  return {
+    id: String(r.id),
+    name: String(r.name ?? ''),
+    role: r.role as Staff['role'],
+    email: String(r.email ?? ''),
+    phone: String(r.phone ?? ''),
+    avatar: r.avatar != null ? String(r.avatar) : undefined,
+    permissions: (r.permissions ?? {}) as Staff['permissions'],
+    hireDate: String(r.hire_date ?? ''),
+    isActive: Boolean(r.is_active),
+  }
+}
+
+// แปลง Staff → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function staffToRow(s: Staff) {
+  return {
+    id: s.id, name: s.name, role: s.role, email: s.email, phone: s.phone,
+    avatar: s.avatar ?? null, permissions: s.permissions,
+    hire_date: s.hireDate, is_active: s.isActive, writer_id: CLIENT_ID,
+  }
+}
+
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -194,6 +218,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             auditLogs: _migAudit, expenses: _migExp,
             inventoryItems: _migInvItems, inventoryTransactions: _migInvTx,
             maintenanceLogs: _migMaint, addOnItems: _migAddOn, guests: _migGuests,
+            staff: _migStaff,
             ...rest
           } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
@@ -488,6 +513,45 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
+    // ── staff relational sync (Tier B) — mutable CRUD (add/update/delete=soft-delete) ──
+    let staffLive = false
+    type StaffEvent = { id: string; deleted: boolean; staff: Staff }
+    const staffBuffer: StaffEvent[] = []
+    const applyStaffEvents = (events: StaffEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.staff.map((st) => [st.id, st]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.staff)
+          }
+          return { staff: Array.from(byId.values()) }
+        })
+      )
+    }
+    const staffChannel = supabase
+      .channel('staff-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'staff' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: StaffEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            staff: rowToStaff(row),
+          }
+          if (!staffLive) {
+            staffBuffer.push(ev)
+            return
+          }
+          applyStaffEvents([ev])
+        }
+      )
+      .subscribe()
+
     // ⚠️ ต้อง AWAIT อ่าน app_state ให้เสร็จ "ก่อน" เรียก rehydrate (deterministic ไม่ใช่ race)
     // เหตุผล: rehydrate จะ trigger persist write ครั้งแรก (onRehydrateStorage setState _hasHydrated)
     // ที่ partialize ตัด migrated slice ทิ้งจาก blob. ถ้าอ่านหลัง/พร้อมกับ rehydrate อาจได้ค่าว่าง →
@@ -750,6 +814,45 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       guestsBuffer.length = 0
       guestsLive = true
+
+      // ── seed staff (Tier B) + one-time reconcile จาก blob ──
+      // เหมือน guests: ตาราง 001 มี orphan seed (s001–s006) → everWritten (writer_id) เป็น flag,
+      // reconcile จาก bootState (await อ่านก่อน rehydrate = pre-strip การันตี)
+      const { data: stData, error: stErr } = await supabase
+        .from('staff')
+        .select('*')
+        .is('deleted_at', null)
+        .order('id', { ascending: true })
+      if (stErr) {
+        console.error('[staff-sync] seed:', stErr.message)
+      } else {
+        let rows = stData ?? []
+        const everWritten = rows.some((r) => r.writer_id != null)
+        if (!everWritten) {
+          const blobStaff = (bootState.staff ?? []) as Staff[]
+          if (blobStaff.length > 0) {
+            const { error: upErr } = await supabase.from('staff')
+              .upsert(blobStaff.map(staffToRow), { onConflict: 'id' })
+            if (upErr) console.error('[staff-sync] reconcile upsert:', upErr.message)
+          }
+          const blobIds = new Set(blobStaff.map((s) => s.id))
+          const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+          if (orphanIds.length > 0) {
+            const { error: delErr } = await supabase.from('staff')
+              .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+              .in('id', orphanIds)
+            if (delErr) console.error('[staff-sync] reconcile soft-delete:', delErr.message)
+          }
+          const re = await supabase
+            .from('staff').select('*').is('deleted_at', null)
+            .order('id', { ascending: true })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ staff: rows.map(rowToStaff) }))
+        if (staffBuffer.length) applyStaffEvents(staffBuffer)
+      }
+      staffBuffer.length = 0
+      staffLive = true
     })()
 
     return () => {
@@ -761,6 +864,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(maintenanceChannel)
       supabase.removeChannel(addOnChannel)
       supabase.removeChannel(guestsChannel)
+      supabase.removeChannel(staffChannel)
     }
   }, [])
 
