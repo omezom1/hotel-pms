@@ -83,6 +83,22 @@ function maintLogRow(log: MaintenanceLog) {
   }
 }
 
+// dual-write helper สำหรับ guests (Tier B) — mutable + side-effect totalStays/totalSpend ตอนเช็คเอาต์
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportGuestError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('guest write', error.message)
+}
+
+// แปลง Guest → row (snake_case) สำหรับ insert (+ writer_id echo key)
+function guestRow(g: Guest) {
+  return {
+    id: g.id, name: g.name, email: g.email, phone: g.phone,
+    nationality: g.nationality, id_number: g.idNumber, preferences: g.preferences,
+    total_stays: g.totalStays, total_spend: g.totalSpend, joined_at: g.joinedAt,
+    writer_id: CLIENT_ID,
+  }
+}
+
 interface HotelStore {
   rooms: Room[]
   guests: Guest[]
@@ -297,6 +313,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   updateBookingStatus: (bookingId, status) => {
     // จับ corporate auto-charge ที่เกิดตอนเช็คเอาต์ เพื่อ log audit หลัง set() (เงินขยับต้องมีร่องรอย)
     let corpAudit: { amount: number; company: string } | null = null
+    // จับสถิติแขกที่ขยับตอนเช็คเอาต์ (totalStays/totalSpend) เพื่อ dual-write ขึ้นตาราง guests หลัง set() (Tier B)
+    let guestFx: { id: string; totalStays: number; totalSpend: number } | null = null
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -463,11 +481,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       // 6) อัพเดทสถิติแขก — นับเฉพาะที่จ่ายเงินจริง (paid) เพื่อไม่ให้ totalSpend เฟ้อเมื่อ corp credit ไม่พอ
       let updatedGuests = state.guests
       if (booking.guestId) {
-        updatedGuests = state.guests.map((g) =>
-          g.id === booking.guestId
-            ? { ...g, totalStays: g.totalStays + 1, totalSpend: g.totalSpend + newPaidAmount }
-            : g
-        )
+        updatedGuests = state.guests.map((g) => {
+          if (g.id !== booking.guestId) return g
+          const next = { ...g, totalStays: g.totalStays + 1, totalSpend: g.totalSpend + newPaidAmount }
+          guestFx = { id: g.id, totalStays: next.totalStays, totalSpend: next.totalSpend }
+          return next
+        })
       }
 
       return {
@@ -488,6 +507,14 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         summary: `ตัดเครดิตองค์กรอัตโนมัติ ${ca.amount.toLocaleString()} บาท (${ca.company}) เมื่อเช็คเอาต์`,
         entityId: bookingId,
       })
+    }
+    // สถิติแขกขยับตอนเช็คเอาต์ → dual-write ขึ้นตาราง guests (Tier B)
+    // TS ไม่ widen guestFx ที่ assign ใน closure → cast คืน type ก่อน truthiness guard
+    const gfx = guestFx as { id: string; totalStays: number; totalSpend: number } | null
+    if (gfx) {
+      void supabase.from('guests')
+        .update({ total_stays: gfx.totalStays, total_spend: gfx.totalSpend, writer_id: CLIENT_ID })
+        .eq('id', gfx.id).then(reportGuestError)
     }
   },
 
@@ -761,16 +788,29 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
 
   addGuest: (guestData) => {
     const id = `g${Date.now()}`
+    const newGuest: Guest = { ...guestData, id }
     set((state) => ({
-      guests: [...state.guests, { ...guestData, id }],
+      guests: [...state.guests, newGuest],
     }))
+    // dual-write: insert ขึ้นตาราง guests (Tier B)
+    void supabase.from('guests').insert(guestRow(newGuest)).then(reportGuestError)
     return id
   },
 
-  updateGuest: (guestId, updates) =>
+  updateGuest: (guestId, updates) => {
     set((state) => ({
       guests: state.guests.map((g) => (g.id === guestId ? { ...g, ...updates } : g)),
-    })),
+    }))
+    // dual-write: patch เฉพาะฟิลด์ที่เปลี่ยน (camel→snake) + writer_id echo key
+    const patch: Record<string, unknown> = { writer_id: CLIENT_ID }
+    if (updates.name !== undefined) patch.name = updates.name
+    if (updates.email !== undefined) patch.email = updates.email
+    if (updates.phone !== undefined) patch.phone = updates.phone
+    if (updates.nationality !== undefined) patch.nationality = updates.nationality
+    if (updates.idNumber !== undefined) patch.id_number = updates.idNumber
+    if (updates.preferences !== undefined) patch.preferences = updates.preferences
+    void supabase.from('guests').update(patch).eq('id', guestId).then(reportGuestError)
+  },
 
   addHousekeepingTask: (taskData) =>
     set((state) => ({
@@ -1550,12 +1590,11 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
   // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
   skipHydration: true,
-  // ── relational migration: auditLogs (Phase 1) + expenses/inventory/maintenance (Tier A) + add_on_items (Tier B) ย้ายไปตารางจริงแล้ว ──
+  // ── relational migration: auditLogs (Phase 1) + expenses/inventory/maintenance (Tier A) + add_on_items/guests (Tier B) ย้ายไปตารางจริงแล้ว ──
   // partialize = ตัด slice เหล่านี้ออกจากสิ่งที่เขียนลง blob → ตารางเป็นเจ้าของคนเดียว
   // (กัน app_state full-state sync / union-merge มาทับ-หรือชุบชีวิต สิ่งที่ per-table sync เพิ่ง apply)
   partialize: (state) => ({
     rooms: state.rooms,
-    guests: state.guests,
     bookings: state.bookings,
     invoices: state.invoices,
     housekeepingTasks: state.housekeepingTasks,
@@ -1578,6 +1617,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       inventoryTransactions: current.inventoryTransactions ?? [],
       maintenanceLogs: current.maintenanceLogs ?? [],
       addOnItems: current.addOnItems ?? [],
+      guests: current.guests ?? [],
     }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading

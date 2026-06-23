@@ -131,6 +131,7 @@ function mergeState(
   delete out.inventoryTransactions
   delete out.maintenanceLogs
   delete out.addOnItems
+  delete out.guests
   return out
 }
 
