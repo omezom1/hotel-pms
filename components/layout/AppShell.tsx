@@ -8,7 +8,7 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff, User } from '@/types'
+import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff, User, CorporateAccount, CorporateTransaction } from '@/types'
 import { hashPassword } from '@/lib/auth-utils'
 import { toast } from 'sonner'
 
@@ -195,6 +195,61 @@ function userToRow(u: User) {
   }
 }
 
+// แปลงแถว corporate_accounts (snake_case) → CorporateAccount (camelCase)
+function rowToCorpAccount(r: Record<string, unknown>): CorporateAccount {
+  return {
+    id: String(r.id),
+    companyName: String(r.company_name ?? ''),
+    contactPerson: String(r.contact_person ?? ''),
+    contactPhone: String(r.contact_phone ?? ''),
+    contactEmail: String(r.contact_email ?? ''),
+    taxId: r.tax_id != null ? String(r.tax_id) : undefined,
+    address: r.address != null ? String(r.address) : undefined,
+    totalDeposited: Number(r.total_deposited ?? 0),
+    totalUsed: Number(r.total_used ?? 0),
+    availableBalance: Number(r.available_balance ?? 0),
+    status: r.status as CorporateAccount['status'],
+    createdAt: String(r.created_at ?? ''),
+    notes: r.notes != null ? String(r.notes) : undefined,
+  }
+}
+// แปลง CorporateAccount → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function corpAccountToRow(a: CorporateAccount) {
+  return {
+    id: a.id, company_name: a.companyName, contact_person: a.contactPerson,
+    contact_phone: a.contactPhone, contact_email: a.contactEmail,
+    tax_id: a.taxId ?? null, address: a.address ?? null,
+    total_deposited: a.totalDeposited, total_used: a.totalUsed,
+    available_balance: a.availableBalance, status: a.status,
+    notes: a.notes ?? null, writer_id: CLIENT_ID,
+  }
+}
+// แปลงแถว corporate_transactions (snake_case) → CorporateTransaction (camelCase)
+function rowToCorpTx(r: Record<string, unknown>): CorporateTransaction {
+  return {
+    id: String(r.id),
+    corporateAccountId: String(r.corporate_account_id ?? ''),
+    type: r.type as CorporateTransaction['type'],
+    amount: Number(r.amount ?? 0),
+    balanceBefore: Number(r.balance_before ?? 0),
+    balanceAfter: Number(r.balance_after ?? 0),
+    bookingId: r.booking_id != null ? String(r.booking_id) : undefined,
+    invoiceId: r.invoice_id != null ? String(r.invoice_id) : undefined,
+    performedBy: String(r.performed_by ?? ''),
+    date: String(r.date ?? ''),
+    notes: r.notes != null ? String(r.notes) : undefined,
+  }
+}
+// แปลง CorporateTransaction → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function corpTxToRow(t: CorporateTransaction) {
+  return {
+    id: t.id, corporate_account_id: t.corporateAccountId, type: t.type, amount: t.amount,
+    balance_before: t.balanceBefore, balance_after: t.balanceAfter,
+    booking_id: t.bookingId ?? null, invoice_id: t.invoiceId ?? null,
+    performed_by: t.performedBy, date: t.date, notes: t.notes ?? null, writer_id: CLIENT_ID,
+  }
+}
+
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -239,6 +294,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             inventoryItems: _migInvItems, inventoryTransactions: _migInvTx,
             maintenanceLogs: _migMaint, addOnItems: _migAddOn, guests: _migGuests,
             staff: _migStaff, users: _migUsers,
+            corporateAccounts: _migCorpAcc, corporateTransactions: _migCorpTx,
             ...rest
           } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
@@ -612,6 +668,73 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
+    // ── corporate_accounts relational sync (Tier B) — mutable + soft-delete (เหมือน guests/staff) ──
+    let corpAccLive = false
+    type CorpAccEvent = { id: string; deleted: boolean; account: CorporateAccount }
+    const corpAccBuffer: CorpAccEvent[] = []
+    const applyCorpAccEvents = (events: CorpAccEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.corporateAccounts.map((a) => [a.id, a]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.account)
+          }
+          return { corporateAccounts: Array.from(byId.values()) }
+        })
+      )
+    }
+    const corpAccChannel = supabase
+      .channel('corporate_accounts-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'corporate_accounts' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return
+          const ev: CorpAccEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            account: rowToCorpAccount(row),
+          }
+          if (!corpAccLive) { corpAccBuffer.push(ev); return }
+          applyCorpAccEvents([ev])
+        }
+      )
+      .subscribe()
+
+    // ── corporate_transactions relational sync (Tier B) — append-only ledger (เหมือน inventory_transactions) ──
+    let corpTxLive = false
+    const corpTxBuffer: CorporateTransaction[] = []
+    const upsertCorpTx = (incoming: CorporateTransaction[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map<string, CorporateTransaction>()
+          for (const t of [...incoming, ...s.corporateTransactions]) {
+            if (!byId.has(t.id)) byId.set(t.id, t)
+          }
+          const merged = Array.from(byId.values()).sort((a, b) => (a.date < b.date ? 1 : -1))
+          return { corporateTransactions: merged }
+        })
+      )
+    }
+    const corpTxChannel = supabase
+      .channel('corporate_transactions-sync')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'corporate_transactions' },
+        (payload) => {
+          const row = payload.new as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return
+          const tx = rowToCorpTx(row)
+          if (!corpTxLive) { corpTxBuffer.push(tx); return }
+          upsertCorpTx([tx])
+        }
+      )
+      .subscribe()
+
     // ⚠️ ต้อง AWAIT อ่าน app_state ให้เสร็จ "ก่อน" เรียก rehydrate (deterministic ไม่ใช่ race)
     // เหตุผล: rehydrate จะ trigger persist write ครั้งแรก (onRehydrateStorage setState _hasHydrated)
     // ที่ partialize ตัด migrated slice ทิ้งจาก blob. ถ้าอ่านหลัง/พร้อมกับ rehydrate อาจได้ค่าว่าง →
@@ -959,6 +1082,77 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       usersBuffer.length = 0
       usersLive = true
+
+      // ── seed corporate_accounts (Tier B) + one-time reconcile จาก blob ──
+      // เหมือน guests/staff: ตาราง 001 มี orphan seed (corp001-003) → everWritten flag, reconcile จาก bootState (pre-strip)
+      // corpEverWritten ใช้ร่วมกับ transactions (append-only ledger stamp ไม่ได้ → gate ด้วย accounts ที่ stamp ได้)
+      let corpEverWritten = false
+      const { data: caData, error: caErr } = await supabase
+        .from('corporate_accounts')
+        .select('*')
+        .is('deleted_at', null)
+        .order('id', { ascending: true })
+      if (caErr) {
+        console.error('[corporate-accounts-sync] seed:', caErr.message)
+      } else {
+        let rows = caData ?? []
+        corpEverWritten = rows.some((r) => r.writer_id != null)
+        if (!corpEverWritten) {
+          const blobAccounts = (bootState.corporateAccounts ?? []) as CorporateAccount[]
+          if (blobAccounts.length > 0) {
+            const { error: upErr } = await supabase.from('corporate_accounts')
+              .upsert(blobAccounts.map(corpAccountToRow), { onConflict: 'id' })
+            if (upErr) console.error('[corporate-accounts-sync] reconcile upsert:', upErr.message)
+          }
+          const blobIds = new Set(blobAccounts.map((a) => a.id))
+          const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+          if (orphanIds.length > 0) {
+            const { error: delErr } = await supabase.from('corporate_accounts')
+              .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+              .in('id', orphanIds)
+            if (delErr) console.error('[corporate-accounts-sync] reconcile soft-delete:', delErr.message)
+          }
+          const re = await supabase
+            .from('corporate_accounts').select('*').is('deleted_at', null)
+            .order('id', { ascending: true })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ corporateAccounts: rows.map(rowToCorpAccount) }))
+        if (corpAccBuffer.length) applyCorpAccEvents(corpAccBuffer)
+      }
+      corpAccBuffer.length = 0
+      corpAccLive = true
+
+      // ── seed corporate_transactions (ledger) + one-time backfill (หลัง accounts เพราะ FK corp_tx→accounts) ──
+      // append-only (RLS = insert+select, ไม่มี update/delete กันแก้ประวัติการเงิน) → stamp orphan ไม่ได้
+      // จึง gate ด้วย corpEverWritten (จาก accounts ที่ stamp ได้) + insert-only (ignoreDuplicates) กัน RLS-deny
+      // บน ON CONFLICT UPDATE. orphan seed (corp tx เดิม) ที่ id ซ้ำถูกเก็บไว้ (= authoritative หลัง blob strip)
+      const { data: ctData, error: ctErr } = await supabase
+        .from('corporate_transactions')
+        .select('*')
+        .order('date', { ascending: false })
+      if (ctErr) {
+        console.error('[corporate-tx-sync] seed:', ctErr.message)
+      } else {
+        let rows = ctData ?? []
+        if (!corpEverWritten) {
+          const blobTx = (bootState.corporateTransactions ?? []) as CorporateTransaction[]
+          if (blobTx.length > 0) {
+            // INSERT ... ON CONFLICT DO NOTHING (ต้องการแค่ INSERT policy) — insert tx ที่ยังไม่มี, ข้ามที่ id ซ้ำ
+            const { error: upErr } = await supabase.from('corporate_transactions')
+              .upsert(blobTx.map(corpTxToRow), { onConflict: 'id', ignoreDuplicates: true })
+            if (upErr) console.error('[corporate-tx-sync] backfill insert:', upErr.message)
+          }
+          const re = await supabase
+            .from('corporate_transactions').select('*')
+            .order('date', { ascending: false })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ corporateTransactions: rows.map(rowToCorpTx) }))
+        if (corpTxBuffer.length) upsertCorpTx(corpTxBuffer)
+      }
+      corpTxBuffer.length = 0
+      corpTxLive = true
     })()
 
     return () => {
@@ -972,6 +1166,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(guestsChannel)
       supabase.removeChannel(staffChannel)
       supabase.removeChannel(usersChannel)
+      supabase.removeChannel(corpAccChannel)
+      supabase.removeChannel(corpTxChannel)
     }
   }, [])
 

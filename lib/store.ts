@@ -128,6 +128,38 @@ function userRow(u: User) {
   }
 }
 
+// dual-write helpers สำหรับ corporate (Tier B) — accounts = mutable+soft-delete, transactions = append-only ledger
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportCorporateError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('corporate write', error.message)
+}
+function corpAccountRow(a: CorporateAccount) {
+  return {
+    id: a.id, company_name: a.companyName, contact_person: a.contactPerson,
+    contact_phone: a.contactPhone, contact_email: a.contactEmail,
+    tax_id: a.taxId ?? null, address: a.address ?? null,
+    total_deposited: a.totalDeposited, total_used: a.totalUsed,
+    available_balance: a.availableBalance, status: a.status,
+    notes: a.notes ?? null, writer_id: CLIENT_ID,
+  }
+}
+function corpTxRow(t: CorporateTransaction) {
+  return {
+    id: t.id, corporate_account_id: t.corporateAccountId, type: t.type, amount: t.amount,
+    balance_before: t.balanceBefore, balance_after: t.balanceAfter,
+    booking_id: t.bookingId ?? null, invoice_id: t.invoiceId ?? null,
+    performed_by: t.performedBy, date: t.date, notes: t.notes ?? null, writer_id: CLIENT_ID,
+  }
+}
+// push account update (balance หรือ profile เปลี่ยน) → เขียน mutable fields ทั้งชุดทับด้วย id
+function pushCorpAccount(a: CorporateAccount) {
+  const { id, ...rest } = corpAccountRow(a)
+  void supabase.from('corporate_accounts').update(rest).eq('id', id).then(reportCorporateError)
+}
+function pushCorpTx(t: CorporateTransaction) {
+  void supabase.from('corporate_transactions').insert(corpTxRow(t)).then(reportCorporateError)
+}
+
 interface HotelStore {
   rooms: Room[]
   guests: Guest[]
@@ -344,6 +376,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     let corpAudit: { amount: number; company: string } | null = null
     // จับสถิติแขกที่ขยับตอนเช็คเอาต์ (totalStays/totalSpend) เพื่อ dual-write ขึ้นตาราง guests หลัง set() (Tier B)
     let guestFx: { id: string; totalStays: number; totalSpend: number } | null = null
+    // จับ corporate auto-charge (account balance + ledger tx) เพื่อ dual-write ขึ้นตาราง corporate หลัง set() (Tier B)
+    let corpFx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -411,16 +445,16 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             date: now,
             notes: 'ตัดเครดิตอัตโนมัติเมื่อเช็คเอาต์',
           }
+          const updatedAcc = {
+            ...acc,
+            totalUsed: acc.totalUsed + outstanding,
+            availableBalance: acc.availableBalance - outstanding,
+          }
           updatedCorpAccounts = state.corporateAccounts.map((a) =>
-            a.id === booking.corporateAccountId
-              ? {
-                  ...a,
-                  totalUsed: a.totalUsed + outstanding,
-                  availableBalance: a.availableBalance - outstanding,
-                }
-              : a
+            a.id === booking.corporateAccountId ? updatedAcc : a
           )
           updatedCorpTx = [corpTx, ...state.corporateTransactions]
+          corpFx = { account: updatedAcc, tx: corpTx }
           newPaidAmount = combinedTotal
           corpPayment = {
             id: `pay${Date.now()}`,
@@ -545,10 +579,14 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         .update({ total_stays: gfx.totalStays, total_spend: gfx.totalSpend, writer_id: CLIENT_ID })
         .eq('id', gfx.id).then(reportGuestError)
     }
+    // corporate auto-charge → dual-write account balance + ledger tx (Tier B)
+    const cfx = corpFx as { account: CorporateAccount; tx: CorporateTransaction } | null
+    if (cfx) { pushCorpAccount(cfx.account); pushCorpTx(cfx.tx) }
   },
 
   cancelBooking: (bookingId) => {
     let refundAudit = 0 // เงินคืนที่เกิดจากการยกเลิก → log audit หลัง set()
+    let corpFx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -591,17 +629,15 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       if (refundAmount > 0 && booking.isCorporate && booking.corporateAccountId) {
         const acc = state.corporateAccounts.find((a) => a.id === booking.corporateAccountId)
         if (acc) {
-          updatedCorpAccounts = state.corporateAccounts.map((a) =>
-            a.id === acc.id
-              ? { ...a, totalUsed: Math.max(0, a.totalUsed - refundAmount), availableBalance: a.availableBalance + refundAmount }
-              : a
-          )
+          const updatedAcc = { ...acc, totalUsed: Math.max(0, acc.totalUsed - refundAmount), availableBalance: acc.availableBalance + refundAmount }
+          updatedCorpAccounts = state.corporateAccounts.map((a) => (a.id === acc.id ? updatedAcc : a))
           const ctx: CorporateTransaction = {
             id: `ctx${Date.now()}`, corporateAccountId: acc.id, type: 'refund', amount: refundAmount,
             balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + refundAmount,
             performedBy: 'system', date: now, bookingId, notes: 'คืนเครดิตจากการยกเลิกการจอง',
           }
           updatedCorpTx = [ctx, ...state.corporateTransactions]
+          corpFx = { account: updatedAcc, tx: ctx }
         }
       }
 
@@ -637,6 +673,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         entityId: bookingId,
       })
     }
+    // คืนเครดิตองค์กร → dual-write account balance + ledger tx (Tier B)
+    const cfx = corpFx as { account: CorporateAccount; tx: CorporateTransaction } | null
+    if (cfx) { pushCorpAccount(cfx.account); pushCorpTx(cfx.tx) }
   },
 
   updateBooking: (bookingId, updates) =>
@@ -1061,26 +1100,30 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     pushInventoryTx(tx)
   },
 
-  addCorporateAccount: (accountData) =>
-    set((state) => ({
-      corporateAccounts: [
-        ...state.corporateAccounts,
-        {
-          ...accountData, id: `corp${Date.now()}`,
-          totalDeposited: 0, totalUsed: 0, availableBalance: 0,
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    })),
+  addCorporateAccount: (accountData) => {
+    const newAccount: CorporateAccount = {
+      ...accountData, id: `corp${Date.now()}`,
+      totalDeposited: 0, totalUsed: 0, availableBalance: 0,
+      createdAt: new Date().toISOString(),
+    }
+    set((state) => ({ corporateAccounts: [...state.corporateAccounts, newAccount] }))
+    // dual-write: insert ขึ้นตาราง corporate_accounts (Tier B)
+    void supabase.from('corporate_accounts').insert(corpAccountRow(newAccount)).then(reportCorporateError)
+  },
 
-  updateCorporateAccount: (id, updates) =>
+  updateCorporateAccount: (id, updates) => {
     set((state) => ({
       corporateAccounts: state.corporateAccounts.map((acc) =>
         acc.id === id ? { ...acc, ...updates } : acc
       ),
-    })),
+    }))
+    // dual-write: เขียน account ที่อัปเดตแล้วทับ (profile/balance fields)
+    const updated = get().corporateAccounts.find((a) => a.id === id)
+    if (updated) pushCorpAccount(updated)
+  },
 
-  depositToAccount: (accountId, amount, staffId, notes) =>
+  depositToAccount: (accountId, amount, staffId, notes) => {
+    let fx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
     set((state) => {
       const now = new Date().toISOString()
       const acc = state.corporateAccounts.find((a) => a.id === accountId)
@@ -1090,17 +1133,20 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + amount,
         performedBy: staffId, date: now, notes,
       }
+      const updatedAcc = { ...acc, totalDeposited: acc.totalDeposited + amount, availableBalance: acc.availableBalance + amount }
+      fx = { account: updatedAcc, tx }
       return {
-        corporateAccounts: state.corporateAccounts.map((a) =>
-          a.id === accountId
-            ? { ...a, totalDeposited: a.totalDeposited + amount, availableBalance: a.availableBalance + amount }
-            : a
-        ),
+        corporateAccounts: state.corporateAccounts.map((a) => (a.id === accountId ? updatedAcc : a)),
         corporateTransactions: [tx, ...state.corporateTransactions],
       }
-    }),
+    })
+    // dual-write: account balance + ledger tx (Tier B)
+    const f = fx as { account: CorporateAccount; tx: CorporateTransaction } | null
+    if (f) { pushCorpAccount(f.account); pushCorpTx(f.tx) }
+  },
 
-  chargeAccount: (accountId, amount, staffId, bookingId, notes) =>
+  chargeAccount: (accountId, amount, staffId, bookingId, notes) => {
+    let fx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
     set((state) => {
       const now = new Date().toISOString()
       const acc = state.corporateAccounts.find((a) => a.id === accountId)
@@ -1110,17 +1156,19 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance - amount,
         performedBy: staffId, date: now, bookingId, notes,
       }
+      const updatedAcc = { ...acc, totalUsed: acc.totalUsed + amount, availableBalance: acc.availableBalance - amount }
+      fx = { account: updatedAcc, tx }
       return {
-        corporateAccounts: state.corporateAccounts.map((a) =>
-          a.id === accountId
-            ? { ...a, totalUsed: a.totalUsed + amount, availableBalance: a.availableBalance - amount }
-            : a
-        ),
+        corporateAccounts: state.corporateAccounts.map((a) => (a.id === accountId ? updatedAcc : a)),
         corporateTransactions: [tx, ...state.corporateTransactions],
       }
-    }),
+    })
+    const f = fx as { account: CorporateAccount; tx: CorporateTransaction } | null
+    if (f) { pushCorpAccount(f.account); pushCorpTx(f.tx) }
+  },
 
-  refundToAccount: (accountId, amount, staffId, bookingId, notes) =>
+  refundToAccount: (accountId, amount, staffId, bookingId, notes) => {
+    let fx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
     set((state) => {
       const now = new Date().toISOString()
       const acc = state.corporateAccounts.find((a) => a.id === accountId)
@@ -1130,15 +1178,16 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + amount,
         performedBy: staffId, date: now, bookingId, notes,
       }
+      const updatedAcc = { ...acc, totalUsed: Math.max(0, acc.totalUsed - amount), availableBalance: acc.availableBalance + amount }
+      fx = { account: updatedAcc, tx }
       return {
-        corporateAccounts: state.corporateAccounts.map((a) =>
-          a.id === accountId
-            ? { ...a, totalUsed: Math.max(0, a.totalUsed - amount), availableBalance: a.availableBalance + amount }
-            : a
-        ),
+        corporateAccounts: state.corporateAccounts.map((a) => (a.id === accountId ? updatedAcc : a)),
         corporateTransactions: [tx, ...state.corporateTransactions],
       }
-    }),
+    })
+    const f = fx as { account: CorporateAccount; tx: CorporateTransaction } | null
+    if (f) { pushCorpAccount(f.account); pushCorpTx(f.tx) }
+  },
 
   // ===== Expense actions =====
   // dual-write ขึ้นตาราง expenses (relational migration Tier A, strangler) — แพทเทิร์นเดียวกับ logAudit
@@ -1496,6 +1545,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   },
 
   cancelAddOn: (addOnId) => {
+    let corpFx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
     // side-effect ฝั่ง inventory (คืนสต็อก) ที่ต้อง dual-write ขึ้นตารางหลัง set()
     let invFx: { itemId: string; newStock: number; tx: InventoryTransaction } | null = null
     let refundAudit = 0 // เงินคืนส่วนเกินจากการยกเลิก add-on → log audit หลัง set()
@@ -1554,17 +1604,15 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           if (booking.isCorporate && booking.corporateAccountId) {
             const acc = state.corporateAccounts.find((a) => a.id === booking.corporateAccountId)
             if (acc) {
-              updatedCorpAccounts = state.corporateAccounts.map((a) =>
-                a.id === acc.id
-                  ? { ...a, totalUsed: Math.max(0, a.totalUsed - overpaid), availableBalance: a.availableBalance + overpaid }
-                  : a
-              )
+              const updatedAcc = { ...acc, totalUsed: Math.max(0, acc.totalUsed - overpaid), availableBalance: acc.availableBalance + overpaid }
+              updatedCorpAccounts = state.corporateAccounts.map((a) => (a.id === acc.id ? updatedAcc : a))
               const ctx: CorporateTransaction = {
                 id: `ctx${Date.now()}`, corporateAccountId: acc.id, type: 'refund', amount: overpaid,
                 balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + overpaid,
                 performedBy: 'system', date: now, bookingId: booking.id, notes: 'คืนเครดิตจากการยกเลิก Add-on',
               }
               updatedCorpTx = [ctx, ...state.corporateTransactions]
+              corpFx = { account: updatedAcc, tx: ctx }
             }
           }
         } else {
@@ -1590,6 +1638,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       pushInventoryStock(fx.itemId, fx.newStock)
       pushInventoryTx(fx.tx)
     }
+    // คืนเครดิตองค์กรจากยกเลิก add-on → dual-write account balance + ledger tx (Tier B)
+    const cfx = corpFx as { account: CorporateAccount; tx: CorporateTransaction } | null
+    if (cfx) { pushCorpAccount(cfx.account); pushCorpTx(cfx.tx) }
     if (refundAudit > 0) {
       get().logAudit({
         category: 'payment', action: 'refund',
@@ -1663,8 +1714,6 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     bookings: state.bookings,
     invoices: state.invoices,
     housekeepingTasks: state.housekeepingTasks,
-    corporateAccounts: state.corporateAccounts,
-    corporateTransactions: state.corporateTransactions,
     bookingAddOns: state.bookingAddOns,
     dynamicPricing: state.dynamicPricing,
   }),
@@ -1683,6 +1732,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       guests: current.guests ?? [],
       staff: current.staff ?? [],
       users: current.users ?? [],
+      corporateAccounts: current.corporateAccounts ?? [],
+      corporateTransactions: current.corporateTransactions ?? [],
     }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading

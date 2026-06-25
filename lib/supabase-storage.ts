@@ -134,6 +134,8 @@ function mergeState(
   delete out.guests
   delete out.staff
   delete out.users
+  delete out.corporateAccounts
+  delete out.corporateTransactions
   return out
 }
 
