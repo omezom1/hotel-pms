@@ -114,6 +114,20 @@ function staffRow(s: Staff) {
   }
 }
 
+// dual-write helper สำหรับ users (Tier B) — mutable CRUD + soft-delete; login อ่าน slice นี้
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportUserError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('user write', error.message)
+}
+
+// แปลง User → row (snake_case) สำหรับ insert (+ writer_id echo key). password เก็บเป็น bcrypt hash อยู่แล้ว
+function userRow(u: User) {
+  return {
+    id: u.id, username: u.username, password: u.password,
+    staff_id: u.staffId, last_login: u.lastLogin ?? null, writer_id: CLIENT_ID,
+  }
+}
+
 interface HotelStore {
   rooms: Room[]
   guests: Guest[]
@@ -1188,6 +1202,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     }
     const newUser: User = { ...userData, username, id: `u${Date.now()}`, password: hashPassword(userData.password) }
     set((s) => ({ users: [...s.users, newUser] }))
+    // dual-write: insert ขึ้นตาราง users (Tier B)
+    void supabase.from('users').insert(userRow(newUser)).then(reportUserError)
     get().logAudit({
       category: 'auth', action: 'add-user',
       summary: `สร้างบัญชีผู้ใช้ "${username}"`, entityId: newUser.id,
@@ -1218,6 +1234,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       updates = { ...updates, password: hashPassword(updates.password as string) }
     }
     set((s) => ({ users: s.users.map((u) => (u.id === id ? { ...u, ...updates } : u)) }))
+    // dual-write: patch เฉพาะฟิลด์ที่เปลี่ยน (camel→snake) + writer_id echo key
+    const patch: Record<string, unknown> = { writer_id: CLIENT_ID }
+    if (updates.username !== undefined) patch.username = updates.username
+    if (passwordChanged) patch.password = updates.password // hash แล้วด้านบน
+    if (updates.staffId !== undefined) patch.staff_id = updates.staffId
+    void supabase.from('users').update(patch).eq('id', id).then(reportUserError)
     const target = state.users.find((u) => u.id === id)
     get().logAudit({
       category: 'auth', action: 'update-user',
@@ -1231,18 +1253,28 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (!hasPerm('canManageStaff')) { console.warn('[security] deleteUser ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return }
     const target = get().users.find((u) => u.id === id)
     set((state) => ({ users: state.users.filter((u) => u.id !== id) }))
+    // dual-write: soft-delete (ไม่ลบแถวจริง — กัน §3c resurrection + เก็บ history)
+    void supabase.from('users')
+      .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+      .eq('id', id).then(reportUserError)
     get().logAudit({
       category: 'auth', action: 'delete-user',
       summary: `ลบบัญชีผู้ใช้ "${target?.username ?? id}"`, entityId: id,
     })
   },
 
-  recordLogin: (userId) =>
+  recordLogin: (userId) => {
+    const ts = new Date().toISOString()
     set((state) => ({
       users: state.users.map((u) =>
-        u.id === userId ? { ...u, lastLogin: new Date().toISOString() } : u
+        u.id === userId ? { ...u, lastLogin: ts } : u
       ),
-    })),
+    }))
+    // dual-write: อัปเดต last_login บนตาราง users (Tier B)
+    void supabase.from('users')
+      .update({ last_login: ts, writer_id: CLIENT_ID })
+      .eq('id', userId).then(reportUserError)
+  },
 
   addStaff: (staffData) => {
     if (!hasPerm('canManageStaff')) { console.warn('[security] addStaff ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return '' }
@@ -1631,7 +1663,6 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     bookings: state.bookings,
     invoices: state.invoices,
     housekeepingTasks: state.housekeepingTasks,
-    users: state.users,
     corporateAccounts: state.corporateAccounts,
     corporateTransactions: state.corporateTransactions,
     bookingAddOns: state.bookingAddOns,
@@ -1651,6 +1682,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       addOnItems: current.addOnItems ?? [],
       guests: current.guests ?? [],
       staff: current.staff ?? [],
+      users: current.users ?? [],
     }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading

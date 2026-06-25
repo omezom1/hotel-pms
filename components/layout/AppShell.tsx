@@ -8,7 +8,8 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff } from '@/types'
+import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff, User } from '@/types'
+import { hashPassword } from '@/lib/auth-utils'
 import { toast } from 'sonner'
 
 const STORE_KEY = 'hotel-pms-storage'
@@ -175,6 +176,25 @@ function staffToRow(s: Staff) {
   }
 }
 
+// แปลงแถว users (snake_case จาก Supabase) → User (camelCase). password = bcrypt hash
+function rowToUser(r: Record<string, unknown>): User {
+  return {
+    id: String(r.id),
+    username: String(r.username ?? ''),
+    password: String(r.password ?? ''),
+    staffId: String(r.staff_id ?? ''),
+    lastLogin: r.last_login != null ? String(r.last_login) : undefined,
+  }
+}
+
+// แปลง User → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function userToRow(u: User) {
+  return {
+    id: u.id, username: u.username, password: u.password,
+    staff_id: u.staffId, last_login: u.lastLogin ?? null, writer_id: CLIENT_ID,
+  }
+}
+
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -218,7 +238,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             auditLogs: _migAudit, expenses: _migExp,
             inventoryItems: _migInvItems, inventoryTransactions: _migInvTx,
             maintenanceLogs: _migMaint, addOnItems: _migAddOn, guests: _migGuests,
-            staff: _migStaff,
+            staff: _migStaff, users: _migUsers,
             ...rest
           } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
@@ -552,6 +572,46 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
+    // ── users relational sync (Tier B) — mutable CRUD (add/update/delete=soft-delete) ──
+    // login อ่าน slice นี้จาก store → ตารางเป็นเจ้าของ; realtime ให้เพิ่ม/แก้บัญชีจากแท็บอื่นเห็นทันที
+    let usersLive = false
+    type UserEvent = { id: string; deleted: boolean; user: User }
+    const usersBuffer: UserEvent[] = []
+    const applyUserEvents = (events: UserEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.users.map((u) => [u.id, u]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.user)
+          }
+          return { users: Array.from(byId.values()) }
+        })
+      )
+    }
+    const usersChannel = supabase
+      .channel('users-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'users' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: UserEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            user: rowToUser(row),
+          }
+          if (!usersLive) {
+            usersBuffer.push(ev)
+            return
+          }
+          applyUserEvents([ev])
+        }
+      )
+      .subscribe()
+
     // ⚠️ ต้อง AWAIT อ่าน app_state ให้เสร็จ "ก่อน" เรียก rehydrate (deterministic ไม่ใช่ race)
     // เหตุผล: rehydrate จะ trigger persist write ครั้งแรก (onRehydrateStorage setState _hasHydrated)
     // ที่ partialize ตัด migrated slice ทิ้งจาก blob. ถ้าอ่านหลัง/พร้อมกับ rehydrate อาจได้ค่าว่าง →
@@ -853,6 +913,52 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       staffBuffer.length = 0
       staffLive = true
+
+      // ── seed users (Tier B) + one-time reconcile จาก blob ──
+      // ⚠️ ต่างจาก staff: ตาราง relational มี bcrypt hash ที่ถูกต้องอยู่แล้ว แต่ blob (ถูก reset)
+      //    อาจเป็น plaintext → reconcile "รักษา hash ในตารางไว้" (ไม่ downgrade): ใช้ hash เดิมถ้ามี,
+      //    user ที่มีเฉพาะใน blob (plaintext) → hash ก่อนเขียน. blob ยังเป็นเจ้าของ membership + lastLogin
+      const { data: usData, error: usErr } = await supabase
+        .from('users')
+        .select('*')
+        .is('deleted_at', null)
+        .order('id', { ascending: true })
+      if (usErr) {
+        console.error('[users-sync] seed:', usErr.message)
+      } else {
+        let rows = usData ?? []
+        const everWritten = rows.some((r) => r.writer_id != null)
+        if (!everWritten) {
+          const blobUsers = (bootState.users ?? []) as User[]
+          if (blobUsers.length > 0) {
+            const tableHashById = new Map(rows.map((r) => [String(r.id), String(r.password ?? '')]))
+            const upsertRows = blobUsers.map((u) => {
+              const existing = tableHashById.get(u.id)
+              const password = existing && existing.length > 0 ? existing : hashPassword(u.password)
+              return userToRow({ ...u, password })
+            })
+            const { error: upErr } = await supabase.from('users')
+              .upsert(upsertRows, { onConflict: 'id' })
+            if (upErr) console.error('[users-sync] reconcile upsert:', upErr.message)
+          }
+          const blobIds = new Set(blobUsers.map((u) => u.id))
+          const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+          if (orphanIds.length > 0) {
+            const { error: delErr } = await supabase.from('users')
+              .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+              .in('id', orphanIds)
+            if (delErr) console.error('[users-sync] reconcile soft-delete:', delErr.message)
+          }
+          const re = await supabase
+            .from('users').select('*').is('deleted_at', null)
+            .order('id', { ascending: true })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ users: rows.map(rowToUser) }))
+        if (usersBuffer.length) applyUserEvents(usersBuffer)
+      }
+      usersBuffer.length = 0
+      usersLive = true
     })()
 
     return () => {
@@ -865,6 +971,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(addOnChannel)
       supabase.removeChannel(guestsChannel)
       supabase.removeChannel(staffChannel)
+      supabase.removeChannel(usersChannel)
     }
   }, [])
 
