@@ -133,6 +133,7 @@ function mergeState(
   delete out.addOnItems
   delete out.guests
   delete out.staff
+  delete out.users
   return out
 }
 
