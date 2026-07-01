@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-06-24
+> อัปเดตล่าสุด: 2026-07-01
 
 ---
 
@@ -328,11 +328,22 @@
 - tsc 0 / build 22/22 routes. ⏳ commit/push/PR กำลังทำ
 - ⏳ **NEXT:** push/PR corporate (stack บน users #16) → ผู้ใช้ merge users#16 ก่อน แล้ว rebase corporate `--onto main`. Tier B เหลือตัวสุดท้าย = **rooms** (พัวพัน updateRoomStatus ทุก flow; ย้ายเสร็จใส่ FK `maintenance_logs.room_id` กลับ + re-add corp_tx FK? ไม่ — corp_tx→bookings/invoices ใส่กลับตอน Tier C)
 
+### 2026-07-01 (Tier B เสร็จครบ — rooms cutover, verified + recovered)
+ต่อจาก corporate → **rooms เป็น Tier B ตัวสุดท้าย** — branch `feat/tierB-rooms-migration` (PR #19, base main). **ปิด Tier B ครบทุก entity.**
+- **ต่างจากตัวอื่น = ไม่มี record CRUD ในแอป** (rooms ชุดคงที่จาก `mockRooms`; หน้า /rooms เรียกแค่ `updateRoomStatus`, การเปลี่ยนชื่อห้อง rA5=เฮียดิเรก ทำผ่าน blob ตรง) → เปลี่ยนเฉพาะ **status + occupancy pointers** (`currentBookingId`/`currentGuestId`) ผ่าน booking/maintenance/housekeeping lifecycle **10 จุด** → dual-write ผ่าน `roomFx` closure หลัง set() (แพทเทิร์น guestFx/corpFx). helper `pushRooms` อ่าน `get().rooms` หลัง set() แล้ว `.update({status,current_booking_id,current_guest_id,writer_id})`
+- **DDL `017`** (รันผ่าน MCP): writer_id + realtime + replica identity full + RLS anon select/insert/update (ไม่มี delete) + **re-add FK `maintenance_logs.room_id→rooms`** (010 drop ไว้; verify 0 orphan รวม soft-deleted) + **แก้ CHECK `rooms_type_check`**
+- 🐞🐞 **บั๊กใหญ่ที่เจอตอน verify + กู้แล้ว (บทเรียนสำคัญ):** ตาราง rooms จาก **001 seed ใช้ enum เก่า** (`standard/deluxe/suite/family/penthouse`) แต่ `RoomType` จริง = `single/double/triple` (blob=mockRooms) → reconcile upsert **ชน CHECK constraint** (23514) → upsert ล้มทั้ง batch. **ซ้ำร้าย browser-verify boot แรก strip rooms ออกจาก blob ไปแล้ว** (v40→44, blob ไม่มี rooms) ทั้งที่ reconcile ยังไม่สำเร็จ → เกือบ data-loss + boot ถัดไป (blob ว่าง, everWritten ยัง false) reconcile จะ **soft-delete ห้องทั้ง 40**. **กู้:** เทียบพบ **blob rooms == mockRooms เป๊ะทุก field** (status/price/number/cbid ตรง divergence ที่ capture ไว้) → รีสร้างตารางจาก mockRooms (upsert 40 แถว + stamp writer_id) + drop→upsert→add constraint ใน transaction เดียว (ลำดับสำคัญ: MCP wrap transaction, drop+add พร้อมกันโดยยังไม่แก้ค่าจะ rollback ทั้งคู่). ตอนนี้ตาราง = 40 live, stamped ครบ, constraint ถูก, everWritten=true → reconcile skip ถาวร
+- **hardening 2 จุด:** (1) เพิ่ม CHECK-fix เข้า `017` sql (fresh rebuild ผ่าน); (2) rooms reconcile **guard `blobRooms.length > 0` ก่อน soft-delete** — ถ้า blob ถูก strip แล้ว (cutover เสร็จ) แต่ everWritten หลุดเป็น false ห้ามกวาดห้องทิ้ง (rooms critical — บทเรียนจากบั๊กนี้)
+- store: partialize ตัด rooms + merge `current.rooms ?? []`. AppShell: `rooms-sync` (event '*', upsert by id) + mappers rowToRoom/roomToRow + reconcile + strip + cleanup. supabase-storage: `mergeState delete out.rooms`
+- **✅ browser-verify ผ่าน (CDP→Windows Chrome):** login admin → /rooms render **40/40 จากตาราง** — "เฮียดิเรก" แสดงถูก (blob-authoritative), สถิติ single 26/ว่าง22 · double 12/ว่าง7 · triple 2/ว่าง1 · ราคา ฿500/฿700, สถานะ occupied/maintenance/cleaning ครบตรง mockRooms. console ไม่มี error. tsc 0 / build 22/22
+- **prod ไม่ degrade แม้ blob ถูก strip:** blob rooms == mockRooms → main เดิม (read blob) fallback เป็น mockRooms (initial state) = ข้อมูลห้องถูกอยู่แล้ว. merge PR #19 = prod อ่าน rooms จากตาราง
+- ⏳ **NEXT:** ผู้ใช้ merge PR #19 → prod-verify /rooms. **Tier B ครบแล้ว → เหลือ Tier C** (bookings/invoices/housekeeping/payments/addons cluster + RPC = งานใหญ่สุด, riskiest) หรือ Supabase Auth (P1 security ก้อนถัดไป)
+
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
-2. **bookings/rooms ยังเป็น blob** (ไม่ได้แยก relational ตามตั้งใจเดิม) — ถ้าจะทำ "ถูก 100%"
-   (รวมแก้ปัญหา delete ถูกชุบชีวิตในข้อ 3c) ต้องย้าย cluster ที่พัวพันทั้งกลุ่ม
-   (bookings, rooms, invoices, housekeeping, guests, corporate, payments, addons) เป็น
+2. **bookings/invoices/housekeeping/bookingAddOns ยังเป็น blob** (rooms ย้ายแล้ว 2026-07-01 = Tier B ครบ;
+   เหลือ cluster Tier C ที่พัวพันกันหนัก) — ถ้าจะทำ "ถูก 100%" (รวมแก้ปัญหา delete ถูกชุบชีวิตในข้อ 3c)
+   ต้องย้าย cluster ที่เหลือ (bookings, invoices, housekeeping, payments, addons) เป็น
    proper tables + Postgres RPC ให้ checkout/cancel เป็น transaction เดียว = งานใหญ่
 3. **ความปลอดภัย: RLS** — 🔶 **2026-06-18 ทำ interim hardening แล้ว** (branch `security/p1-p2-hardening`, migration 012): ปิด anon บน orphan/PII tables ทั้งหมด + จำกัด active tables + audit_logs insert-only (กันลบกลบรอย) + store-side permission guards. ดู §5 entry 2026-06-18. **เหลือ residual ที่ปิดไม่ได้แบบ anon-only:** `app_state` blob ยังเปิด anon (แอปต้องอ่าน) = ใครมี public key ยังดึงข้อมูลทั้งก้อนผ่าน blob ได้. **ปิด 100% = ต้อง Supabase Auth จริง → `anon`→`authenticated` → per-role RLS → RPC** (งานใหญ่, ก้อนถัดไป). P3 ค้าง: `receipts` bucket ยัง list ได้, session ไม่มี expiry/revoke
 4. ~~รหัสผ่าน plaintext~~ → ✅ (2026-06-15) **hash ด้วย bcrypt แล้ว** (`lib/auth-utils.ts`); blob + ตาราง relational `users` migrate เป็น hash หมด (0 plaintext). export ตัด password อยู่แล้ว. account actions มี audit ครบ. ดูรายละเอียด §5 entry 2026-06-15/16
