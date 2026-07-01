@@ -8,7 +8,7 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff, User, CorporateAccount, CorporateTransaction } from '@/types'
+import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff, User, CorporateAccount, CorporateTransaction, Room } from '@/types'
 import { hashPassword } from '@/lib/auth-utils'
 import { toast } from 'sonner'
 
@@ -250,6 +250,34 @@ function corpTxToRow(t: CorporateTransaction) {
   }
 }
 
+// แปลงแถว rooms (snake_case) → Room (camelCase). Tier B ตัวสุดท้าย
+function rowToRoom(r: Record<string, unknown>): Room {
+  return {
+    id: String(r.id),
+    number: String(r.number ?? ''),
+    type: r.type as Room['type'],
+    floor: Number(r.floor ?? 0),
+    wing: r.wing as Room['wing'],
+    status: r.status as Room['status'],
+    pricePerNight: Number(r.price_per_night ?? 0),
+    maxGuests: Number(r.max_guests ?? 0),
+    amenities: (r.amenities ?? []) as string[],
+    description: String(r.description ?? ''),
+    currentGuestId: r.current_guest_id != null ? String(r.current_guest_id) : undefined,
+    currentBookingId: r.current_booking_id != null ? String(r.current_booking_id) : undefined,
+  }
+}
+// แปลง Room → row (snake_case) เต็มชุด สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function roomToRow(r: Room) {
+  return {
+    id: r.id, number: r.number, type: r.type, floor: r.floor, wing: r.wing,
+    status: r.status, price_per_night: r.pricePerNight, max_guests: r.maxGuests,
+    amenities: r.amenities, description: r.description,
+    current_guest_id: r.currentGuestId ?? null, current_booking_id: r.currentBookingId ?? null,
+    writer_id: CLIENT_ID,
+  }
+}
+
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -295,6 +323,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             maintenanceLogs: _migMaint, addOnItems: _migAddOn, guests: _migGuests,
             staff: _migStaff, users: _migUsers,
             corporateAccounts: _migCorpAcc, corporateTransactions: _migCorpTx,
+            rooms: _migRooms,
             ...rest
           } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
@@ -735,6 +764,43 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
+    // ── rooms relational sync (Tier B ตัวสุดท้าย) — เปลี่ยนเฉพาะ status + occupancy pointers ผ่าน lifecycle ──
+    //    ไม่มี delete action (ชุดคงที่); upsert by id เหมือน guests/staff (soft-delete slot รองรับไว้)
+    let roomsLive = false
+    type RoomEvent = { id: string; deleted: boolean; room: Room }
+    const roomsBuffer: RoomEvent[] = []
+    const applyRoomEvents = (events: RoomEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.rooms.map((r) => [r.id, r]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.room)
+          }
+          return { rooms: Array.from(byId.values()) }
+        })
+      )
+    }
+    const roomsChannel = supabase
+      .channel('rooms-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'rooms' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: RoomEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            room: rowToRoom(row),
+          }
+          if (!roomsLive) { roomsBuffer.push(ev); return }
+          applyRoomEvents([ev])
+        }
+      )
+      .subscribe()
+
     // ⚠️ ต้อง AWAIT อ่าน app_state ให้เสร็จ "ก่อน" เรียก rehydrate (deterministic ไม่ใช่ race)
     // เหตุผล: rehydrate จะ trigger persist write ครั้งแรก (onRehydrateStorage setState _hasHydrated)
     // ที่ partialize ตัด migrated slice ทิ้งจาก blob. ถ้าอ่านหลัง/พร้อมกับ rehydrate อาจได้ค่าว่าง →
@@ -1153,6 +1219,48 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       corpTxBuffer.length = 0
       corpTxLive = true
+
+      // ── seed rooms (Tier B ตัวสุดท้าย) + one-time reconcile จาก blob ──
+      // เหมือน guests/staff: ตาราง 001 มี orphan seed 40 ห้องที่ stale (ราคา/สถานะ/currentBookingId ต่างจาก blob;
+      // blob = แหล่งจริง — ผู้ใช้เปลี่ยนชื่อห้อง/ราคา + status ขยับจาก lifecycle สะสมมา)
+      // → everWritten (writer_id) เป็น flag, reconcile จาก bootState (await อ่านก่อน rehydrate = pre-strip การันตี)
+      const { data: rmData, error: rmErr } = await supabase
+        .from('rooms')
+        .select('*')
+        .is('deleted_at', null)
+        .order('id', { ascending: true })
+      if (rmErr) {
+        console.error('[rooms-sync] seed:', rmErr.message)
+      } else {
+        let rows = rmData ?? []
+        const everWritten = rows.some((r) => r.writer_id != null)
+        const blobRooms = (bootState.rooms ?? []) as Room[]
+        // reconcile เฉพาะเมื่อ blob ยังมี rooms เป็นแหล่งจริง (blobRooms.length > 0).
+        // ⚠️ ถ้า blob ถูก strip ไปแล้ว (cutover เสร็จ) แต่ everWritten ยัง false ด้วยเหตุผิดปกติ
+        //    ห้าม soft-delete rooms ทั้งชุดจาก orphan-diff (rooms critical — เคยเจอ blob-strip ทำ reconcile กวาดห้องทิ้ง)
+        if (!everWritten && blobRooms.length > 0) {
+          const { error: upErr } = await supabase.from('rooms')
+            .upsert(blobRooms.map(roomToRow), { onConflict: 'id' })
+          if (upErr) console.error('[rooms-sync] reconcile upsert:', upErr.message)
+          // soft-delete orphan ที่ blob ไม่มี (ปกติไม่มี — id ตรงกันครบ; FK maintenance_logs.room_id ยัง valid เพราะ soft-delete ไม่ลบแถว)
+          const blobIds = new Set(blobRooms.map((r) => r.id))
+          const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+          if (orphanIds.length > 0) {
+            const { error: delErr } = await supabase.from('rooms')
+              .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+              .in('id', orphanIds)
+            if (delErr) console.error('[rooms-sync] reconcile soft-delete:', delErr.message)
+          }
+          const re = await supabase
+            .from('rooms').select('*').is('deleted_at', null)
+            .order('id', { ascending: true })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ rooms: rows.map(rowToRoom) }))
+        if (roomsBuffer.length) applyRoomEvents(roomsBuffer)
+      }
+      roomsBuffer.length = 0
+      roomsLive = true
     })()
 
     return () => {
@@ -1168,6 +1276,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(usersChannel)
       supabase.removeChannel(corpAccChannel)
       supabase.removeChannel(corpTxChannel)
+      supabase.removeChannel(roomsChannel)
     }
   }, [])
 

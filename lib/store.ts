@@ -160,6 +160,25 @@ function pushCorpTx(t: CorporateTransaction) {
   void supabase.from('corporate_transactions').insert(corpTxRow(t)).then(reportCorporateError)
 }
 
+// dual-write helper สำหรับ rooms (Tier B ตัวสุดท้าย) — ไม่มี record CRUD ในแอป (ชุดคงที่จาก seed)
+// เปลี่ยนเฉพาะ status + occupancy pointers (currentBookingId/currentGuestId) ผ่าน lifecycle ~10 จุด
+// จับ id ห้องที่เปลี่ยนใน closure ของ set() → หลัง set() push ค่าจาก state ล่าสุด (แพทเทิร์น guestFx/corpFx)
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportRoomError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('room write', error.message)
+}
+// dual-write เฉพาะ status + occupancy pointers ของห้องที่เปลี่ยน (static fields ไม่เคยเปลี่ยนหลัง reconcile)
+function pushRooms(rooms: Room[]) {
+  for (const r of rooms) {
+    void supabase.from('rooms').update({
+      status: r.status,
+      current_booking_id: r.currentBookingId ?? null,
+      current_guest_id: r.currentGuestId ?? null,
+      writer_id: CLIENT_ID,
+    }).eq('id', r.id).then(reportRoomError)
+  }
+}
+
 interface HotelStore {
   rooms: Room[]
   guests: Guest[]
@@ -316,17 +335,21 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       })
   },
 
-  updateRoomStatus: (roomId, status) =>
+  updateRoomStatus: (roomId, status) => {
     set((state) => ({
       rooms: state.rooms.map((r) =>
         r.id === roomId ? { ...r, status } : r
       ),
-    })),
+    }))
+    // dual-write status ห้องที่เปลี่ยน (Tier B) — อ่านจาก state ล่าสุดหลัง set()
+    pushRooms(get().rooms.filter((r) => r.id === roomId))
+  },
 
   createBooking: (bookingData) => {
     // ด่านสุดท้ายกันจองซ้ำ + กัน double-submit race: ตรวจ conflict และ insert ใน set() เดียว
     // (atomic) — ถ้าแยก get()→ตรวจ แล้วค่อย set() สอง submit เร็ว ๆ จะผ่าน conflict ทั้งคู่ = overbooking
     let result: { ok: true } | { ok: false; error: string } = { ok: true }
+    let roomFx: string[] = [] // ห้องที่เปลี่ยน status → dual-write หลัง set() (Tier B)
     set((state) => {
       if (roomHasConflict(state.bookings, bookingData.roomId, bookingData.checkIn, bookingData.checkOut)) {
         result = { ok: false, error: 'ห้องนี้มีการจองอื่นทับช่วงวันที่เลือกแล้ว' }
@@ -363,11 +386,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
               : r
           )
         : state.rooms
+      if (bookingData.status === 'checked_in') roomFx = [bookingData.roomId]
       return {
         bookings: [newBooking, ...state.bookings],
         rooms: updatedRooms,
       }
     })
+    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
     return result
   },
 
@@ -378,6 +403,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     let guestFx: { id: string; totalStays: number; totalSpend: number } | null = null
     // จับ corporate auto-charge (account balance + ledger tx) เพื่อ dual-write ขึ้นตาราง corporate หลัง set() (Tier B)
     let corpFx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
+    // จับ id ห้องที่เปลี่ยน status ตอนเช็คอิน/เช็คเอาต์ เพื่อ dual-write ขึ้นตาราง rooms หลัง set() (Tier B)
+    let roomFx: string[] = []
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -405,6 +432,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
               }
             : r
         )
+        roomFx = [booking.roomId]
         return { bookings: updatedBookings, rooms: updatedRooms }
       }
 
@@ -525,6 +553,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             }
           : r
       )
+      roomFx = [booking.roomId]
 
       // 5) สร้าง Housekeeping task อัตโนมัติ (ข้ามถ้าห้องไปซ่อม — ยังไม่ต้องทำความสะอาด)
       const newTask: HousekeepingTask | null = hasOpenMaintenance
@@ -582,11 +611,14 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     // corporate auto-charge → dual-write account balance + ledger tx (Tier B)
     const cfx = corpFx as { account: CorporateAccount; tx: CorporateTransaction } | null
     if (cfx) { pushCorpAccount(cfx.account); pushCorpTx(cfx.tx) }
+    // ห้องเปลี่ยน status ตอนเช็คอิน/เช็คเอาต์ → dual-write ขึ้นตาราง rooms (Tier B)
+    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
   },
 
   cancelBooking: (bookingId) => {
     let refundAudit = 0 // เงินคืนที่เกิดจากการยกเลิก → log audit หลัง set()
     let corpFx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
+    let roomFx: string[] = [] // ห้องที่เปลี่ยน status → dual-write หลัง set() (Tier B)
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -641,6 +673,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         }
       }
 
+      roomFx = [booking.roomId] // ห้องเปลี่ยน status ตอนยกเลิก → dual-write หลัง set()
       return {
         bookings: state.bookings.map((b) =>
           b.id === bookingId
@@ -676,6 +709,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     // คืนเครดิตองค์กร → dual-write account balance + ledger tx (Tier B)
     const cfx = corpFx as { account: CorporateAccount; tx: CorporateTransaction } | null
     if (cfx) { pushCorpAccount(cfx.account); pushCorpTx(cfx.tx) }
+    // ห้องเปลี่ยน status ตอนยกเลิก → dual-write ขึ้นตาราง rooms (Tier B)
+    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
   },
 
   updateBooking: (bookingId, updates) =>
@@ -764,6 +799,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const refundPayment: import('@/types').Payment | null = overpaid > 0
       ? { id: `pay${Date.now()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการย้ายห้อง (ราคาใหม่ต่ำกว่ายอดที่จ่าย)' }
       : null
+    // ห้องเปลี่ยน status เฉพาะเมื่อย้ายหลังเช็คอิน (ห้องเก่า→cleaning, ใหม่→occupied) → dual-write หลัง set() (Tier B)
+    const roomFx = wasCheckedIn ? [booking.roomId, newRoomId] : []
 
     set((s) => ({
       bookings: s.bookings.map((b) =>
@@ -802,6 +839,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         entityId: bookingId,
       })
     }
+    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
     return { ok: true }
   },
 
@@ -888,7 +926,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       ],
     })),
 
-  updateTaskStatus: (taskId, status) =>
+  updateTaskStatus: (taskId, status) => {
+    let roomFx: string[] = [] // ห้องที่คืนเป็น available → dual-write หลัง set() (Tier B)
     set((state) => {
       const now = new Date().toISOString()
       const updatedTasks = state.housekeepingTasks.map((t) => {
@@ -901,34 +940,42 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       // เมื่อทำความสะอาดเสร็จ → คืนห้องเป็น available เฉพาะห้องที่กำลัง 'cleaning' (หลังเช็คเอาต์)
       // ห้ามแตะห้องที่ 'occupied' (งานทำความสะอาดระหว่างเข้าพัก) หรือ 'maintenance'
       const task = updatedTasks.find((t) => t.id === taskId)
-      const updatedRooms =
-        status === 'completed' && task
-          ? state.rooms.map((r) =>
-              r.id === task.roomId && r.status === 'cleaning' ? { ...r, status: 'available' as RoomStatus } : r
-            )
-          : state.rooms
+      let updatedRooms = state.rooms
+      if (status === 'completed' && task && state.rooms.some((r) => r.id === task.roomId && r.status === 'cleaning')) {
+        updatedRooms = state.rooms.map((r) =>
+          r.id === task.roomId && r.status === 'cleaning' ? { ...r, status: 'available' as RoomStatus } : r
+        )
+        roomFx = [task.roomId]
+      }
       return { housekeepingTasks: updatedTasks, rooms: updatedRooms }
-    }),
+    })
+    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
+  },
 
-  // ── maintenance dual-write (Tier A) — maintenanceLogs ย้ายไปตาราง; rooms-side-effect ยัง blob (Tier B) ──
+  // ── maintenance dual-write (Tier A) — maintenanceLogs ย้ายไปตาราง; rooms-side-effect ย้ายเป็นตารางแล้ว (Tier B) ──
   addMaintenanceLog: (logData) => {
     const newLog: MaintenanceLog = { ...logData, id: `m${Date.now()}` }
+    let roomFx: string[] = [] // ห้องที่ตั้งเป็น maintenance → dual-write หลัง set() (Tier B)
     set((state) => {
-      // ตั้งห้องเป็น maintenance ทันทีถ้า issue ยังไม่ resolved (rooms = blob path)
-      const updatedRooms = newLog.status !== 'resolved'
-        ? state.rooms.map((r) =>
-            r.id === newLog.roomId && r.status !== 'occupied'
-              ? { ...r, status: 'maintenance' as RoomStatus }
-              : r
-          )
-        : state.rooms
+      // ตั้งห้องเป็น maintenance ทันทีถ้า issue ยังไม่ resolved (ห้องที่ไม่ได้ occupied)
+      let updatedRooms = state.rooms
+      if (newLog.status !== 'resolved' && state.rooms.some((r) => r.id === newLog.roomId && r.status !== 'occupied')) {
+        updatedRooms = state.rooms.map((r) =>
+          r.id === newLog.roomId && r.status !== 'occupied'
+            ? { ...r, status: 'maintenance' as RoomStatus }
+            : r
+        )
+        roomFx = [newLog.roomId]
+      }
       return { maintenanceLogs: [newLog, ...state.maintenanceLogs], rooms: updatedRooms }
     })
     void supabase.from('maintenance_logs').insert(maintLogRow(newLog)).then(reportMaintenanceError)
+    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
   },
 
   updateMaintenanceStatus: (logId, status) => {
     const now = new Date().toISOString()
+    let roomFx: string[] = [] // ห้องที่คืนเป็น available → dual-write หลัง set() (Tier B)
     set((state) => {
       const log = state.maintenanceLogs.find((l) => l.id === logId)
       const updatedLogs = state.maintenanceLogs.map((l) =>
@@ -936,44 +983,49 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           ? { ...l, status, resolvedAt: status === 'resolved' ? now : l.resolvedAt }
           : l
       )
-      // เมื่อ resolved + ไม่มี maintenance อื่นค้างของห้องนี้ → คืนห้องเป็น available (rooms = blob path)
+      // เมื่อ resolved + ไม่มี maintenance อื่นค้างของห้องนี้ → คืนห้องเป็น available
       let updatedRooms = state.rooms
       if (status === 'resolved' && log) {
         const hasOtherOpen = updatedLogs.some(
           (l) => l.id !== logId && l.roomId === log.roomId && l.status !== 'resolved'
         )
-        if (!hasOtherOpen) {
+        if (!hasOtherOpen && state.rooms.some((r) => r.id === log.roomId && r.status === 'maintenance')) {
           updatedRooms = state.rooms.map((r) =>
             r.id === log.roomId && r.status === 'maintenance'
               ? { ...r, status: 'available' as RoomStatus }
               : r
           )
+          roomFx = [log.roomId]
         }
       }
       return { maintenanceLogs: updatedLogs, rooms: updatedRooms }
     })
-    // dual-write status (+ resolved_at เฉพาะตอน resolved); rooms ไม่ dual-write (ยัง blob)
+    // dual-write status (+ resolved_at เฉพาะตอน resolved) ขึ้น maintenance_logs
     const patch: Record<string, unknown> = { status, writer_id: CLIENT_ID }
     if (status === 'resolved') patch.resolved_at = now
     void supabase.from('maintenance_logs').update(patch).eq('id', logId).then(reportMaintenanceError)
+    // ห้องคืน available → dual-write ขึ้นตาราง rooms (Tier B)
+    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
   },
 
   removeMaintenanceLog: (logId) => {
+    let roomFx: string[] = [] // ห้องที่คืนเป็น available → dual-write หลัง set() (Tier B)
     set((state) => {
       const log = state.maintenanceLogs.find((l) => l.id === logId)
       const updatedLogs = state.maintenanceLogs.filter((l) => l.id !== logId)
-      // ถ้าห้องอยู่ในสถานะ maintenance และไม่มี log ค้างอื่น → คืนห้องเป็น available (rooms = blob path)
+      // ถ้าห้องอยู่ในสถานะ maintenance และไม่มี log ค้างอื่น → คืนห้องเป็น available
       let updatedRooms = state.rooms
       if (log) {
         const hasOtherOpen = updatedLogs.some(
           (l) => l.roomId === log.roomId && l.status !== 'resolved'
         )
-        if (!hasOtherOpen) {
+        if (!hasOtherOpen && state.rooms.some((r) => r.id === log.roomId && r.status === 'maintenance')) {
           updatedRooms = state.rooms.map((r) =>
             r.id === log.roomId && r.status === 'maintenance'
               ? { ...r, status: 'available' as RoomStatus }
               : r
           )
+          roomFx = [log.roomId]
         }
       }
       return { maintenanceLogs: updatedLogs, rooms: updatedRooms }
@@ -982,6 +1034,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     void supabase.from('maintenance_logs')
       .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
       .eq('id', logId).then(reportMaintenanceError)
+    // ห้องคืน available → dual-write ขึ้นตาราง rooms (Tier B)
+    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
   },
 
   // ── inventory dual-write (Tier A, strangler) — blob ยังเป็นแหล่งจริงช่วง dual-write ──
@@ -1706,11 +1760,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
   // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
   skipHydration: true,
-  // ── relational migration: auditLogs (Phase 1) + expenses/inventory/maintenance (Tier A) + add_on_items/guests (Tier B) ย้ายไปตารางจริงแล้ว ──
+  // ── relational migration: auditLogs (Phase 1) + expenses/inventory/maintenance (Tier A) + add_on_items/guests/staff/users/corporate/rooms (Tier B ครบ) ย้ายไปตารางจริงแล้ว ──
   // partialize = ตัด slice เหล่านี้ออกจากสิ่งที่เขียนลง blob → ตารางเป็นเจ้าของคนเดียว
   // (กัน app_state full-state sync / union-merge มาทับ-หรือชุบชีวิต สิ่งที่ per-table sync เพิ่ง apply)
   partialize: (state) => ({
-    rooms: state.rooms,
     bookings: state.bookings,
     invoices: state.invoices,
     housekeepingTasks: state.housekeepingTasks,
@@ -1723,6 +1776,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const p = (persisted ?? {}) as Partial<typeof current>
     return {
       ...current, ...p,
+      rooms: current.rooms ?? [],
       auditLogs: current.auditLogs ?? [],
       expenses: current.expenses ?? [],
       inventoryItems: current.inventoryItems ?? [],
