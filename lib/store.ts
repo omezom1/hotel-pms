@@ -179,6 +179,23 @@ function pushRooms(rooms: Room[]) {
   }
 }
 
+// dual-write helper สำหรับ housekeeping_tasks (Tier C kickoff) — mutable + soft-delete (แพทเทิร์น guests/staff)
+// ถูกสร้างเป็น side-effect ใน checkout/cancel/move (จับ hkFx) + แก้โดย add/updateTaskStatus
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportHkError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('housekeeping write', error.message)
+}
+// แปลง HousekeepingTask → row (snake_case) เต็มชุด สำหรับ insert (+ writer_id echo key)
+function hkTaskRow(t: HousekeepingTask) {
+  return {
+    id: t.id, room_id: t.roomId, room_number: t.roomNumber,
+    assigned_to: t.assignedTo, staff_id: t.staffId, status: t.status,
+    priority: t.priority, notes: t.notes, scheduled_at: t.scheduledAt,
+    started_at: t.startedAt ?? null, completed_at: t.completedAt ?? null,
+    writer_id: CLIENT_ID,
+  }
+}
+
 interface HotelStore {
   rooms: Room[]
   guests: Guest[]
@@ -405,6 +422,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     let corpFx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
     // จับ id ห้องที่เปลี่ยน status ตอนเช็คอิน/เช็คเอาต์ เพื่อ dual-write ขึ้นตาราง rooms หลัง set() (Tier B)
     let roomFx: string[] = []
+    // จับ HK task ที่สร้างตอนเช็คเอาต์ เพื่อ dual-write insert ขึ้นตาราง housekeeping_tasks หลัง set() (Tier C)
+    let hkFx: HousekeepingTask | null = null
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -569,6 +588,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             notes: `ทำความสะอาดหลังเช็คเอาต์ (${bookingId})`,
             scheduledAt: now,
           }
+      hkFx = newTask // → dual-write insert หลัง set() (Tier C)
 
       // 6) อัพเดทสถิติแขก — นับเฉพาะที่จ่ายเงินจริง (paid) เพื่อไม่ให้ totalSpend เฟ้อเมื่อ corp credit ไม่พอ
       let updatedGuests = state.guests
@@ -613,12 +633,16 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (cfx) { pushCorpAccount(cfx.account); pushCorpTx(cfx.tx) }
     // ห้องเปลี่ยน status ตอนเช็คอิน/เช็คเอาต์ → dual-write ขึ้นตาราง rooms (Tier B)
     if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
+    // HK task ที่สร้างตอนเช็คเอาต์ → dual-write insert ขึ้นตาราง housekeeping_tasks (Tier C)
+    const hfx = hkFx as HousekeepingTask | null
+    if (hfx) void supabase.from('housekeeping_tasks').insert(hkTaskRow(hfx)).then(reportHkError)
   },
 
   cancelBooking: (bookingId) => {
     let refundAudit = 0 // เงินคืนที่เกิดจากการยกเลิก → log audit หลัง set()
     let corpFx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
     let roomFx: string[] = [] // ห้องที่เปลี่ยน status → dual-write หลัง set() (Tier B)
+    let hkFx: HousekeepingTask | null = null // HK task ที่สร้างตอนยกเลิก → dual-write insert หลัง set() (Tier C)
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -640,6 +664,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             scheduledAt: now,
           }
         : null
+      hkFx = newTask // → dual-write insert หลัง set() (Tier C)
 
       // คืนเงินที่รับมาแล้ว: บันทึก refund payment (ยอดติดลบ) + เคลียร์ยอดที่จ่าย
       const refundAmount = booking.paidAmount
@@ -711,6 +736,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (cfx) { pushCorpAccount(cfx.account); pushCorpTx(cfx.tx) }
     // ห้องเปลี่ยน status ตอนยกเลิก → dual-write ขึ้นตาราง rooms (Tier B)
     if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
+    // HK task ที่สร้างตอนยกเลิก (หลังเช็คอิน) → dual-write insert ขึ้นตาราง housekeeping_tasks (Tier C)
+    const hfx = hkFx as HousekeepingTask | null
+    if (hfx) void supabase.from('housekeeping_tasks').insert(hkTaskRow(hfx)).then(reportHkError)
   },
 
   updateBooking: (bookingId, updates) =>
@@ -840,6 +868,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       })
     }
     if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
+    // HK task ที่สร้างตอนย้ายห้อง (หลังเช็คอิน) → dual-write insert ขึ้นตาราง housekeeping_tasks (Tier C)
+    if (newTask) void supabase.from('housekeeping_tasks').insert(hkTaskRow(newTask)).then(reportHkError)
     return { ok: true }
   },
 
@@ -918,16 +948,16 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     void supabase.from('guests').update(patch).eq('id', guestId).then(reportGuestError)
   },
 
-  addHousekeepingTask: (taskData) =>
-    set((state) => ({
-      housekeepingTasks: [
-        ...state.housekeepingTasks,
-        { ...taskData, id: `hk${Date.now()}` },
-      ],
-    })),
+  addHousekeepingTask: (taskData) => {
+    const newTask: HousekeepingTask = { ...taskData, id: `hk${Date.now()}` }
+    set((state) => ({ housekeepingTasks: [...state.housekeepingTasks, newTask] }))
+    // dual-write: insert ขึ้นตาราง housekeeping_tasks (Tier C)
+    void supabase.from('housekeeping_tasks').insert(hkTaskRow(newTask)).then(reportHkError)
+  },
 
   updateTaskStatus: (taskId, status) => {
     let roomFx: string[] = [] // ห้องที่คืนเป็น available → dual-write หลัง set() (Tier B)
+    let hkPatch: Record<string, unknown> | null = null // แถว HK ที่เปลี่ยน → dual-write หลัง set() (Tier C)
     set((state) => {
       const now = new Date().toISOString()
       const updatedTasks = state.housekeepingTasks.map((t) => {
@@ -937,6 +967,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         if (status === 'completed') updates.completedAt = now
         return { ...t, ...updates }
       })
+      // patch เฉพาะฟิลด์ที่เปลี่ยน (status + timestamp ที่เพิ่งตั้ง) → dual-write หลัง set()
+      if (state.housekeepingTasks.some((t) => t.id === taskId)) {
+        hkPatch = { status, writer_id: CLIENT_ID }
+        if (status === 'in_progress') hkPatch.started_at = now
+        if (status === 'completed') hkPatch.completed_at = now
+      }
       // เมื่อทำความสะอาดเสร็จ → คืนห้องเป็น available เฉพาะห้องที่กำลัง 'cleaning' (หลังเช็คเอาต์)
       // ห้ามแตะห้องที่ 'occupied' (งานทำความสะอาดระหว่างเข้าพัก) หรือ 'maintenance'
       const task = updatedTasks.find((t) => t.id === taskId)
@@ -949,6 +985,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       }
       return { housekeepingTasks: updatedTasks, rooms: updatedRooms }
     })
+    // dual-write HK patch (Tier C) + room status (Tier B)
+    const patch = hkPatch as Record<string, unknown> | null
+    if (patch) void supabase.from('housekeeping_tasks').update(patch).eq('id', taskId).then(reportHkError)
     if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
   },
 
@@ -1760,13 +1799,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
   // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
   skipHydration: true,
-  // ── relational migration: auditLogs (Phase 1) + expenses/inventory/maintenance (Tier A) + add_on_items/guests/staff/users/corporate/rooms (Tier B ครบ) ย้ายไปตารางจริงแล้ว ──
+  // ── relational migration: Tier A + Tier B ครบ + housekeepingTasks (Tier C kickoff) ย้ายไปตารางจริงแล้ว ──
   // partialize = ตัด slice เหล่านี้ออกจากสิ่งที่เขียนลง blob → ตารางเป็นเจ้าของคนเดียว
   // (กัน app_state full-state sync / union-merge มาทับ-หรือชุบชีวิต สิ่งที่ per-table sync เพิ่ง apply)
   partialize: (state) => ({
     bookings: state.bookings,
     invoices: state.invoices,
-    housekeepingTasks: state.housekeepingTasks,
     bookingAddOns: state.bookingAddOns,
     dynamicPricing: state.dynamicPricing,
   }),
@@ -1777,6 +1815,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     return {
       ...current, ...p,
       rooms: current.rooms ?? [],
+      housekeepingTasks: current.housekeepingTasks ?? [],
       auditLogs: current.auditLogs ?? [],
       expenses: current.expenses ?? [],
       inventoryItems: current.inventoryItems ?? [],
