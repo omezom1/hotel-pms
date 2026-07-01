@@ -8,7 +8,7 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff, User, CorporateAccount, CorporateTransaction, Room } from '@/types'
+import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff, User, CorporateAccount, CorporateTransaction, Room, HousekeepingTask } from '@/types'
 import { hashPassword } from '@/lib/auth-utils'
 import { toast } from 'sonner'
 
@@ -278,6 +278,33 @@ function roomToRow(r: Room) {
   }
 }
 
+// แปลงแถว housekeeping_tasks (snake_case) → HousekeepingTask (camelCase). Tier C kickoff
+function rowToHkTask(r: Record<string, unknown>): HousekeepingTask {
+  return {
+    id: String(r.id),
+    roomId: String(r.room_id ?? ''),
+    roomNumber: String(r.room_number ?? ''),
+    assignedTo: String(r.assigned_to ?? ''),
+    staffId: String(r.staff_id ?? ''),
+    status: r.status as HousekeepingTask['status'],
+    priority: r.priority as HousekeepingTask['priority'],
+    notes: String(r.notes ?? ''),
+    scheduledAt: String(r.scheduled_at ?? ''),
+    startedAt: r.started_at != null ? String(r.started_at) : undefined,
+    completedAt: r.completed_at != null ? String(r.completed_at) : undefined,
+  }
+}
+// แปลง HousekeepingTask → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function hkTaskToRow(t: HousekeepingTask) {
+  return {
+    id: t.id, room_id: t.roomId, room_number: t.roomNumber,
+    assigned_to: t.assignedTo, staff_id: t.staffId, status: t.status,
+    priority: t.priority, notes: t.notes, scheduled_at: t.scheduledAt,
+    started_at: t.startedAt ?? null, completed_at: t.completedAt ?? null,
+    writer_id: CLIENT_ID,
+  }
+}
+
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -323,7 +350,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             maintenanceLogs: _migMaint, addOnItems: _migAddOn, guests: _migGuests,
             staff: _migStaff, users: _migUsers,
             corporateAccounts: _migCorpAcc, corporateTransactions: _migCorpTx,
-            rooms: _migRooms,
+            rooms: _migRooms, housekeepingTasks: _migHk,
             ...rest
           } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
@@ -801,6 +828,42 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
+    // ── housekeeping_tasks relational sync (Tier C kickoff) — mutable + soft-delete (เหมือน guests/staff/rooms) ──
+    let hkLive = false
+    type HkEvent = { id: string; deleted: boolean; task: HousekeepingTask }
+    const hkBuffer: HkEvent[] = []
+    const applyHkEvents = (events: HkEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.housekeepingTasks.map((t) => [t.id, t]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.task)
+          }
+          return { housekeepingTasks: Array.from(byId.values()) }
+        })
+      )
+    }
+    const hkChannel = supabase
+      .channel('housekeeping_tasks-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'housekeeping_tasks' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: HkEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            task: rowToHkTask(row),
+          }
+          if (!hkLive) { hkBuffer.push(ev); return }
+          applyHkEvents([ev])
+        }
+      )
+      .subscribe()
+
     // ⚠️ ต้อง AWAIT อ่าน app_state ให้เสร็จ "ก่อน" เรียก rehydrate (deterministic ไม่ใช่ race)
     // เหตุผล: rehydrate จะ trigger persist write ครั้งแรก (onRehydrateStorage setState _hasHydrated)
     // ที่ partialize ตัด migrated slice ทิ้งจาก blob. ถ้าอ่านหลัง/พร้อมกับ rehydrate อาจได้ค่าว่าง →
@@ -1261,6 +1324,44 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       roomsBuffer.length = 0
       roomsLive = true
+
+      // ── seed housekeeping_tasks (Tier C kickoff) + one-time reconcile จาก blob ──
+      // เหมือน guests/rooms: ตาราง 001 มี orphan seed (hk001-005) ที่ stale (บาง task status/room ต่างจาก blob;
+      // blob = แหล่งจริง) → everWritten (writer_id) เป็น flag, reconcile จาก bootState (await อ่านก่อน rehydrate = pre-strip)
+      const { data: hkData, error: hkErr } = await supabase
+        .from('housekeeping_tasks')
+        .select('*')
+        .is('deleted_at', null)
+        .order('scheduled_at', { ascending: false })
+      if (hkErr) {
+        console.error('[housekeeping-sync] seed:', hkErr.message)
+      } else {
+        let rows = hkData ?? []
+        const everWritten = rows.some((r) => r.writer_id != null)
+        const blobTasks = (bootState.housekeepingTasks ?? []) as HousekeepingTask[]
+        // guard blobTasks.length>0 ก่อน soft-delete (บทเรียน rooms — ห้ามกวาดทิ้งถ้า blob ถูก strip แล้ว)
+        if (!everWritten && blobTasks.length > 0) {
+          const { error: upErr } = await supabase.from('housekeeping_tasks')
+            .upsert(blobTasks.map(hkTaskToRow), { onConflict: 'id' })
+          if (upErr) console.error('[housekeeping-sync] reconcile upsert:', upErr.message)
+          const blobIds = new Set(blobTasks.map((t) => t.id))
+          const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+          if (orphanIds.length > 0) {
+            const { error: delErr } = await supabase.from('housekeeping_tasks')
+              .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+              .in('id', orphanIds)
+            if (delErr) console.error('[housekeeping-sync] reconcile soft-delete:', delErr.message)
+          }
+          const re = await supabase
+            .from('housekeeping_tasks').select('*').is('deleted_at', null)
+            .order('scheduled_at', { ascending: false })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ housekeepingTasks: rows.map(rowToHkTask) }))
+        if (hkBuffer.length) applyHkEvents(hkBuffer)
+      }
+      hkBuffer.length = 0
+      hkLive = true
     })()
 
     return () => {
@@ -1277,6 +1378,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(corpAccChannel)
       supabase.removeChannel(corpTxChannel)
       supabase.removeChannel(roomsChannel)
+      supabase.removeChannel(hkChannel)
     }
   }, [])
 

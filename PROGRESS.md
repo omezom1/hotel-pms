@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-07-01
+> อัปเดตล่าสุด: 2026-07-02
 
 ---
 
@@ -338,6 +338,15 @@
 - **✅ browser-verify ผ่าน (CDP→Windows Chrome):** login admin → /rooms render **40/40 จากตาราง** — "เฮียดิเรก" แสดงถูก (blob-authoritative), สถิติ single 26/ว่าง22 · double 12/ว่าง7 · triple 2/ว่าง1 · ราคา ฿500/฿700, สถานะ occupied/maintenance/cleaning ครบตรง mockRooms. console ไม่มี error. tsc 0 / build 22/22
 - **prod ไม่ degrade แม้ blob ถูก strip:** blob rooms == mockRooms → main เดิม (read blob) fallback เป็น mockRooms (initial state) = ข้อมูลห้องถูกอยู่แล้ว. merge PR #19 = prod อ่าน rooms จากตาราง
 - ⏳ **NEXT:** ผู้ใช้ merge PR #19 → prod-verify /rooms. **Tier B ครบแล้ว → เหลือ Tier C** (bookings/invoices/housekeeping/payments/addons cluster + RPC = งานใหญ่สุด, riskiest) หรือ Supabase Auth (P1 security ก้อนถัดไป)
+
+### 2026-07-02 (เริ่ม Tier C — housekeeping_tasks cutover = C1/3, verified)
+เริ่ม **Tier C** (bookings/invoices/housekeeping/bookingAddOns + payments) = cluster สุดท้าย + riskiest. แผนเต็ม: `~/.claude/plans/delegated-watching-pillow.md` (3 PR: **C1** housekeeping dual-write → **C2** bookings+invoices+addons+payments dual-write → **C3** 9 RPCs atomicity). Decisions ล็อก: payments ฝัง jsonb ใน bookings (ไม่แยกตาราง — RPC ทำ atomic ได้อยู่แล้ว), pricing คำนวณ client ส่งเข้า RPC.
+- **C1 = housekeeping_tasks** (leaf ที่สุด: FK ขาออก→rooms ที่ย้ายแล้ว, ไม่มี entity พึ่ง) — branch `feat/tierC-housekeeping-migration` (stack บน rooms PR #19). pattern เดิม (แบบ rooms/guests).
+- **DDL `018`** (ผ่าน MCP): writer_id + realtime + replica identity full + RLS anon select/insert/update. enums ตรง TS แล้ว (ต่างจาก rooms — ไม่ต้องแก้ CHECK).
+- **store.ts:** `reportHkError`/`hkTaskRow`; `addHousekeepingTask`=insert, `updateTaskStatus`=patch (status+timestamp) via `hkPatch` closure, + **HK สร้างใน checkout/cancel/move** จับ `hkFx` closure → insert หลัง set() (แพทเทิร์น roomFx/guestFx). partialize ตัด + merge `current ?? []`.
+- **AppShell:** `rowToHkTask`/`hkTaskToRow` + `housekeeping_tasks-sync` channel (event '*') + reconcile-from-blob (everWritten + bootState + **guard blobTasks.length>0**) + app_state strip + cleanup. supabase-storage: `delete out.housekeepingTasks`.
+- **✅ browser-verify ผ่าน (CDP→Chrome):** login admin → /housekeeping kanban render (รอ 3/กำลังทำ 1/เสร็จ 1). **MCP: 5 live/5 stamped**, reconcile overwrite orphan stale ด้วย blob (hk004 table rA20/completed → blob rA2/pending/high; hk005 table rB7 → blob rA19). tsc 0 / build 22/22.
+- ⏳ **NEXT:** commit/push/PR C1 (stack บน #19) → **C2** (bookings hub; แก้ schema gap: `bookings/invoices.guest_id` DROP NOT NULL + `bookings.guest_snapshot` jsonb + DROP payments table; b010 walk-in orphan ใน blob → reconcile insert เอง) → **C3** (9 RPCs).
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
