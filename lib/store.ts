@@ -196,6 +196,63 @@ function hkTaskRow(t: HousekeepingTask) {
   }
 }
 
+// dual-write helpers สำหรับ bookings cluster (Tier C Phase C2) — 3 entity ที่ FK ผูกกันแน่น:
+//   bookings        = hub (payments ฝังเป็น jsonb ใน row; walk-in ใช้ guest_snapshot ไม่มี guest_id)
+//   invoices        = สร้างตอนเช็คเอาต์ + เปลี่ยนเป็น refunded ตอนยกเลิก
+//   booking_add_ons = lifecycle requested→fulfilled/cancelled
+// ยังเป็น dual-write best-effort (ไม่ atomic — C3 จะยกเป็น RPC); blob เป็น safety net ระหว่างนี้
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportBookingError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('booking write', error.message)
+}
+// แปลง Booking → row (snake_case) เต็มชุด สำหรับ insert (+ writer_id echo key)
+function bookingRow(b: Booking) {
+  return {
+    id: b.id, room_id: b.roomId, room_type_at_booking: b.roomTypeAtBooking ?? null,
+    guest_id: b.guestId ?? null, guest_snapshot: b.guestSnapshot ?? null,
+    check_in: b.checkIn, check_out: b.checkOut, nights: b.nights,
+    status: b.status, source: b.source,
+    total_amount: b.totalAmount, paid_amount: b.paidAmount,
+    adults: b.adults, children: b.children, special_requests: b.specialRequests,
+    payment_method: b.paymentMethod ?? null,
+    corporate_account_id: b.corporateAccountId ?? null,
+    is_corporate: b.isCorporate ?? false,
+    payments: b.payments ?? [], created_at: b.createdAt, writer_id: CLIENT_ID,
+  }
+}
+// push booking ที่เปลี่ยนขึ้นตาราง — เขียน mutable fields ทั้งชุดทับด้วย id (แพทเทิร์น pushCorpAccount)
+// booking ถูกแก้หลายฟิลด์พร้อมกันในหลาย action (status/paid/payments/checkOut/roomId)
+// → อ่านค่าจาก state ล่าสุดหลัง set() แล้วเขียนทับทั้งแถว ปลอดภัยกว่า patch รายฟิลด์
+function pushBooking(b: Booking) {
+  const { id, created_at: _created, ...rest } = bookingRow(b)
+  void supabase.from('bookings').update(rest).eq('id', id).then(reportBookingError)
+}
+function reportInvoiceError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('invoice write', error.message)
+}
+// แปลง Invoice → row (snake_case) สำหรับ insert (+ writer_id echo key); items เก็บเป็น jsonb
+function invoiceRow(iv: Invoice) {
+  return {
+    id: iv.id, booking_id: iv.bookingId, guest_id: iv.guestId ?? null,
+    amount: iv.amount, tax: iv.tax, total: iv.total, status: iv.status,
+    issued_at: iv.issuedAt, paid_at: iv.paidAt ?? null,
+    payment_method: iv.paymentMethod ?? null, items: iv.items, writer_id: CLIENT_ID,
+  }
+}
+function reportAddOnError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('booking add-on write', error.message)
+}
+// แปลง BookingAddOn → row (snake_case) สำหรับ insert (+ writer_id echo key)
+function bookingAddOnRow(a: BookingAddOn) {
+  return {
+    id: a.id, booking_id: a.bookingId, add_on_item_id: a.addOnItemId,
+    quantity: a.quantity, unit_price: a.unitPrice, total_price: a.totalPrice,
+    status: a.status, requested_at: a.requestedAt, requested_by: a.requestedBy,
+    fulfilled_at: a.fulfilledAt ?? null, fulfilled_by: a.fulfilledBy ?? null,
+    notes: a.notes ?? null, writer_id: CLIENT_ID,
+  }
+}
+
 interface HotelStore {
   rooms: Room[]
   guests: Guest[]
@@ -367,6 +424,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     // (atomic) — ถ้าแยก get()→ตรวจ แล้วค่อย set() สอง submit เร็ว ๆ จะผ่าน conflict ทั้งคู่ = overbooking
     let result: { ok: true } | { ok: false; error: string } = { ok: true }
     let roomFx: string[] = [] // ห้องที่เปลี่ยน status → dual-write หลัง set() (Tier B)
+    let bookingFx: Booking | null = null // booking ใหม่ → dual-write insert หลัง set() (Tier C C2)
     set((state) => {
       if (roomHasConflict(state.bookings, bookingData.roomId, bookingData.checkIn, bookingData.checkOut)) {
         result = { ok: false, error: 'ห้องนี้มีการจองอื่นทับช่วงวันที่เลือกแล้ว' }
@@ -404,12 +462,16 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           )
         : state.rooms
       if (bookingData.status === 'checked_in') roomFx = [bookingData.roomId]
+      bookingFx = newBooking // → dual-write insert หลัง set() (Tier C C2)
       return {
         bookings: [newBooking, ...state.bookings],
         rooms: updatedRooms,
       }
     })
     if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
+    // booking ใหม่ → dual-write insert ขึ้นตาราง bookings (Tier C C2)
+    const bfx = bookingFx as Booking | null
+    if (bfx) void supabase.from('bookings').insert(bookingRow(bfx)).then(reportBookingError)
     return result
   },
 
@@ -424,6 +486,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     let roomFx: string[] = []
     // จับ HK task ที่สร้างตอนเช็คเอาต์ เพื่อ dual-write insert ขึ้นตาราง housekeeping_tasks หลัง set() (Tier C)
     let hkFx: HousekeepingTask | null = null
+    // จับว่า booking row เปลี่ยนจริง (ผ่าน guard ทุกด่าน) เพื่อ dual-write ขึ้นตาราง bookings หลัง set() (Tier C C2)
+    let bookingTouched = false
+    // จับ invoice ที่สร้างตอนเช็คเอาต์ เพื่อ dual-write insert ขึ้นตาราง invoices หลัง set() (Tier C C2)
+    let invoiceFx: Invoice | null = null
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -452,10 +518,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             : r
         )
         roomFx = [booking.roomId]
+        bookingTouched = true
         return { bookings: updatedBookings, rooms: updatedRooms }
       }
 
       if (status !== 'checked_out') {
+        bookingTouched = true
         return { bookings: updatedBookings }
       }
 
@@ -601,6 +669,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         })
       }
 
+      bookingTouched = true
+      invoiceFx = newInvoice // → dual-write insert หลัง set() (Tier C C2)
       return {
         bookings: updatedBookings,
         rooms: updatedRooms,
@@ -636,6 +706,14 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     // HK task ที่สร้างตอนเช็คเอาต์ → dual-write insert ขึ้นตาราง housekeeping_tasks (Tier C)
     const hfx = hkFx as HousekeepingTask | null
     if (hfx) void supabase.from('housekeeping_tasks').insert(hkTaskRow(hfx)).then(reportHkError)
+    // booking row เปลี่ยน (status/paidAmount/payments) → dual-write ขึ้นตาราง bookings (Tier C C2)
+    if (bookingTouched) {
+      const b = get().bookings.find((x) => x.id === bookingId)
+      if (b) pushBooking(b)
+    }
+    // invoice ที่สร้างตอนเช็คเอาต์ → dual-write insert ขึ้นตาราง invoices (Tier C C2)
+    const ivfx = invoiceFx as Invoice | null
+    if (ivfx) void supabase.from('invoices').insert(invoiceRow(ivfx)).then(reportInvoiceError)
   },
 
   cancelBooking: (bookingId) => {
@@ -643,6 +721,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     let corpFx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
     let roomFx: string[] = [] // ห้องที่เปลี่ยน status → dual-write หลัง set() (Tier B)
     let hkFx: HousekeepingTask | null = null // HK task ที่สร้างตอนยกเลิก → dual-write insert หลัง set() (Tier C)
+    let bookingTouched = false // booking row เปลี่ยนจริง → dual-write หลัง set() (Tier C C2)
+    let invoiceFx: string[] = [] // invoice ที่พลิกเป็น refunded → dual-write patch หลัง set() (Tier C C2)
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -699,6 +779,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       }
 
       roomFx = [booking.roomId] // ห้องเปลี่ยน status ตอนยกเลิก → dual-write หลัง set()
+      bookingTouched = true
+      invoiceFx = state.invoices
+        .filter((iv) => iv.bookingId === bookingId && iv.status !== 'refunded')
+        .map((iv) => iv.id)
       return {
         bookings: state.bookings.map((b) =>
           b.id === bookingId
@@ -739,14 +823,34 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     // HK task ที่สร้างตอนยกเลิก (หลังเช็คอิน) → dual-write insert ขึ้นตาราง housekeeping_tasks (Tier C)
     const hfx = hkFx as HousekeepingTask | null
     if (hfx) void supabase.from('housekeeping_tasks').insert(hkTaskRow(hfx)).then(reportHkError)
+    // booking → cancelled (+refund payment) → dual-write ขึ้นตาราง bookings (Tier C C2)
+    if (bookingTouched) {
+      const b = get().bookings.find((x) => x.id === bookingId)
+      if (b) pushBooking(b)
+    }
+    // invoice ของการจองนี้ → refunded → dual-write patch ขึ้นตาราง invoices (Tier C C2)
+    if (invoiceFx.length) {
+      void supabase.from('invoices')
+        .update({ status: 'refunded', writer_id: CLIENT_ID })
+        .in('id', invoiceFx).then(reportInvoiceError)
+    }
   },
 
-  updateBooking: (bookingId, updates) =>
+  updateBooking: (bookingId, updates) => {
     set((state) => ({
       bookings: state.bookings.map((b) =>
         b.id === bookingId ? { ...b, ...updates } : b
       ),
-    })),
+    }))
+    // dual-write: patch เฉพาะฟิลด์ที่เปลี่ยน (camel→snake) + writer_id echo key (Tier C C2)
+    const patch: Record<string, unknown> = { writer_id: CLIENT_ID }
+    if (updates.adults !== undefined) patch.adults = updates.adults
+    if (updates.children !== undefined) patch.children = updates.children
+    if (updates.source !== undefined) patch.source = updates.source
+    if (updates.specialRequests !== undefined) patch.special_requests = updates.specialRequests
+    if (updates.paymentMethod !== undefined) patch.payment_method = updates.paymentMethod ?? null
+    void supabase.from('bookings').update(patch).eq('id', bookingId).then(reportBookingError)
+  },
 
   extendBooking: (bookingId, additionalNights) => {
     const state = get()
@@ -782,6 +886,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           : b
       ),
     }))
+    // checkOut/nights/totalAmount เปลี่ยน → dual-write ขึ้นตาราง bookings (Tier C C2)
+    const extended = get().bookings.find((b) => b.id === bookingId)
+    if (extended) pushBooking(extended)
     return { ok: true }
   },
 
@@ -870,6 +977,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
     // HK task ที่สร้างตอนย้ายห้อง (หลังเช็คอิน) → dual-write insert ขึ้นตาราง housekeeping_tasks (Tier C)
     if (newTask) void supabase.from('housekeeping_tasks').insert(hkTaskRow(newTask)).then(reportHkError)
+    // roomId (+reprice/refund) เปลี่ยน → dual-write ขึ้นตาราง bookings (Tier C C2)
+    const moved = get().bookings.find((b) => b.id === bookingId)
+    if (moved) pushBooking(moved)
     return { ok: true }
   },
 
@@ -919,6 +1029,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         entityId: bookingId,
       })
     }
+    // nights/checkOut/total/paid (+refund payment) เปลี่ยน → dual-write ขึ้นตาราง bookings (Tier C C2)
+    const adjusted = get().bookings.find((x) => x.id === bookingId)
+    if (adjusted) pushBooking(adjusted)
     return { ok: true, newNights: actualNights, newTotal, refunded: overpaid }
   },
 
@@ -1545,6 +1658,11 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         ),
       }
     })
+    // paidAmount/payments เปลี่ยน → dual-write ขึ้นตาราง bookings (Tier C C2)
+    if (result.ok) {
+      const paid = get().bookings.find((b) => b.id === bookingId)
+      if (paid) pushBooking(paid)
+    }
     return result
   },
 
@@ -1566,6 +1684,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       requestedBy: staffId, notes,
     }
     set((s) => ({ bookingAddOns: [newAddOn, ...s.bookingAddOns] }))
+    // dual-write: insert ขึ้นตาราง booking_add_ons (Tier C C2)
+    void supabase.from('booking_add_ons').insert(bookingAddOnRow(newAddOn)).then(reportAddOnError)
     return { ok: true }
   },
 
@@ -1628,6 +1748,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       const s = get()
       const ao = s.bookingAddOns.find((a) => a.id === addOnId)
       const item = ao ? s.addOnItems.find((i) => i.id === ao.addOnItemId) : null
+      // add-on → fulfilled → dual-write patch ขึ้นตาราง booking_add_ons (Tier C C2)
+      if (ao) {
+        void supabase.from('booking_add_ons').update({
+          status: ao.status, fulfilled_at: ao.fulfilledAt ?? null,
+          fulfilled_by: ao.fulfilledBy ?? null, writer_id: CLIENT_ID,
+        }).eq('id', addOnId).then(reportAddOnError)
+      }
       s.logAudit({
         category: 'inventory', action: 'fulfill_addon',
         summary: `จัดการ Add-on "${item?.name ?? ao?.addOnItemId ?? addOnId}"${ao ? ` x${ao.quantity}` : ''}${fx ? ' · ตัดสต็อก' : ''}`,
@@ -1642,10 +1769,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     // side-effect ฝั่ง inventory (คืนสต็อก) ที่ต้อง dual-write ขึ้นตารางหลัง set()
     let invFx: { itemId: string; newStock: number; tx: InventoryTransaction } | null = null
     let refundAudit = 0 // เงินคืนส่วนเกินจากการยกเลิก add-on → log audit หลัง set()
+    let addOnTouched = false // add-on ถูกยกเลิกจริง (ผ่าน guard) → dual-write patch หลัง set() (Tier C C2)
+    let bookingFxId: string | null = null // booking ที่ยอด/payments เปลี่ยนจาก refund → dual-write หลัง set() (Tier C C2)
     set((state) => {
       const addOn = state.bookingAddOns.find((a) => a.id === addOnId)
       if (!addOn) return {}
       if (addOn.status === 'cancelled') return {} // กันยกเลิกซ้ำ
+      addOnTouched = true
       const now = new Date().toISOString()
       const wasFulfilled = addOn.status === 'fulfilled'
       const item = state.addOnItems.find((i) => i.id === addOn.addOnItemId) ?? null
@@ -1684,6 +1814,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         const overpaid = Math.max(0, booking.paidAmount - newCharge)
         if (overpaid > 0) {
           refundAudit = overpaid
+          bookingFxId = booking.id
           const refundPayment: import('@/types').Payment = {
             id: `pay${Date.now()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash',
             date: now, staffId: 'system', notes: `คืนเงินจากการยกเลิก Add-on: ${item?.name ?? addOn.addOnItemId}`,
@@ -1734,6 +1865,18 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     // คืนเครดิตองค์กรจากยกเลิก add-on → dual-write account balance + ledger tx (Tier B)
     const cfx = corpFx as { account: CorporateAccount; tx: CorporateTransaction } | null
     if (cfx) { pushCorpAccount(cfx.account); pushCorpTx(cfx.tx) }
+    // add-on → cancelled → dual-write patch ขึ้นตาราง booking_add_ons (Tier C C2)
+    if (addOnTouched) {
+      void supabase.from('booking_add_ons')
+        .update({ status: 'cancelled', writer_id: CLIENT_ID })
+        .eq('id', addOnId).then(reportAddOnError)
+    }
+    // ยอด/payments ของ booking เปลี่ยนจาก refund → dual-write ขึ้นตาราง bookings (Tier C C2)
+    const bfid = bookingFxId as string | null
+    if (bfid) {
+      const b = get().bookings.find((x) => x.id === bfid)
+      if (b) pushBooking(b)
+    }
     if (refundAudit > 0) {
       get().logAudit({
         category: 'payment', action: 'refund',
@@ -1799,13 +1942,11 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
   // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
   skipHydration: true,
-  // ── relational migration: Tier A + Tier B ครบ + housekeepingTasks (Tier C kickoff) ย้ายไปตารางจริงแล้ว ──
-  // partialize = ตัด slice เหล่านี้ออกจากสิ่งที่เขียนลง blob → ตารางเป็นเจ้าของคนเดียว
+  // ── relational migration: Tier A + Tier B ครบ + Tier C (housekeeping C1 + bookings cluster C2) ย้ายไปตารางจริงแล้ว ──
+  // partialize = ตัด slice ที่ย้ายแล้วออกจากสิ่งที่เขียนลง blob → ตารางเป็นเจ้าของคนเดียว
   // (กัน app_state full-state sync / union-merge มาทับ-หรือชุบชีวิต สิ่งที่ per-table sync เพิ่ง apply)
+  // เหลือใน blob เฉพาะ dynamicPricing (entity สุดท้ายก่อน retire blob)
   partialize: (state) => ({
-    bookings: state.bookings,
-    invoices: state.invoices,
-    bookingAddOns: state.bookingAddOns,
     dynamicPricing: state.dynamicPricing,
   }),
   // blob เก่าอาจยังพก slice ที่ย้ายแล้วติดมา — บังคับใช้ค่าใน current (ปล่อยให้ seed จากตารางเติม)
@@ -1827,6 +1968,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       users: current.users ?? [],
       corporateAccounts: current.corporateAccounts ?? [],
       corporateTransactions: current.corporateTransactions ?? [],
+      bookings: current.bookings ?? [],
+      invoices: current.invoices ?? [],
+      bookingAddOns: current.bookingAddOns ?? [],
     }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading

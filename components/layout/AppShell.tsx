@@ -8,7 +8,7 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff, User, CorporateAccount, CorporateTransaction, Room, HousekeepingTask } from '@/types'
+import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff, User, CorporateAccount, CorporateTransaction, Room, HousekeepingTask, Booking, Invoice, BookingAddOn } from '@/types'
 import { hashPassword } from '@/lib/auth-utils'
 import { toast } from 'sonner'
 
@@ -305,6 +305,104 @@ function hkTaskToRow(t: HousekeepingTask) {
   }
 }
 
+// แปลงแถว bookings (snake_case) → Booking (camelCase). Tier C Phase C2 (hub)
+// payments/guest_snapshot เก็บเป็น jsonb ในแถว → กลับเป็น nested object ตรง ๆ
+function rowToBooking(r: Record<string, unknown>): Booking {
+  const payments = (r.payments ?? []) as NonNullable<Booking['payments']>
+  return {
+    id: String(r.id),
+    roomId: String(r.room_id ?? ''),
+    roomTypeAtBooking: r.room_type_at_booking != null ? (r.room_type_at_booking as Booking['roomTypeAtBooking']) : undefined,
+    guestId: r.guest_id != null ? String(r.guest_id) : undefined,
+    guestSnapshot: r.guest_snapshot != null ? (r.guest_snapshot as Booking['guestSnapshot']) : undefined,
+    checkIn: String(r.check_in ?? ''),
+    checkOut: String(r.check_out ?? ''),
+    nights: Number(r.nights ?? 0),
+    status: r.status as Booking['status'],
+    source: r.source as Booking['source'],
+    totalAmount: Number(r.total_amount ?? 0),
+    paidAmount: Number(r.paid_amount ?? 0),
+    adults: Number(r.adults ?? 0),
+    children: Number(r.children ?? 0),
+    specialRequests: String(r.special_requests ?? ''),
+    createdAt: String(r.created_at ?? ''),
+    paymentMethod: r.payment_method != null ? (r.payment_method as Booking['paymentMethod']) : undefined,
+    corporateAccountId: r.corporate_account_id != null ? String(r.corporate_account_id) : undefined,
+    // blob เก็บ true/undefined (ไม่มี false ชัดแจ้ง) → คงรูปเดิมกัน diff ปลอม
+    isCorporate: r.is_corporate === true ? true : undefined,
+    payments: payments.length > 0 ? payments : undefined,
+  }
+}
+// แปลง Booking → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function bookingToRow(b: Booking) {
+  return {
+    id: b.id, room_id: b.roomId, room_type_at_booking: b.roomTypeAtBooking ?? null,
+    guest_id: b.guestId ?? null, guest_snapshot: b.guestSnapshot ?? null,
+    check_in: b.checkIn, check_out: b.checkOut, nights: b.nights,
+    status: b.status, source: b.source,
+    total_amount: b.totalAmount, paid_amount: b.paidAmount,
+    adults: b.adults, children: b.children, special_requests: b.specialRequests,
+    payment_method: b.paymentMethod ?? null,
+    corporate_account_id: b.corporateAccountId ?? null,
+    is_corporate: b.isCorporate ?? false,
+    payments: b.payments ?? [], created_at: b.createdAt, writer_id: CLIENT_ID,
+  }
+}
+
+// แปลงแถว invoices (snake_case) → Invoice (camelCase); items เก็บเป็น jsonb array
+function rowToInvoice(r: Record<string, unknown>): Invoice {
+  return {
+    id: String(r.id),
+    bookingId: String(r.booking_id ?? ''),
+    guestId: r.guest_id != null ? String(r.guest_id) : undefined,
+    amount: Number(r.amount ?? 0),
+    tax: Number(r.tax ?? 0),
+    total: Number(r.total ?? 0),
+    status: r.status as Invoice['status'],
+    issuedAt: String(r.issued_at ?? ''),
+    paidAt: r.paid_at != null ? String(r.paid_at) : undefined,
+    paymentMethod: r.payment_method != null ? (r.payment_method as Invoice['paymentMethod']) : undefined,
+    items: (r.items ?? []) as Invoice['items'],
+  }
+}
+// แปลง Invoice → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function invoiceToRow(iv: Invoice) {
+  return {
+    id: iv.id, booking_id: iv.bookingId, guest_id: iv.guestId ?? null,
+    amount: iv.amount, tax: iv.tax, total: iv.total, status: iv.status,
+    issued_at: iv.issuedAt, paid_at: iv.paidAt ?? null,
+    payment_method: iv.paymentMethod ?? null, items: iv.items, writer_id: CLIENT_ID,
+  }
+}
+
+// แปลงแถว booking_add_ons (snake_case) → BookingAddOn (camelCase)
+function rowToBookingAddOn(r: Record<string, unknown>): BookingAddOn {
+  return {
+    id: String(r.id),
+    bookingId: String(r.booking_id ?? ''),
+    addOnItemId: String(r.add_on_item_id ?? ''),
+    quantity: Number(r.quantity ?? 0),
+    unitPrice: Number(r.unit_price ?? 0),
+    totalPrice: Number(r.total_price ?? 0),
+    status: r.status as BookingAddOn['status'],
+    requestedAt: String(r.requested_at ?? ''),
+    requestedBy: String(r.requested_by ?? ''),
+    fulfilledAt: r.fulfilled_at != null ? String(r.fulfilled_at) : undefined,
+    fulfilledBy: r.fulfilled_by != null ? String(r.fulfilled_by) : undefined,
+    notes: r.notes != null ? String(r.notes) : undefined,
+  }
+}
+// แปลง BookingAddOn → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+function bookingAddOnToRow(a: BookingAddOn) {
+  return {
+    id: a.id, booking_id: a.bookingId, add_on_item_id: a.addOnItemId,
+    quantity: a.quantity, unit_price: a.unitPrice, total_price: a.totalPrice,
+    status: a.status, requested_at: a.requestedAt, requested_by: a.requestedBy,
+    fulfilled_at: a.fulfilledAt ?? null, fulfilled_by: a.fulfilledBy ?? null,
+    notes: a.notes ?? null, writer_id: CLIENT_ID,
+  }
+}
+
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -351,6 +449,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             staff: _migStaff, users: _migUsers,
             corporateAccounts: _migCorpAcc, corporateTransactions: _migCorpTx,
             rooms: _migRooms, housekeepingTasks: _migHk,
+            bookings: _migBookings, invoices: _migInvoices, bookingAddOns: _migBookingAddOns,
             ...rest
           } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
@@ -864,6 +963,117 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
+    // ── bookings relational sync (Tier C C2 — hub) — mutable + soft-delete (แพทเทิร์น guests/rooms/hk) ──
+    let bookingsLive = false
+    type BookingEvent = { id: string; deleted: boolean; booking: Booking }
+    const bookingsBuffer: BookingEvent[] = []
+    const applyBookingEvents = (events: BookingEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.bookings.map((b) => [b.id, b]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.booking)
+          }
+          return { bookings: Array.from(byId.values()) }
+        })
+      )
+    }
+    const bookingsChannel = supabase
+      .channel('bookings-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'bookings' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: BookingEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            booking: rowToBooking(row),
+          }
+          if (!bookingsLive) { bookingsBuffer.push(ev); return }
+          applyBookingEvents([ev])
+        }
+      )
+      .subscribe()
+
+    // ── invoices relational sync (Tier C C2) — mutable (สร้างตอนเช็คเอาต์ + refunded ตอนยกเลิก) ──
+    let invoicesLive = false
+    type InvoiceEvent = { id: string; deleted: boolean; invoice: Invoice }
+    const invoicesBuffer: InvoiceEvent[] = []
+    const applyInvoiceEvents = (events: InvoiceEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.invoices.map((iv) => [iv.id, iv]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.invoice)
+          }
+          const merged = Array.from(byId.values()).sort((a, b) =>
+            a.issuedAt < b.issuedAt ? 1 : -1
+          )
+          return { invoices: merged }
+        })
+      )
+    }
+    const invoicesChannel = supabase
+      .channel('invoices-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'invoices' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: InvoiceEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            invoice: rowToInvoice(row),
+          }
+          if (!invoicesLive) { invoicesBuffer.push(ev); return }
+          applyInvoiceEvents([ev])
+        }
+      )
+      .subscribe()
+
+    // ── booking_add_ons relational sync (Tier C C2) — mutable lifecycle requested→fulfilled/cancelled ──
+    let bAddOnsLive = false
+    type BAddOnEvent = { id: string; deleted: boolean; addOn: BookingAddOn }
+    const bAddOnsBuffer: BAddOnEvent[] = []
+    const applyBAddOnEvents = (events: BAddOnEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.bookingAddOns.map((a) => [a.id, a]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.addOn)
+          }
+          return { bookingAddOns: Array.from(byId.values()) }
+        })
+      )
+    }
+    const bAddOnsChannel = supabase
+      .channel('booking_add_ons-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'booking_add_ons' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: BAddOnEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            addOn: rowToBookingAddOn(row),
+          }
+          if (!bAddOnsLive) { bAddOnsBuffer.push(ev); return }
+          applyBAddOnEvents([ev])
+        }
+      )
+      .subscribe()
+
     // ⚠️ ต้อง AWAIT อ่าน app_state ให้เสร็จ "ก่อน" เรียก rehydrate (deterministic ไม่ใช่ race)
     // เหตุผล: rehydrate จะ trigger persist write ครั้งแรก (onRehydrateStorage setState _hasHydrated)
     // ที่ partialize ตัด migrated slice ทิ้งจาก blob. ถ้าอ่านหลัง/พร้อมกับ rehydrate อาจได้ค่าว่าง →
@@ -1362,6 +1572,115 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       hkBuffer.length = 0
       hkLive = true
+
+      // ── seed bookings (Tier C C2 — hub) + one-time reconcile จาก blob ──
+      // ตาราง 001 มี orphan seed 9 แถวที่ stale + blob มี booking ที่ตารางไม่มี (b010 walk-in)
+      // (blob = แหล่งจริง — status/paid/payments ขยับจาก lifecycle สะสมมา) → everWritten flag,
+      // reconcile จาก bootState (await อ่านก่อน rehydrate = pre-strip) + guard blob length>0 (บทเรียน rooms)
+      // ⚠️ ลำดับ FK: bookings (parent) ต้องเสร็จก่อน invoices/booking_add_ons (child) — กัน FK violation ตอน seed
+      const { data: bkData, error: bkErr } = await supabase
+        .from('bookings')
+        .select('*')
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
+      if (bkErr) {
+        console.error('[bookings-sync] seed:', bkErr.message)
+      } else {
+        let rows = bkData ?? []
+        const everWritten = rows.some((r) => r.writer_id != null)
+        const blobBookings = (bootState.bookings ?? []) as Booking[]
+        if (!everWritten && blobBookings.length > 0) {
+          const { error: upErr } = await supabase.from('bookings')
+            .upsert(blobBookings.map(bookingToRow), { onConflict: 'id' })
+          if (upErr) console.error('[bookings-sync] reconcile upsert:', upErr.message)
+          const blobIds = new Set(blobBookings.map((b) => b.id))
+          const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+          if (orphanIds.length > 0) {
+            const { error: delErr } = await supabase.from('bookings')
+              .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+              .in('id', orphanIds)
+            if (delErr) console.error('[bookings-sync] reconcile soft-delete:', delErr.message)
+          }
+          const re = await supabase
+            .from('bookings').select('*').is('deleted_at', null)
+            .order('created_at', { ascending: false })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ bookings: rows.map(rowToBooking) }))
+        if (bookingsBuffer.length) applyBookingEvents(bookingsBuffer)
+      }
+      bookingsBuffer.length = 0
+      bookingsLive = true
+
+      // ── seed invoices (Tier C C2) + one-time reconcile จาก blob (หลัง bookings เพราะ FK booking_id) ──
+      const { data: ivData, error: ivErr } = await supabase
+        .from('invoices')
+        .select('*')
+        .is('deleted_at', null)
+        .order('issued_at', { ascending: false })
+      if (ivErr) {
+        console.error('[invoices-sync] seed:', ivErr.message)
+      } else {
+        let rows = ivData ?? []
+        const everWritten = rows.some((r) => r.writer_id != null)
+        const blobInvoices = (bootState.invoices ?? []) as Invoice[]
+        if (!everWritten && blobInvoices.length > 0) {
+          const { error: upErr } = await supabase.from('invoices')
+            .upsert(blobInvoices.map(invoiceToRow), { onConflict: 'id' })
+          if (upErr) console.error('[invoices-sync] reconcile upsert:', upErr.message)
+          const blobIds = new Set(blobInvoices.map((iv) => iv.id))
+          const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+          if (orphanIds.length > 0) {
+            const { error: delErr } = await supabase.from('invoices')
+              .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+              .in('id', orphanIds)
+            if (delErr) console.error('[invoices-sync] reconcile soft-delete:', delErr.message)
+          }
+          const re = await supabase
+            .from('invoices').select('*').is('deleted_at', null)
+            .order('issued_at', { ascending: false })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ invoices: rows.map(rowToInvoice) }))
+        if (invoicesBuffer.length) applyInvoiceEvents(invoicesBuffer)
+      }
+      invoicesBuffer.length = 0
+      invoicesLive = true
+
+      // ── seed booking_add_ons (Tier C C2) + one-time reconcile จาก blob (หลัง bookings เพราะ FK booking_id) ──
+      const { data: baData, error: baErr } = await supabase
+        .from('booking_add_ons')
+        .select('*')
+        .is('deleted_at', null)
+        .order('requested_at', { ascending: false })
+      if (baErr) {
+        console.error('[booking-add-ons-sync] seed:', baErr.message)
+      } else {
+        let rows = baData ?? []
+        const everWritten = rows.some((r) => r.writer_id != null)
+        const blobAddOns = (bootState.bookingAddOns ?? []) as BookingAddOn[]
+        if (!everWritten && blobAddOns.length > 0) {
+          const { error: upErr } = await supabase.from('booking_add_ons')
+            .upsert(blobAddOns.map(bookingAddOnToRow), { onConflict: 'id' })
+          if (upErr) console.error('[booking-add-ons-sync] reconcile upsert:', upErr.message)
+          const blobIds = new Set(blobAddOns.map((a) => a.id))
+          const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+          if (orphanIds.length > 0) {
+            const { error: delErr } = await supabase.from('booking_add_ons')
+              .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+              .in('id', orphanIds)
+            if (delErr) console.error('[booking-add-ons-sync] reconcile soft-delete:', delErr.message)
+          }
+          const re = await supabase
+            .from('booking_add_ons').select('*').is('deleted_at', null)
+            .order('requested_at', { ascending: false })
+          rows = re.data ?? rows
+        }
+        applyRemoteState(() => useHotelStore.setState({ bookingAddOns: rows.map(rowToBookingAddOn) }))
+        if (bAddOnsBuffer.length) applyBAddOnEvents(bAddOnsBuffer)
+      }
+      bAddOnsBuffer.length = 0
+      bAddOnsLive = true
     })()
 
     return () => {
@@ -1379,6 +1698,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(corpTxChannel)
       supabase.removeChannel(roomsChannel)
       supabase.removeChannel(hkChannel)
+      supabase.removeChannel(bookingsChannel)
+      supabase.removeChannel(invoicesChannel)
+      supabase.removeChannel(bAddOnsChannel)
     }
   }, [])
 

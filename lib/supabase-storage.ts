@@ -138,6 +138,9 @@ function mergeState(
   delete out.corporateTransactions
   delete out.rooms
   delete out.housekeepingTasks
+  delete out.bookings
+  delete out.invoices
+  delete out.bookingAddOns
   return out
 }
 
