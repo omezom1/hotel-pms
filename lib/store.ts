@@ -26,6 +26,11 @@ function hasPerm(key: keyof StaffPermissions): boolean {
   try { return useAuthStore.getState().hasPermission(key) } catch { return false }
 }
 
+// id ทุกตัวที่เขียนขึ้นตาราง relational ต้องมี random suffix — Date.now() ล้วนชนกันได้เมื่อ
+// สองแท็บ/สอง action ยิงในมิลลิวินาทีเดียว แล้วแถวที่ id ซ้ำจะหายเงียบ (insert 23505 ถูกมองเป็น
+// idempotent echo) หรือทำ RPC ทั้งก้อน abort (Tier C C3)
+const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+
 // dual-write helper: รายงาน error ของการเขียนตาราง expenses (relational migration Tier A)
 // 23505 = PK ซ้ำ (echo/retry) → idempotent ไม่ถือเป็นความผิดพลาด; อื่น ๆ เตือนผู้ใช้
 function reportExpenseError({ error }: { error: { code?: string; message: string } | null }) {
@@ -432,7 +437,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       }
       const now = new Date().toISOString()
       // id ผูก random กัน Date.now() ชนกันเมื่อสร้างสอง booking ในมิลลิวินาทีเดียว
-      const uid = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+      const uid = newId()
       const bookingId = `b${uid}`
       // ถ้าจ่ายเงินมาตั้งแต่ตอนสร้าง (walk-in หรือ confirmed ที่จ่ายเต็ม) → push เข้า payments[]
       const initialPayment: import('@/types').Payment | null = bookingData.paidAmount > 0
@@ -549,7 +554,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         const acc = state.corporateAccounts.find((a) => a.id === booking.corporateAccountId)
         if (acc && acc.availableBalance >= outstanding) {
           const corpTx: CorporateTransaction = {
-            id: `ctx${Date.now()}`,
+            id: `ctx${newId()}`,
             corporateAccountId: booking.corporateAccountId,
             type: 'charge',
             amount: outstanding,
@@ -572,7 +577,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           corpFx = { account: updatedAcc, tx: corpTx }
           newPaidAmount = combinedTotal
           corpPayment = {
-            id: `pay${Date.now()}`,
+            id: `pay${newId()}`,
             amount: outstanding,
             method: 'bank_transfer',
             date: now,
@@ -613,7 +618,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       ]
       const invoiceStatus: InvoiceStatus = newPaidAmount >= combinedTotal ? 'paid' : 'issued'
       const newInvoice: Invoice = {
-        id: `inv${Date.now()}`,
+        id: `inv${newId()}`,
         bookingId,
         guestId: booking.guestId,
         amount: combinedTotal,
@@ -646,7 +651,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       const newTask: HousekeepingTask | null = hasOpenMaintenance
         ? null
         : {
-            id: `hk${Date.now()}`,
+            id: `hk${newId()}`,
             roomId: booking.roomId,
             roomNumber: room?.number ?? '-',
             assignedTo: '',
@@ -751,7 +756,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       refundAudit = refundAmount
       const refundPayment: import('@/types').Payment | null = refundAmount > 0
         ? {
-            id: `pay${Date.now()}`,
+            id: `pay${newId()}`,
             amount: -refundAmount,
             method: booking.paymentMethod ?? 'cash',
             date: now,
@@ -769,7 +774,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           const updatedAcc = { ...acc, totalUsed: Math.max(0, acc.totalUsed - refundAmount), availableBalance: acc.availableBalance + refundAmount }
           updatedCorpAccounts = state.corporateAccounts.map((a) => (a.id === acc.id ? updatedAcc : a))
           const ctx: CorporateTransaction = {
-            id: `ctx${Date.now()}`, corporateAccountId: acc.id, type: 'refund', amount: refundAmount,
+            id: `ctx${newId()}`, corporateAccountId: acc.id, type: 'refund', amount: refundAmount,
             balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + refundAmount,
             performedBy: 'system', date: now, bookingId, notes: 'คืนเครดิตจากการยกเลิกการจอง',
           }
@@ -778,7 +783,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         }
       }
 
-      roomFx = [booking.roomId] // ห้องเปลี่ยน status ตอนยกเลิก → dual-write หลัง set()
+      // ปล่อยห้องเฉพาะเมื่อ booking นี้ครองห้องจริง (เช็คอินอยู่ หรือ pointer ห้องชี้มาที่ booking นี้)
+      // — ยกเลิก booking อนาคตของห้องที่มีแขกอื่นพักอยู่ ห้ามสั่งห้องว่าง/ล้าง pointer ของเขา
+      const releaseRoom = wasCheckedIn || room?.currentBookingId === bookingId
+      roomFx = releaseRoom ? [booking.roomId] : []
       bookingTouched = true
       invoiceFx = state.invoices
         .filter((iv) => iv.bookingId === bookingId && iv.status !== 'refunded')
@@ -795,7 +803,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             : b
         ),
         rooms: state.rooms.map((r) =>
-          r.id === booking.roomId
+          r.id === booking.roomId && releaseRoom
             ? { ...r, status: (wasCheckedIn ? 'cleaning' : 'available') as RoomStatus, currentBookingId: undefined, currentGuestId: undefined }
             : r
         ),
@@ -913,7 +921,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const now = new Date().toISOString()
     const newTask: HousekeepingTask | null = wasCheckedIn && oldRoom
       ? {
-          id: `hk${Date.now()}`,
+          id: `hk${newId()}`,
           roomId: booking.roomId,
           roomNumber: oldRoom.number,
           assignedTo: '',
@@ -932,7 +940,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       : booking.totalAmount
     const overpaid = reprice ? Math.max(0, booking.paidAmount - newTotal) : 0
     const refundPayment: import('@/types').Payment | null = overpaid > 0
-      ? { id: `pay${Date.now()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการย้ายห้อง (ราคาใหม่ต่ำกว่ายอดที่จ่าย)' }
+      ? { id: `pay${newId()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการย้ายห้อง (ราคาใหม่ต่ำกว่ายอดที่จ่าย)' }
       : null
     // ห้องเปลี่ยน status เฉพาะเมื่อย้ายหลังเช็คอิน (ห้องเก่า→cleaning, ใหม่→occupied) → dual-write หลัง set() (Tier B)
     const roomFx = wasCheckedIn ? [booking.roomId, newRoomId] : []
@@ -1005,7 +1013,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     // จ่ายมาเกินยอดใหม่ → คืนเงินส่วนเกิน (บันทึก payment ติดลบ เหมือน flow ยกเลิก)
     const overpaid = Math.max(0, b.paidAmount - newTotal)
     const refundPayment: import('@/types').Payment | null = overpaid > 0
-      ? { id: `pay${Date.now()}`, amount: -overpaid, method: b.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการออกก่อนกำหนด' }
+      ? { id: `pay${newId()}`, amount: -overpaid, method: b.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการออกก่อนกำหนด' }
       : null
 
     set((s) => ({
@@ -1036,7 +1044,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   },
 
   addGuest: (guestData) => {
-    const id = `g${Date.now()}`
+    const id = `g${newId()}`
     const newGuest: Guest = { ...guestData, id }
     set((state) => ({
       guests: [...state.guests, newGuest],
@@ -1062,7 +1070,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   },
 
   addHousekeepingTask: (taskData) => {
-    const newTask: HousekeepingTask = { ...taskData, id: `hk${Date.now()}` }
+    const newTask: HousekeepingTask = { ...taskData, id: `hk${newId()}` }
     set((state) => ({ housekeepingTasks: [...state.housekeepingTasks, newTask] }))
     // dual-write: insert ขึ้นตาราง housekeeping_tasks (Tier C)
     void supabase.from('housekeeping_tasks').insert(hkTaskRow(newTask)).then(reportHkError)
@@ -1106,7 +1114,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
 
   // ── maintenance dual-write (Tier A) — maintenanceLogs ย้ายไปตาราง; rooms-side-effect ย้ายเป็นตารางแล้ว (Tier B) ──
   addMaintenanceLog: (logData) => {
-    const newLog: MaintenanceLog = { ...logData, id: `m${Date.now()}` }
+    const newLog: MaintenanceLog = { ...logData, id: `m${newId()}` }
     let roomFx: string[] = [] // ห้องที่ตั้งเป็น maintenance → dual-write หลัง set() (Tier B)
     set((state) => {
       // ตั้งห้องเป็น maintenance ทันทีถ้า issue ยังไม่ resolved (ห้องที่ไม่ได้ occupied)
@@ -1192,7 +1200,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
 
   // ── inventory dual-write (Tier A, strangler) — blob ยังเป็นแหล่งจริงช่วง dual-write ──
   addInventoryItem: (itemData) => {
-    const newItem: InventoryItem = { ...itemData, id: `inv${Date.now()}` }
+    const newItem: InventoryItem = { ...itemData, id: `inv${newId()}` }
     set((state) => ({ inventoryItems: [...state.inventoryItems, newItem] }))
     void supabase.from('inventory_items').insert(inventoryItemRow(newItem)).then(reportInventoryError)
   },
@@ -1227,7 +1235,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const reasonText = reason === 'transfer' ? 'โอนออก/ย้ายคลัง' : reason === 'discontinue' ? 'เลิกใช้รายการ' : 'ตัดเป็นของเสีย'
     const writeOffTx: InventoryTransaction | null = item && item.currentStock > 0
       ? {
-          id: `itx${Date.now()}`, itemId: id, type: reason === 'waste' ? 'waste' : 'adjust', quantity: -item.currentStock,
+          id: `itx${newId()}`, itemId: id, type: reason === 'waste' ? 'waste' : 'adjust', quantity: -item.currentStock,
           performedBy: staffId, date: now, notes: `${reasonText} (ลบรายการ "${item.name}")`,
         }
       : null
@@ -1252,7 +1260,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const now = new Date().toISOString()
     const newStock = item.currentStock + quantity
     const tx: InventoryTransaction = {
-      id: `itx${Date.now()}`, itemId, type: 'restock', quantity, performedBy: staffId, date: now, notes,
+      id: `itx${newId()}`, itemId, type: 'restock', quantity, performedBy: staffId, date: now, notes,
     }
     set((state) => ({
       inventoryItems: state.inventoryItems.map((it) =>
@@ -1275,7 +1283,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const now = new Date().toISOString()
     const newStock = item.currentStock - quantity
     const tx: InventoryTransaction = {
-      id: `itx${Date.now()}`, itemId, type: 'use', quantity: -quantity, performedBy: staffId, date: now, referenceId, notes,
+      id: `itx${newId()}`, itemId, type: 'use', quantity: -quantity, performedBy: staffId, date: now, referenceId, notes,
     }
     set((s) => ({
       inventoryItems: s.inventoryItems.map((it) =>
@@ -1294,7 +1302,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const now = new Date().toISOString()
     const diff = newQuantity - item.currentStock
     const tx: InventoryTransaction = {
-      id: `itx${Date.now()}`, itemId, type: 'adjust', quantity: diff, performedBy: staffId, date: now, notes,
+      id: `itx${newId()}`, itemId, type: 'adjust', quantity: diff, performedBy: staffId, date: now, notes,
     }
     set((state) => ({
       inventoryItems: state.inventoryItems.map((i) =>
@@ -1308,7 +1316,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
 
   addCorporateAccount: (accountData) => {
     const newAccount: CorporateAccount = {
-      ...accountData, id: `corp${Date.now()}`,
+      ...accountData, id: `corp${newId()}`,
       totalDeposited: 0, totalUsed: 0, availableBalance: 0,
       createdAt: new Date().toISOString(),
     }
@@ -1335,7 +1343,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       const acc = state.corporateAccounts.find((a) => a.id === accountId)
       if (!acc) return {}
       const tx: CorporateTransaction = {
-        id: `ctx${Date.now()}`, corporateAccountId: accountId, type: 'deposit', amount,
+        id: `ctx${newId()}`, corporateAccountId: accountId, type: 'deposit', amount,
         balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + amount,
         performedBy: staffId, date: now, notes,
       }
@@ -1358,7 +1366,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       const acc = state.corporateAccounts.find((a) => a.id === accountId)
       if (!acc || acc.availableBalance < amount) return {}
       const tx: CorporateTransaction = {
-        id: `ctx${Date.now()}`, corporateAccountId: accountId, type: 'charge', amount,
+        id: `ctx${newId()}`, corporateAccountId: accountId, type: 'charge', amount,
         balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance - amount,
         performedBy: staffId, date: now, bookingId, notes,
       }
@@ -1380,7 +1388,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       const acc = state.corporateAccounts.find((a) => a.id === accountId)
       if (!acc) return {}
       const tx: CorporateTransaction = {
-        id: `ctx${Date.now()}`, corporateAccountId: accountId, type: 'refund', amount,
+        id: `ctx${newId()}`, corporateAccountId: accountId, type: 'refund', amount,
         balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + amount,
         performedBy: staffId, date: now, bookingId, notes,
       }
@@ -1400,7 +1408,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // blob ยังเป็นแหล่งจริงช่วง dual-write → write ที่ fail แค่ทำให้ตารางคลาดเคลื่อน 1 แถว (rollback ฟรี)
   // แต่ "ห้าม fire-and-forget เงียบ" — fail แล้วต้องเตือน (กันข้อมูลหายเงียบหลัง cutover)
   addExpense: (expense) => {
-    const newExpense: Expense = { ...expense, id: `exp${Date.now()}`, createdAt: new Date().toISOString() }
+    const newExpense: Expense = { ...expense, id: `exp${newId()}`, createdAt: new Date().toISOString() }
     set((state) => ({ expenses: [newExpense, ...state.expenses] }))
     void supabase
       .from('expenses')
@@ -1455,7 +1463,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (state.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
       return { ok: false, error: 'ชื่อผู้ใช้นี้ถูกใช้แล้ว' }
     }
-    const newUser: User = { ...userData, username, id: `u${Date.now()}`, password: hashPassword(userData.password) }
+    const newUser: User = { ...userData, username, id: `u${newId()}`, password: hashPassword(userData.password) }
     set((s) => ({ users: [...s.users, newUser] }))
     // dual-write: insert ขึ้นตาราง users (Tier B)
     void supabase.from('users').insert(userRow(newUser)).then(reportUserError)
@@ -1533,7 +1541,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
 
   addStaff: (staffData) => {
     if (!hasPerm('canManageStaff')) { console.warn('[security] addStaff ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageStaff'); return '' }
-    const id = `s${Date.now()}`
+    const id = `s${newId()}`
     const newStaff: Staff = { ...staffData, id }
     set((state) => ({ staff: [...state.staff, newStaff] }))
     // dual-write: insert ขึ้นตาราง staff (Tier B)
@@ -1678,7 +1686,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (quantity <= 0) return { ok: false, error: 'จำนวนต้องมากกว่า 0' }
 
     const newAddOn: BookingAddOn = {
-      id: `ba${Date.now()}`, bookingId, addOnItemId, quantity,
+      id: `ba${newId()}`, bookingId, addOnItemId, quantity,
       unitPrice: item.price, totalPrice: item.price * quantity,
       status: 'requested', requestedAt: new Date().toISOString(),
       requestedBy: staffId, notes,
@@ -1718,7 +1726,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           return {}
         }
         const invTx: InventoryTransaction = {
-          id: `itx${Date.now()}`, itemId: item.inventoryItemId, type: 'use',
+          id: `itx${newId()}`, itemId: item.inventoryItemId, type: 'use',
           quantity: -deduct, referenceId: addOnId, performedBy: staffId, date: now,
           notes: `Add-on: ${item.name} x${addOn.quantity}`,
         }
@@ -1787,7 +1795,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         const restore = item.inventoryQtyPerUnit * addOn.quantity
         const inv = state.inventoryItems.find((i) => i.id === item.inventoryItemId)
         const invTx: InventoryTransaction = {
-          id: `itx${Date.now()}`, itemId: item.inventoryItemId, type: 'adjust',
+          id: `itx${newId()}`, itemId: item.inventoryItemId, type: 'adjust',
           quantity: restore, referenceId: addOnId, performedBy: 'system',
           date: now,
           notes: `คืนสต็อกจากการยกเลิก Add-on: ${item.name} x${addOn.quantity}`,
@@ -1816,7 +1824,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           refundAudit = overpaid
           bookingFxId = booking.id
           const refundPayment: import('@/types').Payment = {
-            id: `pay${Date.now()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash',
+            id: `pay${newId()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash',
             date: now, staffId: 'system', notes: `คืนเงินจากการยกเลิก Add-on: ${item?.name ?? addOn.addOnItemId}`,
           }
           updatedBookings = state.bookings.map((b) =>
@@ -1831,7 +1839,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
               const updatedAcc = { ...acc, totalUsed: Math.max(0, acc.totalUsed - overpaid), availableBalance: acc.availableBalance + overpaid }
               updatedCorpAccounts = state.corporateAccounts.map((a) => (a.id === acc.id ? updatedAcc : a))
               const ctx: CorporateTransaction = {
-                id: `ctx${Date.now()}`, corporateAccountId: acc.id, type: 'refund', amount: overpaid,
+                id: `ctx${newId()}`, corporateAccountId: acc.id, type: 'refund', amount: overpaid,
                 balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + overpaid,
                 performedBy: 'system', date: now, bookingId: booking.id, notes: 'คืนเครดิตจากการยกเลิก Add-on',
               }

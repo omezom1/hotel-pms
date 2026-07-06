@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-07-02
+> อัปเดตล่าสุด: 2026-07-06
 
 ---
 
@@ -355,6 +355,19 @@
 - **AppShell:** mappers 3 คู่ (`rowToBooking`/`bookingToRow` [payments/guestSnapshot jsonb→nested, isCorporate true/undefined คงรูป blob], `rowToInvoice`/`invoiceToRow` [items jsonb], `rowToBookingAddOn`/`bookingAddOnToRow`) + 3 channels (event '*', soft-delete→remove, buffer-then-live) + 3 reconcile blocks (everWritten + bootState pre-strip + guard `blob*.length>0`) **ลำดับ FK: bookings ก่อน → invoices/addons หลัง**. b010 walk-in orphan ใน blob → reconcile upsert insert เอง. supabase-storage: `delete out.bookings/invoices/bookingAddOns`
 - tsc 0 / build 22/22.
 - **✅ browser-verify ผ่าน (CDP→Chrome, dev+prod DB):** reconcile ครบ — ตาราง **11 bookings (10 จาก blob รวม b010 walk-in + 1 VERIFY-TEST) / 4 invoices / 3 addons ทั้งหมด stamped writer_id**; UI /bookings render จากตาราง (เห็น b010 "สมชาย ผ่านมา (ไม่ลงทะเบียน)"), /finance 4 ใบ/รายได้ตรง; **create round-trip:** จองล่วงหน้า VERIFY-TEST (paid=0 ไม่แตะเงิน/ห้อง) → insert ขึ้นตารางพร้อม guest_snapshot; **cancel round-trip:** ยกเลิกผ่าน /bookings/[id] → ตาราง status=cancelled. **blob strip แล้วเหลือ key เดียว = `dynamicPricing`** (VERIFY-TEST booking ถูกยกเลิกทิ้งไว้เป็น trace — soft-delete ไม่มี hard delete)
+
+### 2026-07-06 (Tier C — C3 ครึ่งแรก: DDL 020 = 9 RPCs + bug-review + แก้ HIGH×2/MED×2) — branch `feat/tierC-c3-rpc-atomicity`
+**C3 = ชิ้นสุดท้ายของ migration** (เปลี่ยน multi-entity actions จาก dual-write best-effort → 1 RPC atomic ใน transaction เดียว) — แผนเต็ม `~/.claude/plans/delegated-watching-pillow.md`. รอบนี้ทำ **ครึ่ง DB เสร็จ**: DDL + รีวิวหาบั๊ก + แก้; **ครึ่ง client (callRpc/refactor store) ยังไม่เริ่ม**
+- **DDL `020_tier_c_rpc.sql` เขียน + ✅ apply ลง live DB ผ่าน MCP:** helper `pms_day` (substr 10 = mirror `day()`) + `pms_room_conflict` (**mirror `roomHasConflict`/`isActiveReservation` ใน lib/utils.ts เป๊ะ — verify แล้ว**) + **9 RPCs** (create_booking_with_conflict_check / check_out_booking / cancel_booking / move_room / record_payment / fulfill_add_on / cancel_add_on / extend_booking / adjust_for_early_checkout — ทุกตัว SECURITY DEFINER, lock แถวด้วย FOR UPDATE + advisory lock ต่อห้อง, derive ยอดเงินจาก live row, คืน jsonb ทุกแถวที่เขียน, error แบบ `CODE|ข้อความไทย`) + REVOKE/GRANT ครบ. **RPC ยังไม่ถูกเรียกจาก client — prod ยังใช้ dual-write C2 ตามเดิม = ปลอดภัย ไม่มีอะไรเปลี่ยนพฤติกรรม**
+- **🔍 bug-review เทียบ SQL กับ client logic ทั้ง 9 ตัว → เจอ 6 ประเด็น แก้แล้ว 4 (HIGH×2 + MED×2), เหลือ LOW×2 (ตั้งใจข้าม):**
+  - **HIGH-1 `record_payment` retry เงินเบิ้ล:** `paid_amount +=` อยู่นอก CASE ที่กัน payment id ซ้ำ → ยิงซ้ำ (retry หลัง timeout) เงินบวก 2 รอบ. **แก้:** เช็ค `payments @> [{id}]` **ก่อน** validate ยอดค้าง → เจอซ้ำ = no-op คืนแถวปัจจุบัน
+  - **HIGH-2 `extend_booking` retry เบิ้ล nights/total + cross-tab stale:** ไม่มี idempotency เลย + อีกแท็บ extend ก่อนจะทำ check_out ถอยหลังได้. **แก้: เปลี่ยน signature เป็น 6 params เพิ่ม `p_old_check_out` (CAS)** — ถึงเป้าแล้ว=no-op, ฐานไม่ตรง=RAISE STALE_BOOKING. DROP signature เก่า 5-params แล้ว. **⚠️ callRpc ของ extend ต้องส่ง old_check_out ด้วย**
+  - **MED-3 id ชน = แถวเงินหายเงียบ:** store gen id แบบ `inv/hk/pay/ctx/itx${Date.now()}` ไม่มี random → 2 แท็บ/2 action ใน ms เดียว id ซ้ำ → insert 23505 ถูกกลืน (มองเป็น idempotent echo) = invoice/ledger หายแต่เงินขยับ. **แก้ 2 ฝั่ง:** (ก) store.ts เพิ่ม helper **`newId()`** (`Date.now()-random`) กวาดเปลี่ยน **28 จุด**; (ข) **ถอด `ON CONFLICT DO NOTHING` ออกจาก RPC ทั้ง 9 จุด** — retry ถูก status guard (STALE_*) ตัดหมดแล้ว id ชนจริง = corruption ให้ 23505 abort ทั้ง tx ดัง ๆ ดีกว่ากลืนเงียบ
+  - **MED-4 `cancel_booking` ปล่อยห้องของแขกคนอื่น:** ยกเลิก booking **อนาคต** ของห้องที่มีแขกอื่นเช็คอินอยู่ → ห้องโดนสั่ง available + ล้าง pointer (บั๊กเดิมของ store ด้วย!). **แก้ทั้ง RPC + store.ts (`releaseRoom`):** แตะห้องเฉพาะ `wasCheckedIn || room.currentBookingId === bookingId`
+  - **LOW ค้าง (ยอมรับ):** lock order `cancel_add_on` (addon→inventory→booking) เบี่ยงจาก comment P4 booking-first — ไล่แล้วยังไม่มี deadlock cycle จริง แต่เปราะต่อ RPC ใหม่; ลำดับรายการในใบแจ้งหนี้ (ORDER BY requested_at) ต่างจาก optimistic — cosmetic, P2 apply ทับให้เอง
+- **✅ เทสต์บน live DB แบบ `BEGIN…ROLLBACK`** (สร้าง booking ปลอม ยิง RPC จริง assert แล้ว rollback — ไม่แตะข้อมูลจริง, leftover=0): retry record_payment/extend = ครั้งเดียว · stale extend = STALE + แถวไม่ขยับ · overpayment ยังบล็อก · cancel booking อนาคตไม่แตะห้อง occupied · id ชน = 23505 + **0 partial write** · cancel ปกติ = cancelled+refund+ห้อง cleaning+HK ครบ. **tsc 0**
+- สิ่งที่ verify เพิ่มตอนรีวิว: คอลัมน์ทุกตัวใน DML ของ RPC มีจริงใน schema (plpgsql **ไม่เช็คชื่อคอลัมน์ตอน CREATE** — พังตอนรันเท่านั้น), `check_in/check_out/date/scheduled_at` เป็น text (ไม่มี timezone shift), functions บน DB == ไฟล์
+- ⏳ **NEXT (ครึ่งหลังของ C3):** (1) `lib/store.ts` เพิ่ม `callRpc(name, params, {repair})` — optimistic set() → ยิง RPC background → success=apply แถว authoritative / error=repair (refetch+rollback) + toast; (2) hoist `rowTo*` mappers → `lib/row-mappers.ts` (แชร์ AppShell/repair); (3) wire 9 actions เรียก RPC แทน dual-write (id ใช้ `newId()` แล้ว; extend ส่ง `p_old_check_out`); (4) tsc/build + browser-verify (full lifecycle + force abort + cross-tab double-pay + phantom create); (5) PR (รวม 020 + PROGRESS.md)
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
