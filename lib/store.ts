@@ -1,8 +1,12 @@
 'use client'
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import { supabaseStorage, registerStateApplier, reportSaveError, CLIENT_ID } from './supabase-storage'
+import { supabaseStorage, registerStateApplier, reportSaveError, applyRemoteState, CLIENT_ID } from './supabase-storage'
 import { supabase } from './supabase'
+import {
+  rowToBooking, rowToInvoice, rowToBookingAddOn, rowToRoom, rowToGuest,
+  rowToCorpAccount, rowToCorpTx, rowToHkTask, rowToInventoryItem, rowToInventoryTx,
+} from './row-mappers'
 import type {
   Room, Guest, Booking, Invoice, InvoiceItem, InvoiceStatus, HousekeepingTask,
   MaintenanceLog, Staff, StaffPermissions, RoomStatus, BookingStatus, HousekeepingStatus, MaintenanceStatus,
@@ -232,18 +236,7 @@ function pushBooking(b: Booking) {
   const { id, created_at: _created, ...rest } = bookingRow(b)
   void supabase.from('bookings').update(rest).eq('id', id).then(reportBookingError)
 }
-function reportInvoiceError({ error }: { error: { code?: string; message: string } | null }) {
-  if (error && error.code !== '23505') reportSaveError('invoice write', error.message)
-}
-// แปลง Invoice → row (snake_case) สำหรับ insert (+ writer_id echo key); items เก็บเป็น jsonb
-function invoiceRow(iv: Invoice) {
-  return {
-    id: iv.id, booking_id: iv.bookingId, guest_id: iv.guestId ?? null,
-    amount: iv.amount, tax: iv.tax, total: iv.total, status: iv.status,
-    issued_at: iv.issuedAt, paid_at: iv.paidAt ?? null,
-    payment_method: iv.paymentMethod ?? null, items: iv.items, writer_id: CLIENT_ID,
-  }
-}
+// (invoice เขียนผ่าน RPC check_out_booking/cancel_booking เท่านั้นแล้ว — Tier C C3)
 function reportAddOnError({ error }: { error: { code?: string; message: string } | null }) {
   if (error && error.code !== '23505') reportSaveError('booking add-on write', error.message)
 }
@@ -256,6 +249,147 @@ function bookingAddOnRow(a: BookingAddOn) {
     fulfilled_at: a.fulfilledAt ?? null, fulfilled_by: a.fulfilledBy ?? null,
     notes: a.notes ?? null, writer_id: CLIENT_ID,
   }
+}
+
+// ═══════════ Tier C C3 — RPC atomicity (DDL 020) ═══════════
+// multi-entity money actions (create/checkout/cancel/move/pay/fulfill/cancel-addon/extend/adjust)
+// เปลี่ยนจาก "optimistic set() + dual-write หลายตาราง best-effort" → "optimistic set() + 1 RPC
+// ที่เขียนทุกตาราง atomic ใน transaction เดียว":
+// - happy path: id/timestamp ทุกตัว gen ที่ client ส่งเข้า RPC → แถวใน DB == optimistic state
+//   แต่ RPC derive ยอดเงิน/บาลานซ์จาก live locked rows (กัน cross-tab race) แล้วคืน jsonb
+//   ของทุกแถวที่เขียน → apply ทับ optimistic เผื่อค่า derive ต่างจากที่ client คิด (แผน C3 P1/P2;
+//   จำเป็นเพราะ channel ของแท็บต้นทาง suppress echo ตัวเอง — realtime ไม่แก้ให้)
+// - error (ROOM_CONFLICT/OVERPAYMENT/STALE_* จากอีกแท็บ): DB rollback ทั้ง tx เองอยู่แล้ว
+//   ฝั่ง client "repair" = refetch แถวที่ optimistic แตะจากตารางจริงมาทับ (rollback optimistic จริง)
+//   แถวที่ optimistic สร้างแต่ DB ไม่มี (invoice/HK/ledger ของ tx ที่ fail) จะถูกถอดออก + toast
+
+type RepairSlice =
+  | 'bookings' | 'invoices' | 'bookingAddOns' | 'rooms' | 'guests'
+  | 'corporateAccounts' | 'corporateTransactions' | 'housekeepingTasks'
+  | 'inventoryItems' | 'inventoryTransactions'
+
+// ids ของแถวที่ optimistic set() แตะ (รวมที่เพิ่งสร้าง) — ใช้ refetch ตอน RPC fail
+type RepairSpec = Partial<Record<RepairSlice, (string | undefined | null)[]>>
+
+const repairMeta: Record<RepairSlice, {
+  table: string
+  map: (r: Record<string, unknown>) => { id: string }
+  hasSoftDelete: boolean // ตารางมีคอลัมน์ deleted_at (ledger append-only ไม่มี)
+}> = {
+  bookings: { table: 'bookings', map: rowToBooking, hasSoftDelete: true },
+  invoices: { table: 'invoices', map: rowToInvoice, hasSoftDelete: true },
+  bookingAddOns: { table: 'booking_add_ons', map: rowToBookingAddOn, hasSoftDelete: true },
+  rooms: { table: 'rooms', map: rowToRoom, hasSoftDelete: true },
+  guests: { table: 'guests', map: rowToGuest, hasSoftDelete: true },
+  corporateAccounts: { table: 'corporate_accounts', map: rowToCorpAccount, hasSoftDelete: true },
+  corporateTransactions: { table: 'corporate_transactions', map: rowToCorpTx, hasSoftDelete: false },
+  housekeepingTasks: { table: 'housekeeping_tasks', map: rowToHkTask, hasSoftDelete: true },
+  inventoryItems: { table: 'inventory_items', map: rowToInventoryItem, hasSoftDelete: true },
+  inventoryTransactions: { table: 'inventory_transactions', map: rowToInventoryTx, hasSoftDelete: false },
+}
+
+// upsert-by-id เข้า slice (แทนที่แถวเดิม in-place คงลำดับ; แถวใหม่ prepend ยกเว้น HK ที่แอป append)
+// removeIds = แถวที่ optimistic สร้างแต่ DB ไม่มี → ถอดออก
+function upsertSlice(slice: RepairSlice, rows: { id: string }[], removeIds: string[] = []) {
+  if (!rows.length && !removeIds.length) return
+  useHotelStore.setState((state) => {
+    const cur = state[slice] as unknown as { id: string }[]
+    const byId = new Map(rows.map((r) => [r.id, r]))
+    let next = cur.map((x) => byId.get(x.id) ?? x)
+    const have = new Set(next.map((x) => x.id))
+    const extras = rows.filter((r) => !have.has(r.id))
+    if (extras.length) next = slice === 'housekeepingTasks' ? [...next, ...extras] : [...extras, ...next]
+    if (removeIds.length) {
+      const rm = new Set(removeIds)
+      next = next.filter((x) => !rm.has(x.id))
+    }
+    return { [slice]: next } as Partial<HotelStore>
+  })
+}
+
+// key ใน jsonb ที่ RPC คืน → slice ปลายทาง (ค่า null = RPC ไม่ได้แตะ entity นั้น)
+const rpcReturnKeys: { key: string; slice: RepairSlice; isArray?: boolean }[] = [
+  { key: 'booking', slice: 'bookings' },
+  { key: 'room', slice: 'rooms' },
+  { key: 'oldRoom', slice: 'rooms' },
+  { key: 'newRoom', slice: 'rooms' },
+  { key: 'invoice', slice: 'invoices' },
+  { key: 'invoices', slice: 'invoices', isArray: true },
+  { key: 'guest', slice: 'guests' },
+  { key: 'corpAccount', slice: 'corporateAccounts' },
+  { key: 'corpTx', slice: 'corporateTransactions' },
+  { key: 'hkTask', slice: 'housekeepingTasks' },
+  { key: 'addOn', slice: 'bookingAddOns' },
+  { key: 'inventoryItem', slice: 'inventoryItems' },
+  { key: 'inventoryTx', slice: 'inventoryTransactions' },
+]
+
+// apply แถว authoritative ที่ RPC คืนมาทับ optimistic state (ครอบ applyRemoteState กันเขียน blob กลับ)
+function applyRpcRows(data: unknown) {
+  if (!data || typeof data !== 'object') return
+  const obj = data as Record<string, unknown>
+  applyRemoteState(() => {
+    for (const { key, slice, isArray } of rpcReturnKeys) {
+      const v = obj[key]
+      if (v == null) continue
+      const raw = isArray ? (v as unknown[]) : [v]
+      const rows = raw
+        .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object')
+        .map((r) => repairMeta[slice].map(r))
+      if (rows.length) upsertSlice(slice, rows)
+    }
+  })
+}
+
+// RPC fail → refetch แถวที่ optimistic แตะจากตารางจริง (id ไหนไม่พบ = ถอดออกจาก state)
+async function repairFromTables(spec: RepairSpec) {
+  for (const [sliceKey, rawIds] of Object.entries(spec) as [RepairSlice, (string | undefined | null)[]][]) {
+    const ids = Array.from(new Set(rawIds.filter((x): x is string => !!x)))
+    if (!ids.length) continue
+    const meta = repairMeta[sliceKey]
+    let q = supabase.from(meta.table).select('*').in('id', ids)
+    if (meta.hasSoftDelete) q = q.is('deleted_at', null)
+    const { data, error } = await q
+    if (error) {
+      reportSaveError(`repair ${meta.table}`, error.message)
+      continue
+    }
+    const rows = ((data ?? []) as Record<string, unknown>[]).map(meta.map)
+    const found = new Set(rows.map((r) => r.id))
+    const removeIds = ids.filter((id) => !found.has(id))
+    applyRemoteState(() => upsertSlice(sliceKey, rows, removeIds))
+  }
+}
+
+// ยิง RPC หลัง optimistic set() (background ไม่ await — action คง synchronous, UI ตอบทันที)
+// success → apply แถว authoritative; error → repair (rollback optimistic) + toast ข้อความไทยจาก RPC
+// opts.absentNull: แถวที่ client สร้าง optimistic แต่ RPC (จาก live data) ตัดสินใจไม่สร้าง
+// (เช่น HK ข้ามเพราะห้องไปซ่อม / corp charge ไม่ผ่าน) → key นั้นคืน null = ถอด id ออกจาก state
+function callRpc(
+  name: string,
+  params: Record<string, unknown>,
+  repair: RepairSpec,
+  opts?: { absentNull?: { key: string; slice: RepairSlice; id: string }[] },
+) {
+  void supabase.rpc(name, params).then(({ data, error }: { data: unknown; error: { message: string } | null }) => {
+    if (!error) {
+      applyRpcRows(data)
+      const obj = (data ?? {}) as Record<string, unknown>
+      const drops = (opts?.absentNull ?? []).filter((a) => obj[a.key] == null)
+      if (drops.length) {
+        applyRemoteState(() => {
+          for (const d of drops) upsertSlice(d.slice, [], [d.id])
+        })
+      }
+      return
+    }
+    // error message รูปแบบ 'CODE|ข้อความไทย' (แผน C3 P5) → โชว์เฉพาะข้อความไทย
+    const msg = error.message.includes('|')
+      ? error.message.split('|').slice(1).join('|')
+      : error.message
+    reportSaveError(`rpc ${name}`, `${msg} — การเปลี่ยนแปลงถูกย้อนกลับ`)
+    void repairFromTables(repair)
+  })
 }
 
 interface HotelStore {
@@ -473,28 +607,34 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         rooms: updatedRooms,
       }
     })
-    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
-    // booking ใหม่ → dual-write insert ขึ้นตาราง bookings (Tier C C2)
+    // booking ใหม่ (+ห้อง occupied ถ้า walk-in) → RPC เดียว atomic: advisory lock ต่อห้อง
+    // กัน phantom overbooking ข้ามแท็บ (conflict-check ใน set() กันได้แค่ในแท็บเดียว)
     const bfx = bookingFx as Booking | null
-    if (bfx) void supabase.from('bookings').insert(bookingRow(bfx)).then(reportBookingError)
+    if (bfx) {
+      callRpc('create_booking_with_conflict_check',
+        { p_booking: bookingRow(bfx), p_writer_id: CLIENT_ID },
+        { bookings: [bfx.id], rooms: roomFx })
+    }
     return result
   },
 
   updateBookingStatus: (bookingId, status) => {
+    // gen timestamp/id ก่อน set() แล้วใช้ร่วมกันทั้ง optimistic state และ RPC params (Tier C C3)
+    // → แถวที่ RPC เขียน == optimistic เป๊ะใน happy path; ส่ง id ครบทุกตัวแม้ client จะตัดสินใจ
+    // ไม่สร้างบางแถว (เช่น corp charge) เพราะ RPC derive จาก live rows เองว่าจะสร้างหรือไม่
+    const now = new Date().toISOString()
+    const invoiceId = `inv${newId()}`
+    const hkId = `hk${newId()}`
+    const corpTxId = `ctx${newId()}`
+    const corpPaymentId = `pay${newId()}`
+    // อ่าน booking ก่อน set() ไว้ประกอบ repair spec (guestId/corporateAccountId ของแถวที่จะแตะ)
+    const pre = get().bookings.find((b) => b.id === bookingId)
     // จับ corporate auto-charge ที่เกิดตอนเช็คเอาต์ เพื่อ log audit หลัง set() (เงินขยับต้องมีร่องรอย)
     let corpAudit: { amount: number; company: string } | null = null
-    // จับสถิติแขกที่ขยับตอนเช็คเอาต์ (totalStays/totalSpend) เพื่อ dual-write ขึ้นตาราง guests หลัง set() (Tier B)
-    let guestFx: { id: string; totalStays: number; totalSpend: number } | null = null
-    // จับ corporate auto-charge (account balance + ledger tx) เพื่อ dual-write ขึ้นตาราง corporate หลัง set() (Tier B)
-    let corpFx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
-    // จับ id ห้องที่เปลี่ยน status ตอนเช็คอิน/เช็คเอาต์ เพื่อ dual-write ขึ้นตาราง rooms หลัง set() (Tier B)
+    // จับ id ห้องที่เปลี่ยน status (เช็คอิน = dual-write ตรง; เช็คเอาต์ = repair spec ของ RPC)
     let roomFx: string[] = []
-    // จับ HK task ที่สร้างตอนเช็คเอาต์ เพื่อ dual-write insert ขึ้นตาราง housekeeping_tasks หลัง set() (Tier C)
-    let hkFx: HousekeepingTask | null = null
-    // จับว่า booking row เปลี่ยนจริง (ผ่าน guard ทุกด่าน) เพื่อ dual-write ขึ้นตาราง bookings หลัง set() (Tier C C2)
+    // จับว่า booking row เปลี่ยนจริง (ผ่าน guard ทุกด่าน)
     let bookingTouched = false
-    // จับ invoice ที่สร้างตอนเช็คเอาต์ เพื่อ dual-write insert ขึ้นตาราง invoices หลัง set() (Tier C C2)
-    let invoiceFx: Invoice | null = null
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
@@ -532,7 +672,6 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         return { bookings: updatedBookings }
       }
 
-      const now = new Date().toISOString()
       const room = state.rooms.find((r) => r.id === booking.roomId)
 
       // 1) รวมยอด add-on ที่คิดเงิน (เฉพาะ fulfilled ตาม addOnCountsTowardCharge) เข้ายอดสุดท้าย
@@ -554,7 +693,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         const acc = state.corporateAccounts.find((a) => a.id === booking.corporateAccountId)
         if (acc && acc.availableBalance >= outstanding) {
           const corpTx: CorporateTransaction = {
-            id: `ctx${newId()}`,
+            id: corpTxId,
             corporateAccountId: booking.corporateAccountId,
             type: 'charge',
             amount: outstanding,
@@ -574,10 +713,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             a.id === booking.corporateAccountId ? updatedAcc : a
           )
           updatedCorpTx = [corpTx, ...state.corporateTransactions]
-          corpFx = { account: updatedAcc, tx: corpTx }
           newPaidAmount = combinedTotal
           corpPayment = {
-            id: `pay${newId()}`,
+            id: corpPaymentId,
             amount: outstanding,
             method: 'bank_transfer',
             date: now,
@@ -618,7 +756,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       ]
       const invoiceStatus: InvoiceStatus = newPaidAmount >= combinedTotal ? 'paid' : 'issued'
       const newInvoice: Invoice = {
-        id: `inv${newId()}`,
+        id: invoiceId,
         bookingId,
         guestId: booking.guestId,
         amount: combinedTotal,
@@ -651,7 +789,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       const newTask: HousekeepingTask | null = hasOpenMaintenance
         ? null
         : {
-            id: `hk${newId()}`,
+            id: hkId,
             roomId: booking.roomId,
             roomNumber: room?.number ?? '-',
             assignedTo: '',
@@ -661,21 +799,18 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             notes: `ทำความสะอาดหลังเช็คเอาต์ (${bookingId})`,
             scheduledAt: now,
           }
-      hkFx = newTask // → dual-write insert หลัง set() (Tier C)
 
       // 6) อัพเดทสถิติแขก — นับเฉพาะที่จ่ายเงินจริง (paid) เพื่อไม่ให้ totalSpend เฟ้อเมื่อ corp credit ไม่พอ
       let updatedGuests = state.guests
       if (booking.guestId) {
-        updatedGuests = state.guests.map((g) => {
-          if (g.id !== booking.guestId) return g
-          const next = { ...g, totalStays: g.totalStays + 1, totalSpend: g.totalSpend + newPaidAmount }
-          guestFx = { id: g.id, totalStays: next.totalStays, totalSpend: next.totalSpend }
-          return next
-        })
+        updatedGuests = state.guests.map((g) =>
+          g.id !== booking.guestId
+            ? g
+            : { ...g, totalStays: g.totalStays + 1, totalSpend: g.totalSpend + newPaidAmount }
+        )
       }
 
       bookingTouched = true
-      invoiceFx = newInvoice // → dual-write insert หลัง set() (Tier C C2)
       return {
         bookings: updatedBookings,
         rooms: updatedRooms,
@@ -695,50 +830,54 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         entityId: bookingId,
       })
     }
-    // สถิติแขกขยับตอนเช็คเอาต์ → dual-write ขึ้นตาราง guests (Tier B)
-    // TS ไม่ widen guestFx ที่ assign ใน closure → cast คืน type ก่อน truthiness guard
-    const gfx = guestFx as { id: string; totalStays: number; totalSpend: number } | null
-    if (gfx) {
-      void supabase.from('guests')
-        .update({ total_stays: gfx.totalStays, total_spend: gfx.totalSpend, writer_id: CLIENT_ID })
-        .eq('id', gfx.id).then(reportGuestError)
+    // เช็คเอาต์ = multi-entity (booking+invoice+room+HK+guest+corp) → 1 RPC atomic (Tier C C3)
+    // RPC derive addOnTotal/outstanding/corp-charge จาก live locked rows แล้วคืนทุกแถวที่เขียน
+    if (status === 'checked_out' && bookingTouched) {
+      callRpc('check_out_booking', {
+        p_booking_id: bookingId, p_now: now, p_invoice_id: invoiceId, p_hk_id: hkId,
+        p_corp_tx_id: corpTxId, p_corp_payment_id: corpPaymentId, p_writer_id: CLIENT_ID,
+      }, {
+        bookings: [bookingId], rooms: roomFx, invoices: [invoiceId],
+        housekeepingTasks: [hkId], guests: [pre?.guestId],
+        corporateAccounts: [pre?.corporateAccountId], corporateTransactions: [corpTxId],
+      }, {
+        // client อาจสร้าง optimistic แต่ RPC (จาก live rows) ข้าม: HK (ห้องมีซ่อมค้างที่แท็บอื่น
+        // เพิ่งแจ้ง), corp tx (เครดิต live ไม่พอ) → key คืน null = ถอด id ที่ optimistic สร้างออก
+        absentNull: [
+          { key: 'hkTask', slice: 'housekeepingTasks', id: hkId },
+          { key: 'corpTx', slice: 'corporateTransactions', id: corpTxId },
+        ],
+      })
+    } else {
+      // check-in / transition อื่น (booking+room, 2 ตาราง) = residual dual-write ตามแผน C3
+      if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
+      if (bookingTouched) {
+        const b = get().bookings.find((x) => x.id === bookingId)
+        if (b) pushBooking(b)
+      }
     }
-    // corporate auto-charge → dual-write account balance + ledger tx (Tier B)
-    const cfx = corpFx as { account: CorporateAccount; tx: CorporateTransaction } | null
-    if (cfx) { pushCorpAccount(cfx.account); pushCorpTx(cfx.tx) }
-    // ห้องเปลี่ยน status ตอนเช็คอิน/เช็คเอาต์ → dual-write ขึ้นตาราง rooms (Tier B)
-    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
-    // HK task ที่สร้างตอนเช็คเอาต์ → dual-write insert ขึ้นตาราง housekeeping_tasks (Tier C)
-    const hfx = hkFx as HousekeepingTask | null
-    if (hfx) void supabase.from('housekeeping_tasks').insert(hkTaskRow(hfx)).then(reportHkError)
-    // booking row เปลี่ยน (status/paidAmount/payments) → dual-write ขึ้นตาราง bookings (Tier C C2)
-    if (bookingTouched) {
-      const b = get().bookings.find((x) => x.id === bookingId)
-      if (b) pushBooking(b)
-    }
-    // invoice ที่สร้างตอนเช็คเอาต์ → dual-write insert ขึ้นตาราง invoices (Tier C C2)
-    const ivfx = invoiceFx as Invoice | null
-    if (ivfx) void supabase.from('invoices').insert(invoiceRow(ivfx)).then(reportInvoiceError)
   },
 
   cancelBooking: (bookingId) => {
+    // gen timestamp/id ก่อน set() ใช้ร่วม optimistic state + RPC params (Tier C C3)
+    const now = new Date().toISOString()
+    const hkId = `hk${newId()}`
+    const refundPayId = `pay${newId()}`
+    const corpTxId = `ctx${newId()}`
+    const pre = get().bookings.find((b) => b.id === bookingId)
     let refundAudit = 0 // เงินคืนที่เกิดจากการยกเลิก → log audit หลัง set()
-    let corpFx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
-    let roomFx: string[] = [] // ห้องที่เปลี่ยน status → dual-write หลัง set() (Tier B)
-    let hkFx: HousekeepingTask | null = null // HK task ที่สร้างตอนยกเลิก → dual-write insert หลัง set() (Tier C)
-    let bookingTouched = false // booking row เปลี่ยนจริง → dual-write หลัง set() (Tier C C2)
-    let invoiceFx: string[] = [] // invoice ที่พลิกเป็น refunded → dual-write patch หลัง set() (Tier C C2)
+    let bookingTouched = false // booking row เปลี่ยนจริง (ผ่าน guard)
+    let invoiceFx: string[] = [] // invoice ที่พลิกเป็น refunded → repair spec ของ RPC
     set((state) => {
       const booking = state.bookings.find((b) => b.id === bookingId)
       if (!booking) return {}
       if (booking.status === 'cancelled') return {}
       const wasCheckedIn = booking.status === 'checked_in'
       const room = state.rooms.find((r) => r.id === booking.roomId)
-      const now = new Date().toISOString()
       // ถ้ายกเลิกหลังเช็คอินแล้ว → สร้าง HK task ให้แม่บ้านไปทำความสะอาด
       const newTask: HousekeepingTask | null = wasCheckedIn && room
         ? {
-            id: `hk${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            id: hkId,
             roomId: booking.roomId,
             roomNumber: room.number,
             assignedTo: '',
@@ -749,14 +888,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
             scheduledAt: now,
           }
         : null
-      hkFx = newTask // → dual-write insert หลัง set() (Tier C)
 
       // คืนเงินที่รับมาแล้ว: บันทึก refund payment (ยอดติดลบ) + เคลียร์ยอดที่จ่าย
       const refundAmount = booking.paidAmount
       refundAudit = refundAmount
       const refundPayment: import('@/types').Payment | null = refundAmount > 0
         ? {
-            id: `pay${newId()}`,
+            id: refundPayId,
             amount: -refundAmount,
             method: booking.paymentMethod ?? 'cash',
             date: now,
@@ -774,19 +912,17 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           const updatedAcc = { ...acc, totalUsed: Math.max(0, acc.totalUsed - refundAmount), availableBalance: acc.availableBalance + refundAmount }
           updatedCorpAccounts = state.corporateAccounts.map((a) => (a.id === acc.id ? updatedAcc : a))
           const ctx: CorporateTransaction = {
-            id: `ctx${newId()}`, corporateAccountId: acc.id, type: 'refund', amount: refundAmount,
+            id: corpTxId, corporateAccountId: acc.id, type: 'refund', amount: refundAmount,
             balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + refundAmount,
             performedBy: 'system', date: now, bookingId, notes: 'คืนเครดิตจากการยกเลิกการจอง',
           }
           updatedCorpTx = [ctx, ...state.corporateTransactions]
-          corpFx = { account: updatedAcc, tx: ctx }
         }
       }
 
       // ปล่อยห้องเฉพาะเมื่อ booking นี้ครองห้องจริง (เช็คอินอยู่ หรือ pointer ห้องชี้มาที่ booking นี้)
       // — ยกเลิก booking อนาคตของห้องที่มีแขกอื่นพักอยู่ ห้ามสั่งห้องว่าง/ล้าง pointer ของเขา
       const releaseRoom = wasCheckedIn || room?.currentBookingId === bookingId
-      roomFx = releaseRoom ? [booking.roomId] : []
       bookingTouched = true
       invoiceFx = state.invoices
         .filter((iv) => iv.bookingId === bookingId && iv.status !== 'refunded')
@@ -823,24 +959,24 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         entityId: bookingId,
       })
     }
-    // คืนเครดิตองค์กร → dual-write account balance + ledger tx (Tier B)
-    const cfx = corpFx as { account: CorporateAccount; tx: CorporateTransaction } | null
-    if (cfx) { pushCorpAccount(cfx.account); pushCorpTx(cfx.tx) }
-    // ห้องเปลี่ยน status ตอนยกเลิก → dual-write ขึ้นตาราง rooms (Tier B)
-    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
-    // HK task ที่สร้างตอนยกเลิก (หลังเช็คอิน) → dual-write insert ขึ้นตาราง housekeeping_tasks (Tier C)
-    const hfx = hkFx as HousekeepingTask | null
-    if (hfx) void supabase.from('housekeeping_tasks').insert(hkTaskRow(hfx)).then(reportHkError)
-    // booking → cancelled (+refund payment) → dual-write ขึ้นตาราง bookings (Tier C C2)
+    // ยกเลิก = multi-entity (booking+room+invoice+HK+corp) → 1 RPC atomic (Tier C C3)
+    // RPC derive refund จาก live paid_amount + ปล่อยห้องเฉพาะเจ้าของจริง (mirror releaseRoom)
     if (bookingTouched) {
-      const b = get().bookings.find((x) => x.id === bookingId)
-      if (b) pushBooking(b)
-    }
-    // invoice ของการจองนี้ → refunded → dual-write patch ขึ้นตาราง invoices (Tier C C2)
-    if (invoiceFx.length) {
-      void supabase.from('invoices')
-        .update({ status: 'refunded', writer_id: CLIENT_ID })
-        .in('id', invoiceFx).then(reportInvoiceError)
+      callRpc('cancel_booking', {
+        p_booking_id: bookingId, p_now: now, p_refund_payment_id: refundPayId,
+        p_corp_tx_id: corpTxId, p_hk_id: hkId, p_writer_id: CLIENT_ID,
+      }, {
+        bookings: [bookingId], rooms: [pre?.roomId], invoices: invoiceFx,
+        housekeepingTasks: [hkId], corporateAccounts: [pre?.corporateAccountId],
+        corporateTransactions: [corpTxId],
+      }, {
+        // RPC (จาก live rows) อาจไม่สร้างแถวที่ client สร้าง optimistic: HK (สถานะ live ไม่ใช่
+        // checked_in), corp tx (live paid = 0 ไม่มีอะไรคืน) → key คืน null = ถอด id ออก
+        absentNull: [
+          { key: 'hkTask', slice: 'housekeepingTasks', id: hkId },
+          { key: 'corpTx', slice: 'corporateTransactions', id: corpTxId },
+        ],
+      })
     }
   },
 
@@ -894,9 +1030,14 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           : b
       ),
     }))
-    // checkOut/nights/totalAmount เปลี่ยน → dual-write ขึ้นตาราง bookings (Tier C C2)
-    const extended = get().bookings.find((b) => b.id === bookingId)
-    if (extended) pushBooking(extended)
+    // ขยายการจอง → RPC atomic (Tier C C3): advisory lock ห้องกัน conflict ข้ามแท็บช่วงที่ขยาย
+    // + CAS ที่ p_old_check_out (ฐานที่ client ใช้คิดราคา) — ฐานเลื่อนไปแล้ว (อีกแท็บ extend) = STALE
+    // + retry หลังสำเร็จ (check_out ถึงเป้าแล้ว) = no-op กัน nights/total บวกซ้ำ
+    callRpc('extend_booking', {
+      p_booking_id: bookingId, p_additional_nights: Math.round(additionalNights),
+      p_old_check_out: booking.checkOut, p_new_check_out: newCheckOut,
+      p_extra_price: extraPrice, p_writer_id: CLIENT_ID,
+    }, { bookings: [bookingId] })
     return { ok: true }
   },
 
@@ -919,9 +1060,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     const wasCheckedIn = booking.status === 'checked_in'
     const oldRoom = state.rooms.find((r) => r.id === booking.roomId)
     const now = new Date().toISOString()
+    // gen id ก่อน ใช้ร่วม optimistic state + RPC params (Tier C C3)
+    const hkId = `hk${newId()}`
+    const refundPayId = `pay${newId()}`
     const newTask: HousekeepingTask | null = wasCheckedIn && oldRoom
       ? {
-          id: `hk${newId()}`,
+          id: hkId,
           roomId: booking.roomId,
           roomNumber: oldRoom.number,
           assignedTo: '',
@@ -940,10 +1084,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       : booking.totalAmount
     const overpaid = reprice ? Math.max(0, booking.paidAmount - newTotal) : 0
     const refundPayment: import('@/types').Payment | null = overpaid > 0
-      ? { id: `pay${newId()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการย้ายห้อง (ราคาใหม่ต่ำกว่ายอดที่จ่าย)' }
+      ? { id: refundPayId, amount: -overpaid, method: booking.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการย้ายห้อง (ราคาใหม่ต่ำกว่ายอดที่จ่าย)' }
       : null
-    // ห้องเปลี่ยน status เฉพาะเมื่อย้ายหลังเช็คอิน (ห้องเก่า→cleaning, ใหม่→occupied) → dual-write หลัง set() (Tier B)
-    const roomFx = wasCheckedIn ? [booking.roomId, newRoomId] : []
 
     set((s) => ({
       bookings: s.bookings.map((b) =>
@@ -982,12 +1124,16 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         entityId: bookingId,
       })
     }
-    if (roomFx.length) pushRooms(get().rooms.filter((r) => roomFx.includes(r.id)))
-    // HK task ที่สร้างตอนย้ายห้อง (หลังเช็คอิน) → dual-write insert ขึ้นตาราง housekeeping_tasks (Tier C)
-    if (newTask) void supabase.from('housekeeping_tasks').insert(hkTaskRow(newTask)).then(reportHkError)
-    // roomId (+reprice/refund) เปลี่ยน → dual-write ขึ้นตาราง bookings (Tier C C2)
-    const moved = get().bookings.find((b) => b.id === bookingId)
-    if (moved) pushBooking(moved)
+    // ย้ายห้อง = multi-entity (booking+2 rooms+HK) → 1 RPC atomic (Tier C C3)
+    // advisory lock ทั้ง 2 ห้อง (sorted) กัน phantom conflict/deadlock; derive overpaid จาก live paid
+    callRpc('move_room', {
+      p_booking_id: bookingId, p_new_room_id: newRoomId, p_reprice: reprice, p_new_total: newTotal,
+      p_now: now, p_refund_payment_id: refundPayId, p_hk_id: hkId, p_writer_id: CLIENT_ID,
+    }, {
+      bookings: [bookingId], rooms: [booking.roomId, newRoomId], housekeepingTasks: [hkId],
+    }, {
+      absentNull: [{ key: 'hkTask', slice: 'housekeepingTasks', id: hkId }],
+    })
     return { ok: true }
   },
 
@@ -1010,10 +1156,11 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       ? calcBookingTotal(room.type, b.checkIn, actualCheckOut, room.pricePerNight, get().dynamicPricing)
       : Math.round((b.nights > 0 ? b.totalAmount / b.nights : b.totalAmount) * actualNights)
     const now = new Date().toISOString()
+    const refundPayId = `pay${newId()}` // gen ก่อน ใช้ร่วม optimistic + RPC params (Tier C C3)
     // จ่ายมาเกินยอดใหม่ → คืนเงินส่วนเกิน (บันทึก payment ติดลบ เหมือน flow ยกเลิก)
     const overpaid = Math.max(0, b.paidAmount - newTotal)
     const refundPayment: import('@/types').Payment | null = overpaid > 0
-      ? { id: `pay${newId()}`, amount: -overpaid, method: b.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการออกก่อนกำหนด' }
+      ? { id: refundPayId, amount: -overpaid, method: b.paymentMethod ?? 'cash', date: now, staffId: 'system', notes: 'คืนเงินจากการออกก่อนกำหนด' }
       : null
 
     set((s) => ({
@@ -1037,9 +1184,11 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         entityId: bookingId,
       })
     }
-    // nights/checkOut/total/paid (+refund payment) เปลี่ยน → dual-write ขึ้นตาราง bookings (Tier C C2)
-    const adjusted = get().bookings.find((x) => x.id === bookingId)
-    if (adjusted) pushBooking(adjusted)
+    // ออกก่อนกำหนด → RPC atomic (Tier C C3): derive overpaid/refund จาก live paid_amount
+    callRpc('adjust_for_early_checkout', {
+      p_booking_id: bookingId, p_actual_nights: actualNights, p_new_check_out: actualCheckOut,
+      p_new_total: newTotal, p_now: now, p_refund_payment_id: refundPayId, p_writer_id: CLIENT_ID,
+    }, { bookings: [bookingId] })
     return { ok: true, newNights: actualNights, newTotal, refunded: overpaid }
   },
 
@@ -1626,6 +1775,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
 
   recordPayment: (bookingId, amount, method, staffId, notes) => {
     if (amount <= 0) return { ok: false, error: 'จำนวนเงินต้องมากกว่า 0' }
+    // gen id/timestamp ก่อน ใช้ร่วม optimistic + RPC params (Tier C C3)
+    const paymentId = `pay${newId()}`
+    const now = new Date().toISOString()
     // ตรวจ outstanding + apply ใน set() เดียว (atomic) — กัน double-submit จ่ายเกิน:
     // ถ้าแยก get()→ตรวจ→set() สอง submit เร็ว ๆ จะผ่าน check บน outstanding ตัวเดิมทั้งคู่ → จ่ายเกิน
     let result: { ok: true } | { ok: false; error: string } = { ok: true }
@@ -1646,10 +1798,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         return {}
       }
       const payment: import('@/types').Payment = {
-        id: `pay${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        id: paymentId,
         amount,
         method: method as import('@/types').PaymentMethod,
-        date: new Date().toISOString(),
+        date: now,
         staffId,
         notes,
       }
@@ -1666,10 +1818,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         ),
       }
     })
-    // paidAmount/payments เปลี่ยน → dual-write ขึ้นตาราง bookings (Tier C C2)
+    // รับเงิน → RPC atomic (Tier C C3): derive ยอดค้างจาก live row (กันจ่ายซ้อนข้ามแท็บ)
+    // + idempotent: payment id ซ้ำ (retry) = no-op ไม่บวกเงินเบิ้ล
     if (result.ok) {
-      const paid = get().bookings.find((b) => b.id === bookingId)
-      if (paid) pushBooking(paid)
+      callRpc('record_payment', {
+        p_booking_id: bookingId, p_amount: amount, p_method: method, p_payment_id: paymentId,
+        p_now: now, p_staff_id: staffId, p_notes: notes ?? null, p_writer_id: CLIENT_ID,
+      }, { bookings: [bookingId] })
     }
     return result
   },
@@ -1698,10 +1853,13 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   },
 
   fulfillAddOn: (addOnId, staffId) => {
+    // gen id/timestamp ก่อน ใช้ร่วม optimistic + RPC params (Tier C C3)
+    const now = new Date().toISOString()
+    const invTxId = `itx${newId()}`
     // ตรวจสถานะ + สต็อก แล้วตัดสต็อก ใน set() เดียว (atomic) — กัน fulfill 2 รายการรัว ๆ
     // ที่ดึงของชิ้นเดียวกัน: ถ้าตรวจสต็อกนอก set() ทั้งคู่ผ่าน check บน stock เดิม → ตัดเกิน stock ติดลบ
     let result: { ok: true } | { ok: false; error: string } = { ok: true }
-    // side-effect ฝั่ง inventory (ตัดสต็อก) ที่ต้อง dual-write ขึ้นตารางหลัง set() — bookingAddOns ยัง blob (Tier C)
+    // side-effect ฝั่ง inventory (ตัดสต็อก) — จับไว้ประกอบ repair spec ของ RPC
     let invFx: { itemId: string; newStock: number; tx: InventoryTransaction } | null = null
     set((s) => {
       const addOn = s.bookingAddOns.find((a) => a.id === addOnId)
@@ -1714,7 +1872,6 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         return {}
       }
       const item = s.addOnItems.find((a) => a.id === addOn.addOnItemId)
-      const now = new Date().toISOString()
 
       let updatedItems = s.inventoryItems
       let updatedTx = s.inventoryTransactions
@@ -1726,7 +1883,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
           return {}
         }
         const invTx: InventoryTransaction = {
-          id: `itx${newId()}`, itemId: item.inventoryItemId, type: 'use',
+          id: invTxId, itemId: item.inventoryItemId, type: 'use',
           quantity: -deduct, referenceId: addOnId, performedBy: staffId, date: now,
           notes: `Add-on: ${item.name} x${addOn.quantity}`,
         }
@@ -1748,21 +1905,21 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     })
     // TS ไม่ widen invFx ที่ assign ใน closure → cast คืน type ก่อน truthiness guard
     const fx = invFx as { itemId: string; newStock: number; tx: InventoryTransaction } | null
-    if (result.ok && fx) {
-      pushInventoryStock(fx.itemId, fx.newStock)
-      pushInventoryTx(fx.tx)
-    }
     if (result.ok) {
+      // จัดการ add-on = multi-entity (addon+inventory) → 1 RPC atomic (Tier C C3)
+      // RPC ตรวจ/ตัดสต็อกจาก live stock (กัน fulfill ซ้อนข้ามแท็บตัดเกิน)
+      callRpc('fulfill_add_on', {
+        p_add_on_id: addOnId, p_staff_id: staffId, p_now: now,
+        p_inv_tx_id: invTxId, p_writer_id: CLIENT_ID,
+      }, {
+        bookingAddOns: [addOnId], inventoryItems: [fx?.itemId],
+        inventoryTransactions: [invTxId],
+      }, {
+        absentNull: [{ key: 'inventoryTx', slice: 'inventoryTransactions', id: invTxId }],
+      })
       const s = get()
       const ao = s.bookingAddOns.find((a) => a.id === addOnId)
       const item = ao ? s.addOnItems.find((i) => i.id === ao.addOnItemId) : null
-      // add-on → fulfilled → dual-write patch ขึ้นตาราง booking_add_ons (Tier C C2)
-      if (ao) {
-        void supabase.from('booking_add_ons').update({
-          status: ao.status, fulfilled_at: ao.fulfilledAt ?? null,
-          fulfilled_by: ao.fulfilledBy ?? null, writer_id: CLIENT_ID,
-        }).eq('id', addOnId).then(reportAddOnError)
-      }
       s.logAudit({
         category: 'inventory', action: 'fulfill_addon',
         summary: `จัดการ Add-on "${item?.name ?? ao?.addOnItemId ?? addOnId}"${ao ? ` x${ao.quantity}` : ''}${fx ? ' · ตัดสต็อก' : ''}`,
@@ -1773,18 +1930,23 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   },
 
   cancelAddOn: (addOnId) => {
-    let corpFx: { account: CorporateAccount; tx: CorporateTransaction } | null = null
-    // side-effect ฝั่ง inventory (คืนสต็อก) ที่ต้อง dual-write ขึ้นตารางหลัง set()
-    let invFx: { itemId: string; newStock: number; tx: InventoryTransaction } | null = null
+    // gen id/timestamp ก่อน set() ใช้ร่วม optimistic state + RPC params (Tier C C3)
+    const now = new Date().toISOString()
+    const invTxId = `itx${newId()}`
+    const refundPayId = `pay${newId()}`
+    const corpTxId = `ctx${newId()}`
+    // อ่านข้อมูลอ้างอิงก่อน set() ไว้ประกอบ repair spec (ids ของแถวที่ optimistic จะแตะ)
+    const preState = get()
+    const preAddOn = preState.bookingAddOns.find((a) => a.id === addOnId)
+    const preBooking = preAddOn ? preState.bookings.find((b) => b.id === preAddOn.bookingId) : undefined
+    const preItem = preAddOn ? preState.addOnItems.find((i) => i.id === preAddOn.addOnItemId) : undefined
     let refundAudit = 0 // เงินคืนส่วนเกินจากการยกเลิก add-on → log audit หลัง set()
-    let addOnTouched = false // add-on ถูกยกเลิกจริง (ผ่าน guard) → dual-write patch หลัง set() (Tier C C2)
-    let bookingFxId: string | null = null // booking ที่ยอด/payments เปลี่ยนจาก refund → dual-write หลัง set() (Tier C C2)
+    let addOnTouched = false // add-on ถูกยกเลิกจริง (ผ่าน guard)
     set((state) => {
       const addOn = state.bookingAddOns.find((a) => a.id === addOnId)
       if (!addOn) return {}
       if (addOn.status === 'cancelled') return {} // กันยกเลิกซ้ำ
       addOnTouched = true
-      const now = new Date().toISOString()
       const wasFulfilled = addOn.status === 'fulfilled'
       const item = state.addOnItems.find((i) => i.id === addOn.addOnItemId) ?? null
 
@@ -1795,18 +1957,19 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         const restore = item.inventoryQtyPerUnit * addOn.quantity
         const inv = state.inventoryItems.find((i) => i.id === item.inventoryItemId)
         const invTx: InventoryTransaction = {
-          id: `itx${newId()}`, itemId: item.inventoryItemId, type: 'adjust',
+          id: invTxId, itemId: item.inventoryItemId, type: 'adjust',
           quantity: restore, referenceId: addOnId, performedBy: 'system',
           date: now,
           notes: `คืนสต็อกจากการยกเลิก Add-on: ${item.name} x${addOn.quantity}`,
         }
-        updatedItems = state.inventoryItems.map((i) =>
-          i.id === item.inventoryItemId
-            ? { ...i, currentStock: i.currentStock + restore }
-            : i
-        )
-        updatedTx = [invTx, ...state.inventoryTransactions]
-        if (inv) invFx = { itemId: item.inventoryItemId, newStock: inv.currentStock + restore, tx: invTx }
+        updatedItems = inv
+          ? state.inventoryItems.map((i) =>
+              i.id === item.inventoryItemId
+                ? { ...i, currentStock: i.currentStock + restore }
+                : i
+            )
+          : state.inventoryItems
+        updatedTx = inv ? [invTx, ...state.inventoryTransactions] : state.inventoryTransactions
       }
 
       // คืนเงินส่วนที่จ่ายเกิน ถ้า add-on นี้ถูกชำระไปแล้ว (paidAmount เกินยอดที่ต้องจ่ายหลังยกเลิก)
@@ -1822,9 +1985,8 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         const overpaid = Math.max(0, booking.paidAmount - newCharge)
         if (overpaid > 0) {
           refundAudit = overpaid
-          bookingFxId = booking.id
           const refundPayment: import('@/types').Payment = {
-            id: `pay${newId()}`, amount: -overpaid, method: booking.paymentMethod ?? 'cash',
+            id: refundPayId, amount: -overpaid, method: booking.paymentMethod ?? 'cash',
             date: now, staffId: 'system', notes: `คืนเงินจากการยกเลิก Add-on: ${item?.name ?? addOn.addOnItemId}`,
           }
           updatedBookings = state.bookings.map((b) =>
@@ -1839,12 +2001,11 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
               const updatedAcc = { ...acc, totalUsed: Math.max(0, acc.totalUsed - overpaid), availableBalance: acc.availableBalance + overpaid }
               updatedCorpAccounts = state.corporateAccounts.map((a) => (a.id === acc.id ? updatedAcc : a))
               const ctx: CorporateTransaction = {
-                id: `ctx${newId()}`, corporateAccountId: acc.id, type: 'refund', amount: overpaid,
+                id: corpTxId, corporateAccountId: acc.id, type: 'refund', amount: overpaid,
                 balanceBefore: acc.availableBalance, balanceAfter: acc.availableBalance + overpaid,
                 performedBy: 'system', date: now, bookingId: booking.id, notes: 'คืนเครดิตจากการยกเลิก Add-on',
               }
               updatedCorpTx = [ctx, ...state.corporateTransactions]
-              corpFx = { account: updatedAcc, tx: ctx }
             }
           }
         } else {
@@ -1865,25 +2026,24 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
         corporateTransactions: updatedCorpTx,
       }
     })
-    const fx = invFx as { itemId: string; newStock: number; tx: InventoryTransaction } | null
-    if (fx) {
-      pushInventoryStock(fx.itemId, fx.newStock)
-      pushInventoryTx(fx.tx)
-    }
-    // คืนเครดิตองค์กรจากยกเลิก add-on → dual-write account balance + ledger tx (Tier B)
-    const cfx = corpFx as { account: CorporateAccount; tx: CorporateTransaction } | null
-    if (cfx) { pushCorpAccount(cfx.account); pushCorpTx(cfx.tx) }
-    // add-on → cancelled → dual-write patch ขึ้นตาราง booking_add_ons (Tier C C2)
+    // ยกเลิก add-on = multi-entity (addon+inventory+booking+corp) → 1 RPC atomic (Tier C C3)
+    // RPC derive คืนสต็อก/คืนเงินส่วนเกิน/คืนเครดิต จาก live rows แล้วคืนทุกแถวที่เขียน
     if (addOnTouched) {
-      void supabase.from('booking_add_ons')
-        .update({ status: 'cancelled', writer_id: CLIENT_ID })
-        .eq('id', addOnId).then(reportAddOnError)
-    }
-    // ยอด/payments ของ booking เปลี่ยนจาก refund → dual-write ขึ้นตาราง bookings (Tier C C2)
-    const bfid = bookingFxId as string | null
-    if (bfid) {
-      const b = get().bookings.find((x) => x.id === bfid)
-      if (b) pushBooking(b)
+      callRpc('cancel_add_on', {
+        p_add_on_id: addOnId, p_now: now, p_inv_tx_id: invTxId,
+        p_refund_payment_id: refundPayId, p_corp_tx_id: corpTxId, p_writer_id: CLIENT_ID,
+      }, {
+        bookingAddOns: [addOnId], bookings: [preBooking?.id],
+        inventoryItems: [preItem?.inventoryItemId], inventoryTransactions: [invTxId],
+        corporateAccounts: [preBooking?.corporateAccountId], corporateTransactions: [corpTxId],
+      }, {
+        // RPC (จาก live rows) อาจไม่สร้าง ledger ที่ client สร้าง optimistic (สต็อก/เครดิต
+        // ไม่ต้องคืนตามค่า live) → key คืน null = ถอด id ออก
+        absentNull: [
+          { key: 'inventoryTx', slice: 'inventoryTransactions', id: invTxId },
+          { key: 'corpTx', slice: 'corporateTransactions', id: corpTxId },
+        ],
+      })
     }
     if (refundAudit > 0) {
       get().logAudit({

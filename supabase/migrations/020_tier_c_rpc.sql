@@ -74,7 +74,9 @@ BEGIN
     (p_booking->>'adults')::int, (p_booking->>'children')::int,
     coalesce(p_booking->>'special_requests', ''), p_booking->>'payment_method',
     p_booking->>'corporate_account_id', coalesce((p_booking->>'is_corporate')::boolean, false),
-    coalesce(p_booking->'payments', '[]'::jsonb), p_booking->>'created_at', p_writer_id
+    -- created_at เป็นคอลัมน์เดียวในตารางที่เป็น timestamptz (ที่เหลือ check_in/issued_at/date/… เป็น text)
+    -- text ไม่ implicit-cast เป็น timestamptz → ต้อง cast เอง (บั๊กเจอตอน browser-verify 2026-07-07)
+    coalesce(p_booking->'payments', '[]'::jsonb), (p_booking->>'created_at')::timestamptz, p_writer_id
   )
   RETURNING * INTO v_booking;
 
