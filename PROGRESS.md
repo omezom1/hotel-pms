@@ -2,7 +2,7 @@
 
 > ไฟล์นี้คือ "บันทึกส่งต่องาน" สำหรับเปิดแชท/เซสชันใหม่ที่ยังไม่รู้บริบทอะไรเลย
 > อ่านไฟล์นี้ก่อนเริ่มงาน จะเข้าใจว่าระบบทำงานยังไง ทำอะไรไปแล้ว และเหลืออะไร
-> อัปเดตล่าสุด: 2026-07-06
+> อัปเดตล่าสุด: 2026-07-12
 
 ---
 
@@ -384,6 +384,18 @@
   - **checkout เต็ม (RPC ใหญ่สุด):** same-day walk-in จ่ายเต็ม → เช็คอิน (residual path) → เช็คเอาต์ → **1 transaction เขียน booking=checked_out + invoice(paid,700) + HK(pending) + room(cleaning,ล้าง pointer) writer เดียวกันทุกแถว**; guest ไม่ถูกแตะ (guestSnapshot). trace ลบแล้ว (soft-delete b/inv/hk + คืน rA4=available ผ่าน MCP — กันรายได้วันนี้บวม)
   - console ไม่มี error ทุก script; VERIFY-C3 + VERIFY-RACE-B ทิ้งไว้เป็น trace แบบ cancelled (ธรรมเนียมเดิม)
 - tsc 0 / build 22 routes. **blob เหลือ `dynamicPricing` slice เดียว → งานถัดไป = retire blob (เล็ก) / Supabase Auth (P1 security)**
+
+### 2026-07-12 (C3 verify รอบเก็บตก — ปิด checklist ที่เหลือทั้งหมด, PR #22 ยังรอ merge)
+ไล่ verify จุดใน "Verify C3" ของแผนที่รอบ 2026-07-07 ยังไม่ได้ทำ — **ผ่านครบทุกข้อ ไม่พบบั๊ก**:
+- **move_room (browser):** advance booking VERIFY-C3V ย้าย rB8(single)→rB1(triple) → MoveRoomDialog reprice 1,000→1,400 → DB: room_id/total/room_type_at_booking เปลี่ยนครบ, ห้องทั้งสองไม่ถูกแตะ (ยังไม่เช็คอิน), ไม่มี HK, writer stamped
+- **fulfill_add_on (browser):** ao003 x2 → สต็อก inv003 198→196 + inventory_tx `use` -2 + fulfilled ใน tx เดียว writer เดียว
+- **cancel_add_on fulfilled-branch (RPC ตรง, committed):** คืนสต็อก +2 (`adjust`) + refund -100 (paid 1,500→1,400 = charge ใหม่) + corpTx/corpAccount null (ไม่ใช่ corp); **requested-branch ผ่าน UI** (confirm dialog + client wiring, ไม่มี refund เพราะไม่ overpaid)
+- **cross-tab double-pay (2 แท็บยิงพร้อมกัน 1,500):** แท็บแพ้ได้ `ALREADY_PAID` (ถูกต้อง — ผู้ชนะจ่ายเต็มพอดี ยอดค้าง=0 เข้า guard นี้ก่อน OVERPAYMENT ซึ่งเทสต์ BEGIN/ROLLBACK 07-06 ครอบแล้ว) + toast "ถูกย้อนกลับ" = repair ทำงาน; DB: paid=1,500 พอดี, payments 1 แถว ไม่เบิ้ล
+- **INSUFFICIENT_STOCK abort + repair (browser):** ข้อค้นพบ — client มี stock guard ใน `set()` ถ้า realtime sync ทันจะบล็อกก่อนถึง RPC (เทสต์ stock=0 ตรง ๆ เลยไม่แตะ DB เลย = ดี); บังคับ RPC abort ด้วย **race 2 แท็บ stock=1 + 2 add-on**: ทั้งคู่ผ่าน client guard → ผู้แพ้ได้ `INSUFFICIENT_STOCK (มี 0 ต้องการ 1)` + repair คืนแถวเป็น requested; DB: fulfilled 1 เดียว, tx `use` 1 แถว, 0 partial write
+- **adjust_for_early_checkout (browser, RPC ตัวที่ 9):** walk-in วันนี้ 2 คืนจ่ายเต็ม 1,000 → เช็คอิน → เช็คเอาต์ก่อนกำหนด "ปรับยอดตามคืนจริง" → nights 2→1, total→500, refund -500, แล้ว checkout ต่อ (invoice paid 500 + HK + ห้อง cleaning, writer เดียวกัน)
+- **corp checkout ทั้งสอง path (SQL BEGIN/ROLLBACK บน live DB):** happy = corp_tx charge 2,000 + balance 11,800→9,800 + invoice paid + corp payment append ครบใน tx เดียว; **เครดิตไม่พอ = skip เงียบตามดีไซน์** (ไม่มี CORP_CREDIT error): ไม่มี corp_tx, account ไม่ขยับ, invoice `issued` ค้างชำระ, `corpTx` ใน result = null (client absentNull ถอด optimistic) ส่วน `corpAccount` คืนค่า live ที่ไม่เปลี่ยน = client แก้ optimistic กลับถูกพอดี
+- cleanup ครบ: VERIFY-C3V ทิ้งเป็น trace cancelled (ธรรมเนียมเดิม), VERIFY-C3E soft-delete + คืน rB9, สต็อก inv003=198, corp002=11,800, ห้องทุกห้องกลับสถานะเดิม
+- **สรุป: Verify C3 checklist ครบ 100% — เหลือแค่ LOW×2 ที่ตั้งใจข้าม (lock-order comment / invoice item order) → PR #22 พร้อม merge**
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
