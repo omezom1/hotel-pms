@@ -137,6 +137,21 @@ function userRow(u: User) {
   }
 }
 
+// dual-write helper สำหรับ dynamic_pricing (Phase 4 retire-blob, slice สุดท้าย) — mutable CRUD + soft-delete
+// 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
+function reportPricingError({ error }: { error: { code?: string; message: string } | null }) {
+  if (error && error.code !== '23505') reportSaveError('pricing rule write', error.message)
+}
+
+// แปลง DynamicPricing → row (snake_case) สำหรับ insert (+ writer_id echo key)
+function pricingRuleRow(d: DynamicPricing) {
+  return {
+    id: d.id, room_type: d.roomType, name: d.name,
+    start_date: d.startDate, end_date: d.endDate, price: d.price,
+    description: d.description ?? null, writer_id: CLIENT_ID,
+  }
+}
+
 // dual-write helpers สำหรับ corporate (Tier B) — accounts = mutable+soft-delete, transactions = append-only ledger
 // 23505 = PK ซ้ำ (echo/retry) → idempotent; อื่น ๆ เตือนผู้ใช้
 function reportCorporateError({ error }: { error: { code?: string; message: string } | null }) {
@@ -2061,10 +2076,12 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (rule.startDate > rule.endDate) return { ok: false, error: 'วันเริ่มต้องไม่หลังวันสิ้นสุด' }
     if (!(rule.price > 0)) return { ok: false, error: 'ราคาต้องมากกว่า 0' }
     const newRule: DynamicPricing = {
-      ...rule, name, id: `dp${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      ...rule, name, id: `dp${newId()}`,
       description: rule.description?.trim() || undefined,
     }
     set((s) => ({ dynamicPricing: [...s.dynamicPricing, newRule] }))
+    // dual-write: insert ขึ้นตาราง dynamic_pricing (Phase 4)
+    void supabase.from('dynamic_pricing').insert(pricingRuleRow(newRule)).then(reportPricingError)
     get().logAudit({
       category: 'room', action: 'add-rate',
       summary: `เพิ่มช่วงราคา "${name}" (${getRoomTypeLabel(rule.roomType)}) ${rule.startDate}–${rule.endDate} = ${rule.price.toLocaleString()} บาท/คืน`,
@@ -2084,6 +2101,15 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     if (updates.name !== undefined) clean.name = updates.name.trim()
     if (updates.description !== undefined) clean.description = updates.description.trim() || undefined
     set((s) => ({ dynamicPricing: s.dynamicPricing.map((r) => (r.id === id ? { ...r, ...clean } : r)) }))
+    // dual-write: patch เฉพาะฟิลด์ที่เปลี่ยน (camel→snake) + writer_id echo key
+    const patch: Record<string, unknown> = { writer_id: CLIENT_ID }
+    if (clean.roomType !== undefined) patch.room_type = clean.roomType
+    if (clean.name !== undefined) patch.name = clean.name
+    if (clean.startDate !== undefined) patch.start_date = clean.startDate
+    if (clean.endDate !== undefined) patch.end_date = clean.endDate
+    if (clean.price !== undefined) patch.price = clean.price
+    if (clean.description !== undefined) patch.description = clean.description ?? null
+    void supabase.from('dynamic_pricing').update(patch).eq('id', id).then(reportPricingError)
     get().logAudit({
       category: 'room', action: 'update-rate',
       summary: `แก้ช่วงราคา "${merged.name}" (${getRoomTypeLabel(merged.roomType)}) ${merged.startDate}–${merged.endDate} = ${merged.price.toLocaleString()} บาท/คืน`,
@@ -2095,6 +2121,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   deletePricingRule: (id) => {
     const target = get().dynamicPricing.find((r) => r.id === id)
     set((s) => ({ dynamicPricing: s.dynamicPricing.filter((r) => r.id !== id) }))
+    // dual-write: soft-delete (ไม่ลบแถวจริง — กัน §3c resurrection + เก็บ history)
+    void supabase.from('dynamic_pricing')
+      .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+      .eq('id', id).then(reportPricingError)
     if (target) {
       get().logAudit({
         category: 'room', action: 'delete-rate',
@@ -2110,13 +2140,10 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
   // storage เป็น async (Supabase) — ปิด auto-hydrate แล้วสั่ง rehydrate() เองใน AppShell
   // เพื่อกัน race ที่แอป render ด้วย mock state ก่อนแล้วเขียนทับ cloud (ข้อมูลหาย)
   skipHydration: true,
-  // ── relational migration: Tier A + Tier B ครบ + Tier C (housekeeping C1 + bookings cluster C2) ย้ายไปตารางจริงแล้ว ──
-  // partialize = ตัด slice ที่ย้ายแล้วออกจากสิ่งที่เขียนลง blob → ตารางเป็นเจ้าของคนเดียว
-  // (กัน app_state full-state sync / union-merge มาทับ-หรือชุบชีวิต สิ่งที่ per-table sync เพิ่ง apply)
-  // เหลือใน blob เฉพาะ dynamicPricing (entity สุดท้ายก่อน retire blob)
-  partialize: (state) => ({
-    dynamicPricing: state.dynamicPricing,
-  }),
+  // ── relational migration จบครบ (Tier A + B + C + Phase 4 dynamicPricing) — ทุก entity อยู่ตารางจริงแล้ว ──
+  // partialize = {} → blob ไม่ถือ business data อีกต่อไป (app_state คงไว้เป็น envelope ให้ hydration-gate/
+  // version-CAS/realtime app_state-sync ทำงานตามเดิม แต่ไม่มี slice ไหนเขียนลง blob แล้ว = retire blob สำเร็จ)
+  partialize: () => ({}),
   // blob เก่าอาจยังพก slice ที่ย้ายแล้วติดมา — บังคับใช้ค่าใน current (ปล่อยให้ seed จากตารางเติม)
   // ไม่งั้นแถวที่ลบไป (soft-delete) จะถูก rehydrate จาก blob เก่ามาชุบชีวิตก่อน seed ทับ
   merge: (persisted, current) => {
@@ -2139,6 +2166,7 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
       bookings: current.bookings ?? [],
       invoices: current.invoices ?? [],
       bookingAddOns: current.bookingAddOns ?? [],
+      dynamicPricing: current.dynamicPricing ?? [],
     }
   },
   // ตั้ง flag เสมอ (แม้ error หรือยังไม่มีข้อมูลใน cloud) เพื่อไม่ให้ UI ค้างที่ loading

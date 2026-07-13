@@ -8,7 +8,7 @@ import { useHotelStore } from '@/lib/store'
 import { supabase } from '@/lib/supabase'
 import { CLIENT_ID, applyRemoteState, setLastSeenVersion, registerSaveErrorHandler } from '@/lib/supabase-storage'
 import { getRequiredPermission } from '@/lib/route-permissions'
-import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff, User, CorporateAccount, CorporateTransaction, Room, HousekeepingTask, Booking, Invoice, BookingAddOn } from '@/types'
+import type { AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem, Guest, Staff, User, CorporateAccount, CorporateTransaction, Room, HousekeepingTask, Booking, Invoice, BookingAddOn, DynamicPricing } from '@/types'
 import { hashPassword } from '@/lib/auth-utils'
 import { toast } from 'sonner'
 // mappers snake_case ↔ camelCase ย้ายไป lib/row-mappers.ts (Tier C C3 — แชร์กับ callRpc ใน lib/store)
@@ -20,6 +20,7 @@ import {
   rowToRoom, roomToRow, rowToHkTask, hkTaskToRow,
   rowToBooking, bookingToRow, rowToInvoice, invoiceToRow,
   rowToBookingAddOn, bookingAddOnToRow,
+  rowToDynamicPricing, dynamicPricingToRow,
 } from '@/lib/row-mappers'
 
 const STORE_KEY = 'hotel-pms-storage'
@@ -71,6 +72,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             corporateAccounts: _migCorpAcc, corporateTransactions: _migCorpTx,
             rooms: _migRooms, housekeepingTasks: _migHk,
             bookings: _migBookings, invoices: _migInvoices, bookingAddOns: _migBookingAddOns,
+            dynamicPricing: _migPricing,
             ...rest
           } = incoming
           // apply แบบไม่เขียนกลับ cloud (กัน ping-pong loop)
@@ -695,6 +697,42 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       )
       .subscribe()
 
+    // ── dynamic_pricing relational sync (Phase 4 retire-blob, slice สุดท้าย) — mutable CRUD + soft-delete ──
+    let pricingLive = false
+    type PricingEvent = { id: string; deleted: boolean; rule: DynamicPricing }
+    const pricingBuffer: PricingEvent[] = []
+    const applyPricingEvents = (events: PricingEvent[]) => {
+      applyRemoteState(() =>
+        useHotelStore.setState((s) => {
+          const byId = new Map(s.dynamicPricing.map((r) => [r.id, r]))
+          for (const ev of events) {
+            if (ev.deleted) byId.delete(ev.id)
+            else byId.set(ev.id, ev.rule)
+          }
+          return { dynamicPricing: Array.from(byId.values()) }
+        })
+      )
+    }
+    const pricingChannel = supabase
+      .channel('dynamic_pricing-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'dynamic_pricing' },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as Record<string, unknown> | null
+          if (!row) return
+          if (row.writer_id === CLIENT_ID) return // echo ของแท็บนี้เอง
+          const ev: PricingEvent = {
+            id: String(row.id),
+            deleted: payload.eventType === 'DELETE' || row.deleted_at != null,
+            rule: rowToDynamicPricing(row),
+          }
+          if (!pricingLive) { pricingBuffer.push(ev); return }
+          applyPricingEvents([ev])
+        }
+      )
+      .subscribe()
+
     // ⚠️ ต้อง AWAIT อ่าน app_state ให้เสร็จ "ก่อน" เรียก rehydrate (deterministic ไม่ใช่ race)
     // เหตุผล: rehydrate จะ trigger persist write ครั้งแรก (onRehydrateStorage setState _hasHydrated)
     // ที่ partialize ตัด migrated slice ทิ้งจาก blob. ถ้าอ่านหลัง/พร้อมกับ rehydrate อาจได้ค่าว่าง →
@@ -1302,6 +1340,45 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       bAddOnsBuffer.length = 0
       bAddOnsLive = true
+
+      // ── seed dynamic_pricing (Phase 4 retire-blob) + one-time reconcile จาก blob ──
+      // ตารางสร้างใหม่ (fresh, ไม่มี orphan seed จาก 001) → everWritten=false → upsert 3 rules จาก
+      // bootState (await อ่านก่อน rehydrate = pre-strip การันตี). ไม่มี divergence (blob==mock)
+      const { data: dpData, error: dpErr } = await supabase
+        .from('dynamic_pricing')
+        .select('*')
+        .is('deleted_at', null)
+        .order('id', { ascending: true })
+      if (dpErr) {
+        console.error('[dynamic-pricing-sync] seed:', dpErr.message)
+      } else {
+        let rows = dpData ?? []
+        const everWritten = rows.some((r) => r.writer_id != null)
+        if (!everWritten) {
+          const blobRules = (bootState.dynamicPricing ?? []) as DynamicPricing[]
+          if (blobRules.length > 0) {
+            const { error: upErr } = await supabase.from('dynamic_pricing')
+              .upsert(blobRules.map(dynamicPricingToRow), { onConflict: 'id' })
+            if (upErr) console.error('[dynamic-pricing-sync] reconcile upsert:', upErr.message)
+            const blobIds = new Set(blobRules.map((r) => r.id))
+            const orphanIds = rows.map((r) => String(r.id)).filter((id) => !blobIds.has(id))
+            if (orphanIds.length > 0) {
+              const { error: delErr } = await supabase.from('dynamic_pricing')
+                .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+                .in('id', orphanIds)
+              if (delErr) console.error('[dynamic-pricing-sync] reconcile soft-delete:', delErr.message)
+            }
+            const re = await supabase
+              .from('dynamic_pricing').select('*').is('deleted_at', null)
+              .order('id', { ascending: true })
+            rows = re.data ?? rows
+          }
+        }
+        applyRemoteState(() => useHotelStore.setState({ dynamicPricing: rows.map(rowToDynamicPricing) }))
+        if (pricingBuffer.length) applyPricingEvents(pricingBuffer)
+      }
+      pricingBuffer.length = 0
+      pricingLive = true
     })()
 
     return () => {
@@ -1322,6 +1399,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(bookingsChannel)
       supabase.removeChannel(invoicesChannel)
       supabase.removeChannel(bAddOnsChannel)
+      supabase.removeChannel(pricingChannel)
     }
   }, [])
 

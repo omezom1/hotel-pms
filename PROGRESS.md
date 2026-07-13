@@ -397,12 +397,28 @@
 - cleanup ครบ: VERIFY-C3V ทิ้งเป็น trace cancelled (ธรรมเนียมเดิม), VERIFY-C3E soft-delete + คืน rB9, สต็อก inv003=198, corp002=11,800, ห้องทุกห้องกลับสถานะเดิม
 - **สรุป: Verify C3 checklist ครบ 100% — เหลือแค่ LOW×2 ที่ตั้งใจข้าม (lock-order comment / invoice item order) → PR #22 พร้อม merge**
 
+### 2026-07-13 (Phase 4 — dynamicPricing cutover = **retire blob สำเร็จ**, browser-verified) — branch `feat/phase4-dynamic-pricing`
+ต่อจาก MIGRATION จบ (PR #22 merged `ac1baed`) → **ย้าย slice สุดท้าย `dynamicPricing` จาก blob เป็นตารางจริง** = ปิด strangler สมบูรณ์ (blob ไม่เหลือ business data)
+- **`dynamicPricing`** = กฎราคาตามฤดูกาล/ประเภทห้อง (config-like, CRUD ผ่าน Seasonal Rate Manager ใน `/rooms` tab "Dynamic Pricing", admin-only). 3 rules seed (dp001–003). mutable CRUD (add/update/delete) แพทเทิร์น staff/expenses
+- **ต่างจาก entity อื่น: ตารางยังไม่มี** (dynamic_pricing ไม่ได้อยู่ใน 001) → **CREATE fresh** = ไม่มี orphan seed → reconcile everWritten=false → upsert 3 rules จาก blob ตรง ๆ **ไม่มี divergence** (blob==mock)
+- **DDL `021_dynamic_pricing.sql`** (ผ่าน MCP execute_sql): CREATE TABLE (id/room_type[CHECK single/double/triple]/name/start_date/end_date[text 'YYYY-MM-DD']/price/description/writer_id/created_at/updated_at/deleted_at) + trigger `trg_set_updated_at` + realtime publication + replica identity full + **ENABLE RLS + GRANT + 3 policy anon** select/insert/update (no delete). verify: 3 key cols, replident='f', in_realtime=1, 3 policy, rls_on
+- **`lib/row-mappers.ts`:** `rowToDynamicPricing`/`dynamicPricingToRow` (+ import DynamicPricing)
+- **`lib/store.ts`:** helper `reportPricingError`+`pricingRuleRow`; wire `addPricingRule`=insert (+ id ใช้ **`newId()`** แทน `Date.now()` ล้วน), `updatePricingRule`=patch เฉพาะฟิลด์เปลี่ยน, `deletePricingRule`=**soft-delete** (deleted_at). **partialize เปลี่ยนเป็น `() => ({})`** = blob ไม่ถือ business data อีกต่อไป (app_state คงไว้เป็น envelope ให้ hydration-gate/version-CAS/realtime ทำงานตามเดิม) + merge `current.dynamicPricing ?? []`
+- **`lib/supabase-storage.ts`:** `mergeState` `delete out.dynamicPricing` (กัน old blob resurrect ตอน union-merge)
+- **`components/layout/AppShell.tsx`:** import mappers + app_state-sync strip `dynamicPricing` + `dynamic_pricing-sync` channel (event '*', soft-delete→remove, buffer→live) + seed + reconcile-from-blob (everWritten + bootState pre-strip + orphan soft-delete guard) + removeChannel cleanup
+- **✅ browser-verify ผ่าน (CDP→Windows Chrome, isolated context, dev server + prod DB):**
+  - reconcile: 3 rules (dp001–003) stamped writer_id ครบ, ไม่ soft-delete, ค่าถูก; UI /rooms KPI ราคา ฿500/฿500/฿700 render จาก rules; DP tab แสดง "ราคาปกติ" ×3
+  - **CRUD round-trip:** create VERIFY-DP-TEST (฿1234) → **dual-write insert ถึงตาราง** (id `dp1783921287628-yr3m9` = format newId ✓, stamped); delete ผ่าน UI → **soft-delete** (deleted_at set, แถวคงอยู่, live_rules=3 คงเดิม); เก็บ test row (hard delete ผ่าน MCP)
+  - **🏁 blob state = `{}` (n_state_keys=0, blob_has_dp=false)** — พิสูจน์ **retire blob สมบูรณ์**: business data อยู่ตาราง relational หมด, app_state เหลือ envelope ว่าง
+  - console ไม่มี error; tsc 0 / build 22 routes
+- ⏳ **NEXT:** commit/push/PR (base main) → ผู้ใช้ merge = deploy prod (safe: blob==mock → main เดิม fallback identical). งานถัดไปตามลำดับ = **Supabase Auth** (P1 security, ปิด residual anon-blob) → **Night Audit / ปิดกะ**
+
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
-2. **bookings/invoices/housekeeping/bookingAddOns ยังเป็น blob** (rooms ย้ายแล้ว 2026-07-01 = Tier B ครบ;
-   เหลือ cluster Tier C ที่พัวพันกันหนัก) — ถ้าจะทำ "ถูก 100%" (รวมแก้ปัญหา delete ถูกชุบชีวิตในข้อ 3c)
-   ต้องย้าย cluster ที่เหลือ (bookings, invoices, housekeeping, payments, addons) เป็น
-   proper tables + Postgres RPC ให้ checkout/cancel เป็น transaction เดียว = งานใหญ่
+2. ~~**bookings/invoices/housekeeping/bookingAddOns ยังเป็น blob**~~ → ✅ **MIGRATION จบครบทุก entity** —
+   Tier C (bookings/invoices/housekeeping/addons + payments jsonb + 9 RPCs atomic) merged PR #22 (`ac1baed`) 2026-07-13;
+   **Phase 4 dynamicPricing** ย้ายเป็นตาราง `dynamic_pricing` (branch `feat/phase4-dynamic-pricing`) → **blob state = `{}` = retire blob สมบูรณ์**
+   (app_state คงเป็น envelope ว่างให้ hydration-gate/CAS/realtime; ปัญหา §3c resurrection ปิดถาวรทุก entity แล้ว)
 3. **ความปลอดภัย: RLS** — 🔶 **2026-06-18 ทำ interim hardening แล้ว** (branch `security/p1-p2-hardening`, migration 012): ปิด anon บน orphan/PII tables ทั้งหมด + จำกัด active tables + audit_logs insert-only (กันลบกลบรอย) + store-side permission guards. ดู §5 entry 2026-06-18. **เหลือ residual ที่ปิดไม่ได้แบบ anon-only:** `app_state` blob ยังเปิด anon (แอปต้องอ่าน) = ใครมี public key ยังดึงข้อมูลทั้งก้อนผ่าน blob ได้. **ปิด 100% = ต้อง Supabase Auth จริง → `anon`→`authenticated` → per-role RLS → RPC** (งานใหญ่, ก้อนถัดไป). P3 ค้าง: `receipts` bucket ยัง list ได้, session ไม่มี expiry/revoke
 4. ~~รหัสผ่าน plaintext~~ → ✅ (2026-06-15) **hash ด้วย bcrypt แล้ว** (`lib/auth-utils.ts`); blob + ตาราง relational `users` migrate เป็น hash หมด (0 plaintext). export ตัด password อยู่แล้ว. account actions มี audit ครบ. ดูรายละเอียด §5 entry 2026-06-15/16
 5. ~~**VAT 7% ในใบแจ้งหนี้**~~ → ❌ **ยกเลิก/ไม่ทำ** (2026-06-23) — portfolio demo ข้อมูลปลอม ไม่ต้องใช้ใบกำกับภาษี (`tax: 0` คงไว้)
