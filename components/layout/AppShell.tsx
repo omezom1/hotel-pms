@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import Sidebar from './Sidebar'
 import GlobalSearch from '@/components/GlobalSearch'
@@ -29,16 +29,28 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
   const { user, hydrated } = useAuthStore()
+  const authUserId = useAuthStore((s) => s.authUserId)
+  const authInit = useAuthStore((s) => s.init)
   // hotel store ใช้ Supabase storage (async) + skipHydration → ต้องสั่ง rehydrate เอง
   const hotelHydrated = useHotelStore((s) => s._hasHydrated)
   const [loadTimedOut, setLoadTimedOut] = useState(false)
 
   const isAuthRoute = pathname?.startsWith('/login')
 
-  // โหลด state ก้อนใหญ่จาก Supabase ครั้งเดียวตอน mount (กัน mock state เขียนทับ cloud)
+  // ตรวจ session (Supabase Auth) ครั้งเดียวตอน mount — กู้ session เดิม + subscribe auth changes
+  const authInitedRef = useRef(false)
+  useEffect(() => {
+    if (authInitedRef.current) return
+    authInitedRef.current = true
+    void authInit()
+  }, [authInit])
+
+  // โหลด state ก้อนใหญ่จาก Supabase หลัง "login แล้ว" (boot inversion — Supabase Auth)
+  // ตารางเปิด authenticated → ต้องมี session ก่อนถึงอ่าน/subscribe ได้; ยิงเมื่อ authUserId พร้อม
   // แล้ว subscribe Realtime: ถ้าแท็บ/เครื่องอื่นเขียนข้อมูล ให้ดึงมา sync ทันที
   // (ลดความเสี่ยง last-write-wins ที่งานของกันและกันหายเมื่อเปิดหลายที่พร้อมกัน)
   useEffect(() => {
+    if (!authUserId) return // ยังไม่ login → ไม่มีสิทธิ์อ่านตาราง → รอ session ก่อน
     // เขียนขึ้น cloud ไม่สำเร็จ → เตือนผู้ใช้ (ไม่งั้นงานหายเงียบ ๆ)
     registerSaveErrorHandler((msg) =>
       toast.error('บันทึกขึ้นคลาวด์ไม่สำเร็จ', {
@@ -1401,7 +1413,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       supabase.removeChannel(bAddOnsChannel)
       supabase.removeChannel(pricingChannel)
     }
-  }, [])
+  }, [authUserId])
 
   // ถ้าโหลดข้อมูลคลาวด์นานผิดปกติ (เน็ตหลุด/Supabase ล่ม) → แสดงปุ่มลองใหม่ ไม่ค้างถาวร
   useEffect(() => {
@@ -1434,9 +1446,27 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     return <>{children}</>
   }
 
-  // ระหว่างรอ hydrate: auth (localStorage) + ข้อมูลโรงแรม (Supabase, async)
-  // ต้องรอ cloud ให้เสร็จก่อน ไม่งั้น component จะเห็น mock state แล้ว action จะเขียนทับ cloud
-  if (!hydrated || !hotelHydrated) {
+  // 1) รอตรวจ session (Supabase Auth getSession) — auth-first boot inversion
+  if (!hydrated) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="text-slate-500 text-sm">กำลังตรวจสอบสิทธิ์…</div>
+      </div>
+    )
+  }
+
+  // 2) ยังไม่ login — แสดง loading ระหว่าง redirect ไป /login
+  if (!user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="text-slate-500 text-sm">กำลังนำทางไปหน้าเข้าสู่ระบบ…</div>
+      </div>
+    )
+  }
+
+  // 3) login แล้ว แต่ยังรอข้อมูลโรงแรม (Supabase, async) — ต้องรอ cloud ก่อน
+  //    ไม่งั้น component จะเห็น mock state แล้ว action จะเขียนทับ cloud
+  if (!hotelHydrated) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-3 bg-slate-50">
         <div className="text-slate-500 text-sm">กำลังโหลดข้อมูลจากคลาวด์…</div>
@@ -1451,15 +1481,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           </div>
         )}
-      </div>
-    )
-  }
-
-  // ยังไม่ login — แสดง loading ระหว่าง redirect
-  if (!user) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <div className="text-slate-500 text-sm">กำลังนำทางไปหน้าเข้าสู่ระบบ…</div>
       </div>
     )
   }
