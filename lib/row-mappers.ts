@@ -10,7 +10,7 @@ import { CLIENT_ID } from './supabase-storage'
 import type {
   AuditLog, Expense, InventoryItem, InventoryTransaction, MaintenanceLog, AddOnItem,
   Guest, Staff, User, CorporateAccount, CorporateTransaction, Room, HousekeepingTask,
-  Booking, Invoice, BookingAddOn,
+  Booking, Invoice, BookingAddOn, DynamicPricing,
 } from '@/types'
 
 // แปลงแถว audit_logs (snake_case จาก Supabase) → AuditLog (camelCase)
@@ -399,5 +399,26 @@ export function bookingAddOnToRow(a: BookingAddOn) {
     status: a.status, requested_at: a.requestedAt, requested_by: a.requestedBy,
     fulfilled_at: a.fulfilledAt ?? null, fulfilled_by: a.fulfilledBy ?? null,
     notes: a.notes ?? null, writer_id: CLIENT_ID,
+  }
+}
+
+// แปลงแถว dynamic_pricing (snake_case) → DynamicPricing (camelCase) — Phase 4 (slice สุดท้าย)
+export function rowToDynamicPricing(r: Record<string, unknown>): DynamicPricing {
+  return {
+    id: String(r.id),
+    roomType: r.room_type as DynamicPricing['roomType'],
+    name: String(r.name ?? ''),
+    startDate: String(r.start_date ?? ''),
+    endDate: String(r.end_date ?? ''),
+    price: Number(r.price ?? 0),
+    description: r.description != null ? String(r.description) : undefined,
+  }
+}
+// แปลง DynamicPricing → row (snake_case) สำหรับ reconcile upsert จาก blob (+ writer_id echo key)
+export function dynamicPricingToRow(d: DynamicPricing) {
+  return {
+    id: d.id, room_type: d.roomType, name: d.name,
+    start_date: d.startDate, end_date: d.endDate, price: d.price,
+    description: d.description ?? null, writer_id: CLIENT_ID,
   }
 }

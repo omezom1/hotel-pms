@@ -141,6 +141,7 @@ function mergeState(
   delete out.bookings
   delete out.invoices
   delete out.bookingAddOns
+  delete out.dynamicPricing
   return out
 }
 
