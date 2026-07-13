@@ -2,34 +2,41 @@
 import { useState } from 'react'
 import { KeyRound, X } from 'lucide-react'
 import { useAuthStore } from '@/lib/auth-store'
-import { useHotelStore } from '@/lib/store'
+import { supabase } from '@/lib/supabase'
 import { useFocusTrap } from '@/lib/useFocusTrap'
 import { toast } from 'sonner'
 
-// ปุ่ม + dialog ให้ผู้ใช้เปลี่ยนรหัสผ่านของตัวเอง (บัญชีอยู่บน cloud — sync ทุกเครื่อง)
+// ปุ่ม + dialog ให้ผู้ใช้เปลี่ยนรหัสผ่านของตัวเอง (ผ่าน Supabase Auth)
 export default function ChangePasswordButton() {
   const userId = useAuthStore((s) => s.user?.userId)
-  const updateUser = useHotelStore((s) => s.updateUser)
   const [open, setOpen] = useState(false)
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
   const [confirm, setConfirm] = useState('')
+  const [saving, setSaving] = useState(false)
   const trapRef = useFocusTrap<HTMLDivElement>(open, () => setOpen(false))
 
   if (!userId) return null
 
   function reset() { setCurrent(''); setNext(''); setConfirm('') }
 
-  function submit() {
-    const me = useHotelStore.getState().users.find((u) => u.id === userId)
-    if (!me) { toast.error('ไม่พบบัญชีผู้ใช้'); return }
-    if (me.password !== current) { toast.error('รหัสผ่านปัจจุบันไม่ถูกต้อง'); return }
+  async function submit() {
+    if (saving) return
     if (!next) { toast.error('กรุณาตั้งรหัสผ่านใหม่'); return }
+    if (next.length < 6) { toast.error('รหัสผ่านใหม่ต้องยาวอย่างน้อย 6 ตัว'); return }
     if (next !== confirm) { toast.error('รหัสผ่านใหม่ทั้งสองช่องไม่ตรงกัน'); return }
-    const res = updateUser(userId!, { password: next })
-    if (!res.ok) { toast.error(res.error ?? 'เปลี่ยนรหัสผ่านไม่สำเร็จ'); return }
+    setSaving(true)
+    // ตรวจรหัสผ่านปัจจุบันด้วยการ re-authenticate (Supabase Auth ไม่บังคับ current pw ตอน updateUser)
+    const { data: au } = await supabase.auth.getUser()
+    const email = au.user?.email
+    if (!email) { toast.error('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่'); setSaving(false); return }
+    const { error: verr } = await supabase.auth.signInWithPassword({ email, password: current })
+    if (verr) { toast.error('รหัสผ่านปัจจุบันไม่ถูกต้อง'); setSaving(false); return }
+    const { error: uerr } = await supabase.auth.updateUser({ password: next })
+    if (uerr) { toast.error(uerr.message || 'เปลี่ยนรหัสผ่านไม่สำเร็จ'); setSaving(false); return }
     toast.success('เปลี่ยนรหัสผ่านแล้ว')
     reset()
+    setSaving(false)
     setOpen(false)
   }
 
