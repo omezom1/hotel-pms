@@ -1,11 +1,10 @@
 'use client'
 import Link from 'next/link'
-import { useRef } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import type { LucideIcon } from 'lucide-react'
 import {
   LayoutDashboard, CalendarDays, Users, DollarSign,
-  UserCog, BarChart3, BedDouble, Hotel, LogOut, Package, ConciergeBell, CalendarRange, ClipboardList, RotateCcw, History, DatabaseBackup, Upload, Receipt, Wrench
+  UserCog, BarChart3, BedDouble, Hotel, LogOut, Package, ConciergeBell, CalendarRange, ClipboardList, History, DatabaseBackup, Receipt, Wrench
 } from 'lucide-react'
 import { cn, getStaffRoleLabel } from '@/lib/utils'
 import { useAuthStore } from '@/lib/auth-store'
@@ -14,7 +13,6 @@ import type { StaffPermissions } from '@/types'
 import { toast } from 'sonner'
 import ThemeToggle from './ThemeToggle'
 import ChangePasswordButton from '@/components/ChangePasswordButton'
-import { useConfirm } from '@/components/ConfirmProvider'
 
 type NavItem = {
   href: string
@@ -46,8 +44,6 @@ export default function Sidebar() {
   const pathname = usePathname()
   const router = useRouter()
   const { user, logout } = useAuthStore()
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const confirm = useConfirm()
 
   if (!user) return null
 
@@ -58,17 +54,12 @@ export default function Sidebar() {
     router.replace('/login')
   }
 
-  async function handleReset() {
-    if (!(await confirm({
-      title: 'ล้างข้อมูลทั้งหมด?',
-      message: 'ล้างข้อมูลทั้งหมดบนคลาวด์และโหลดข้อมูลตัวอย่างใหม่\nย้อนกลับไม่ได้ และมีผลกับทุกเครื่องที่ใช้ระบบนี้',
-      danger: true, confirmText: 'ล้างข้อมูล',
-    }))) return
-    // ข้อมูลอยู่บน Supabase แล้ว — ต้องลบแถว state บนคลาวด์ (ไม่ใช่ localStorage ที่เลิกใช้)
-    await useHotelStore.persist.clearStorage()
-    toast.success('ล้างข้อมูลแล้ว กำลังโหลดใหม่...')
-    setTimeout(() => window.location.reload(), 600)
-  }
+  // ⚠️ เคยมีปุ่ม "รีเซ็ตข้อมูลตัวอย่าง" (ลบแถว app_state) และ "กู้คืนข้อมูล" (importData → setState)
+  //    ทั้งคู่ถูกถอดออกหลัง retire blob: ข้อมูลจริงอยู่ในตาราง relational แล้ว
+  //      · รีเซ็ต = ลบแค่ซองเปล่า ตารางไม่ถูกแตะ → ผู้ใช้เข้าใจผิดว่าล้างข้อมูลแล้ว
+  //      · กู้คืน = เขียนแค่ state ในหน่วยความจำ ไม่ลงตาราง → หายทันทีที่ refresh (อันตรายกว่าไม่มี)
+  //    ล้างข้อมูลเดโมก่อนเริ่มใช้จริง = `supabase/migrations/025_go_live_reset.sql` (รันครั้งเดียว)
+  //    กู้คืนจริง = backup ระดับฐานข้อมูลของ Supabase (daily backup / PITR)
 
   // สำรองข้อมูลทั้งระบบเป็นไฟล์ JSON
   function handleBackup() {
@@ -86,31 +77,6 @@ export default function Sidebar() {
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
     toast.success('สำรองข้อมูลเป็นไฟล์แล้ว')
-  }
-
-  // กู้คืนข้อมูลจากไฟล์ JSON ที่เคยสำรองไว้
-  function handleRestoreFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (e.target) e.target.value = '' // เคลียร์เพื่อให้เลือกไฟล์เดิมซ้ำได้
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = async () => {
-      try {
-        const parsed = JSON.parse(String(reader.result))
-        const data = parsed?.data ?? parsed // รองรับทั้งไฟล์ที่ห่อ _app และ data ดิบ
-        if (!data || typeof data !== 'object' || !Array.isArray(data.bookings)) {
-          toast.error('ไฟล์ไม่ถูกต้อง: ไม่พบข้อมูลการจอง')
-          return
-        }
-        if (!(await confirm({ title: 'กู้คืนข้อมูล?', message: 'กู้คืนข้อมูลจากไฟล์นี้? ข้อมูลปัจจุบันจะถูกเขียนทับทั้งหมด', danger: true, confirmText: 'กู้คืน' }))) return
-        useHotelStore.getState().importData(data)
-        toast.success('กู้คืนข้อมูลแล้ว กำลังโหลดใหม่...')
-        setTimeout(() => window.location.reload(), 600)
-      } catch {
-        toast.error('อ่านไฟล์ไม่สำเร็จ — ต้องเป็นไฟล์ .json ที่สำรองจากระบบนี้')
-      }
-    }
-    reader.readAsText(file)
   }
 
   const initial = user.staff.name.charAt(0).toUpperCase()
@@ -164,30 +130,13 @@ export default function Sidebar() {
         </div>
         {user.staff.permissions.canManageStaff && (
           <>
-            <input ref={fileInputRef} type="file" accept=".json,application/json" onChange={handleRestoreFile} className="hidden" />
             <button
               onClick={handleBackup}
               className="mt-2 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-emerald-300 transition-colors"
-              title="สำรองข้อมูลทั้งระบบเป็นไฟล์ .json"
+              title="ดาวน์โหลดข้อมูลทั้งระบบ ณ ตอนนี้เป็นไฟล์ .json (สำเนาไว้ตรวจสอบ)"
             >
               <DatabaseBackup size={14} className="shrink-0" />
-              <span className="hidden group-hover:inline lg:inline whitespace-nowrap">สำรองข้อมูล (Backup)</span>
-            </button>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="mt-1 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-blue-300 transition-colors"
-              title="กู้คืนข้อมูลจากไฟล์สำรอง"
-            >
-              <Upload size={14} className="shrink-0" />
-              <span className="hidden group-hover:inline lg:inline whitespace-nowrap">กู้คืนข้อมูล (Restore)</span>
-            </button>
-            <button
-              onClick={handleReset}
-              className="mt-1 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-amber-300 transition-colors"
-              title="ล้างข้อมูล localStorage แล้วโหลด mock data ใหม่"
-            >
-              <RotateCcw size={14} className="shrink-0" />
-              <span className="hidden group-hover:inline lg:inline whitespace-nowrap">รีเซ็ตข้อมูลตัวอย่าง</span>
+              <span className="hidden group-hover:inline lg:inline whitespace-nowrap">ดาวน์โหลดข้อมูล (.json)</span>
             </button>
           </>
         )}

@@ -9,6 +9,7 @@ import type { StaffRole, StaffPermissions, Staff } from '@/types'
 import { CheckCircle2, XCircle, UserPlus, Trash2, Save, X, Pencil } from 'lucide-react'
 import { toast } from 'sonner'
 import { useConfirm } from '@/components/ConfirmProvider'
+import AccountsManager from '@/components/AccountsManager'
 
 const roleColors: Record<StaffRole, string> = {
   admin: 'text-red-700 bg-red-100',
@@ -294,6 +295,9 @@ export default function StaffPage() {
             </div>
           ))}
         </div>
+
+        {/* บัญชีล็อกอิน (Supabase Auth) — สร้าง/ตั้งรหัสใหม่/ลบ ผ่าน /api/accounts (service_role ฝั่ง server) */}
+        {canManageStaff && <AccountsManager />}
       </div>
 
       {staffForm && (
