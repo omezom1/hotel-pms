@@ -8,7 +8,7 @@ import Header from '@/components/layout/Header'
 import { formatCurrency, formatDateTime, getRoomStatusLabel, getRoomTypeLabel, todayLocal } from '@/lib/utils'
 import { ShoppingBag, X, Plus, Pencil, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
-import type { RoomStatus, RoomType, RoomWing, DynamicPricing } from '@/types'
+import type { Room, RoomStatus, RoomType, RoomWing, DynamicPricing } from '@/types'
 
 const statusColors: Record<RoomStatus, string> = {
   available: 'text-emerald-700 bg-emerald-100',
@@ -31,10 +31,12 @@ const roomTypeStats = (rooms: ReturnType<typeof useHotelStore.getState>['rooms']
 }
 
 export default function RoomsPage() {
-  const { rooms, updateRoomStatus, bookingAddOns, addOnItems, bookings, dynamicPricing, fulfillAddOn, cancelAddOn, addPricingRule, updatePricingRule, deletePricingRule, logAudit } = useHotelStore()
+  const { rooms, updateRoomStatus, addRoom, updateRoom, deleteRoom, bookingAddOns, addOnItems, bookings, dynamicPricing, fulfillAddOn, cancelAddOn, addPricingRule, updatePricingRule, deletePricingRule, logAudit } = useHotelStore()
   const { user } = useAuthStore()
   // ยกเลิก add-on ที่จ่ายเงินแล้ว = คืนเงิน → ต้องมีสิทธิ์การเงิน (เหมือน booking detail)
   const canRefund = user?.staff.permissions.canManageFinance ?? false
+  // เพิ่ม/แก้/ลบห้อง = แก้ผังห้องพักของโรงแรม → สิทธิ์จัดการห้องพัก
+  const canManageRooms = user?.staff.permissions.canManageRooms ?? false
   // จัดการราคา = revenue decision → สิทธิ์การเงิน
   const canManagePricing = canRefund
   const confirm = useConfirm()
@@ -58,6 +60,51 @@ export default function RoomsPage() {
     logAudit({ category: 'room', action: 'status_change', summary: `ปิดปรับปรุงห้อง ${closeRoom.number} (${CLOSE_REASON_LABEL[closeReason]})`, entityId: closeRoom.id })
     toast.success(`ปิดปรับปรุงห้อง ${closeRoom.number} แล้ว`)
     setCloseRoom(null)
+  }
+
+  // ===== Room CRUD (ผังห้องพัก) =====
+  const blankRoom = {
+    number: '', type: 'single' as RoomType, floor: '1', wing: 'front' as RoomWing,
+    pricePerNight: '', maxGuests: '1', amenities: 'WiFi, TV, เครื่องปรับอากาศ', description: '',
+  }
+  const [roomModal, setRoomModal] = useState<{ mode: 'new' } | { mode: 'edit'; id: string } | null>(null)
+  const [roomForm, setRoomForm] = useState(blankRoom)
+  const roomTrapRef = useFocusTrap<HTMLDivElement>(!!roomModal, () => setRoomModal(null))
+
+  function openNewRoom() {
+    setRoomForm(blankRoom)
+    setRoomModal({ mode: 'new' })
+  }
+  function openEditRoom(room: Room) {
+    setRoomForm({
+      number: room.number, type: room.type, floor: String(room.floor), wing: room.wing,
+      pricePerNight: String(room.pricePerNight), maxGuests: String(room.maxGuests),
+      amenities: room.amenities.join(', '), description: room.description,
+    })
+    setRoomModal({ mode: 'edit', id: room.id })
+  }
+  function submitRoom() {
+    const payload = {
+      number: roomForm.number.trim(), type: roomForm.type,
+      floor: Number(roomForm.floor), wing: roomForm.wing,
+      pricePerNight: Number(roomForm.pricePerNight), maxGuests: Number(roomForm.maxGuests),
+      amenities: roomForm.amenities.split(',').map((a) => a.trim()).filter(Boolean),
+      description: roomForm.description.trim(),
+    }
+    const res = roomModal?.mode === 'edit' ? updateRoom(roomModal.id, payload) : addRoom(payload)
+    if (!res.ok) { toast.error(res.error ?? 'บันทึกไม่สำเร็จ'); return }
+    toast.success(roomModal?.mode === 'edit' ? `แก้ข้อมูลห้อง ${payload.number} แล้ว` : `เพิ่มห้อง ${payload.number} แล้ว`)
+    setRoomModal(null)
+  }
+  async function removeRoom(room: Room) {
+    if (!(await confirm({
+      title: `ลบห้อง ${room.number}?`,
+      message: 'ห้องจะหายจากการขายและปฏิทินทันที ประวัติการเข้าพักเดิมยังเก็บไว้ครบ\nถ้าแค่ปิดชั่วคราว ให้ใช้ "ปิดปรับปรุง" แทน',
+      danger: true, confirmText: 'ลบห้อง',
+    }))) return
+    const res = deleteRoom(room.id)
+    if (!res.ok) { toast.error(res.error ?? 'ลบไม่สำเร็จ'); return }
+    toast.info(`ลบห้อง ${room.number} แล้ว`)
   }
 
   // ===== Seasonal pricing (จัดการช่วงราคา) =====
@@ -166,6 +213,12 @@ export default function RoomsPage() {
                 ))}
               </select>
               <div className="ml-auto text-sm text-slate-500 self-center">แสดง {filtered.length} จาก {rooms.length} ห้อง</div>
+              {canManageRooms && (
+                <button onClick={openNewRoom}
+                  className="flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-medium">
+                  <Plus size={16} /> เพิ่มห้อง
+                </button>
+              )}
             </div>
 
             <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
@@ -173,7 +226,7 @@ export default function RoomsPage() {
                 <table className="w-full text-sm">
                   <thead className="bg-slate-50 border-b border-slate-100">
                     <tr>
-                      {['ห้อง', 'ฝั่ง', 'ชั้น', 'ประเภท', 'ราคา/คืน', 'รองรับ', 'สิ่งอำนวยความสะดวก', 'สถานะ', 'เปลี่ยนสถานะ'].map((h) => (
+                      {['ห้อง', 'ฝั่ง', 'ชั้น', 'ประเภท', 'ราคา/คืน', 'รองรับ', 'สิ่งอำนวยความสะดวก', 'สถานะ', 'เปลี่ยนสถานะ', ...(canManageRooms ? ['จัดการ'] : [])].map((h) => (
                         <th key={h} className="text-left px-4 py-3 font-medium text-slate-500">{h}</th>
                       ))}
                     </tr>
@@ -234,6 +287,20 @@ export default function RoomsPage() {
                             <option value="maintenance">ปิดปรับปรุง</option>
                           </select>
                         </td>
+                        {canManageRooms && (
+                          <td className="no-print px-4 py-3">
+                            <div className="flex gap-1">
+                              <button onClick={() => openEditRoom(room)} title={`แก้ข้อมูลห้อง ${room.number}`}
+                                className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+                                <Pencil size={15} />
+                              </button>
+                              <button onClick={() => removeRoom(room)} title={`ลบห้อง ${room.number}`}
+                                className="p-1.5 rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-500">
+                                <Trash2 size={15} />
+                              </button>
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -398,6 +465,86 @@ export default function RoomsPage() {
             <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100">
               <button onClick={() => setCloseRoom(null)} className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>
               <button onClick={confirmCloseRoom} className="px-5 py-2.5 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm font-medium">ปิดปรับปรุง</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* เพิ่ม/แก้ ห้องพัก dialog — สถานะห้องไม่อยู่ในฟอร์ม (ระบบคุมผ่านการเข้าพัก/ปิดปรับปรุง) */}
+      {roomModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setRoomModal(null)}>
+          <div ref={roomTrapRef} role="dialog" aria-modal="true" tabIndex={-1} className="bg-white rounded-xl shadow-xl w-full max-w-md focus:outline-none" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-slate-100">
+              <h2 className="font-semibold text-slate-800">{roomModal.mode === 'edit' ? 'แก้ข้อมูลห้องพัก' : 'เพิ่มห้องพัก'}</h2>
+              <button onClick={() => setRoomModal(null)} className="p-2 rounded-lg hover:bg-slate-100"><X size={18} /></button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="room-number" className="block text-sm font-medium text-slate-700 mb-1.5">เลขห้อง *</label>
+                  <input id="room-number" value={roomForm.number} onChange={(e) => setRoomForm({ ...roomForm, number: e.target.value })}
+                    placeholder="เช่น A21" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
+                </div>
+                <div>
+                  <label htmlFor="room-type" className="block text-sm font-medium text-slate-700 mb-1.5">ประเภทห้อง *</label>
+                  <select id="room-type" value={roomForm.type} onChange={(e) => setRoomForm({ ...roomForm, type: e.target.value as RoomType })}
+                    className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none bg-white">
+                    {(['single', 'double', 'triple'] as RoomType[]).map((t) => (
+                      <option key={t} value={t}>{getRoomTypeLabel(t)}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="room-wing" className="block text-sm font-medium text-slate-700 mb-1.5">ฝั่ง/อาคาร *</label>
+                  <select id="room-wing" value={roomForm.wing} onChange={(e) => setRoomForm({ ...roomForm, wing: e.target.value as RoomWing })}
+                    className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none bg-white">
+                    <option value="front">ด้านหน้า (A)</option>
+                    <option value="back">ด้านหลัง (B)</option>
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="room-floor" className="block text-sm font-medium text-slate-700 mb-1.5">ชั้น *</label>
+                  <input id="room-floor" type="number" min={1} step={1} value={roomForm.floor} onChange={(e) => setRoomForm({ ...roomForm, floor: e.target.value })}
+                    className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="room-price" className="block text-sm font-medium text-slate-700 mb-1.5">ราคา/คืน (บาท) *</label>
+                  <input id="room-price" type="number" min={1} value={roomForm.pricePerNight} onChange={(e) => setRoomForm({ ...roomForm, pricePerNight: e.target.value })}
+                    placeholder="เช่น 500" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
+                </div>
+                <div>
+                  <label htmlFor="room-guests" className="block text-sm font-medium text-slate-700 mb-1.5">รองรับ (ท่าน) *</label>
+                  <input id="room-guests" type="number" min={1} step={1} value={roomForm.maxGuests} onChange={(e) => setRoomForm({ ...roomForm, maxGuests: e.target.value })}
+                    className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
+                </div>
+              </div>
+              <div>
+                <label htmlFor="room-amenities" className="block text-sm font-medium text-slate-700 mb-1.5">สิ่งอำนวยความสะดวก</label>
+                <input id="room-amenities" value={roomForm.amenities} onChange={(e) => setRoomForm({ ...roomForm, amenities: e.target.value })}
+                  placeholder="คั่นแต่ละอย่างด้วยเครื่องหมายจุลภาค (,)" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
+              </div>
+              <div>
+                <label htmlFor="room-desc" className="block text-sm font-medium text-slate-700 mb-1.5">คำอธิบาย</label>
+                <input id="room-desc" value={roomForm.description} onChange={(e) => setRoomForm({ ...roomForm, description: e.target.value })}
+                  placeholder="(ไม่บังคับ) เช่น เตียงคู่ อาคาร A ชั้น 1" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none" />
+              </div>
+              {roomModal.mode === 'edit' && (
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  การแก้ราคา/ประเภทมีผลกับการจองใหม่เท่านั้น — การจองเดิมใช้ราคาและประเภทที่บันทึกไว้ตอนจอง
+                </p>
+              )}
+            </div>
+            <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100">
+              <button onClick={() => setRoomModal(null)} className="px-5 py-2.5 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">ยกเลิก</button>
+              <button onClick={submitRoom}
+                disabled={!roomForm.number.trim() || !(Number(roomForm.pricePerNight) > 0) || !(Number(roomForm.maxGuests) > 0) || !(Number(roomForm.floor) > 0)}
+                className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed">
+                {roomModal.mode === 'edit' ? 'บันทึก' : 'เพิ่มห้อง'}
+              </button>
             </div>
           </div>
         </div>

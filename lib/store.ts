@@ -5,16 +5,16 @@ import { supabaseStorage, registerStateApplier, reportSaveError, applyRemoteStat
 import { supabase } from './supabase'
 import {
   rowToBooking, rowToInvoice, rowToBookingAddOn, rowToRoom, rowToGuest,
-  rowToCorpAccount, rowToCorpTx, rowToHkTask, rowToInventoryItem, rowToInventoryTx,
+  rowToCorpAccount, rowToCorpTx, rowToHkTask, rowToInventoryItem, rowToInventoryTx, roomToRow,
 } from './row-mappers'
 import type {
-  Room, Guest, Booking, Invoice, InvoiceItem, InvoiceStatus, HousekeepingTask,
+  Room, RoomInput, Guest, Booking, Invoice, InvoiceItem, InvoiceStatus, HousekeepingTask,
   MaintenanceLog, Staff, StaffPermissions, RoomStatus, BookingStatus, HousekeepingStatus, MaintenanceStatus,
   InventoryItem, InventoryTransaction, CorporateAccount, CorporateTransaction,
   AddOnItem, BookingAddOn, AuditLog, AuditCategory, Expense, User, DynamicPricing
 } from '@/types'
 import { useAuthStore } from './auth-store'
-import { addNightsISO, addOnCountsTowardCharge, calcAddOnTotal, calcBookingTotal, calcOutstanding, getRoomTypeLabel, roomHasConflict, todayLocal } from './utils'
+import { addNightsISO, addOnCountsTowardCharge, calcAddOnTotal, calcBookingTotal, calcOutstanding, formatCurrency, getRoomTypeLabel, isActiveReservation, roomHasConflict, todayLocal } from './utils'
 import { hashPassword } from './auth-utils'
 import {
   mockRooms, mockGuests, mockBookings, mockInvoices,
@@ -201,6 +201,16 @@ function pushRooms(rooms: Room[]) {
       writer_id: CLIENT_ID,
     }).eq('id', r.id).then(reportRoomError)
   }
+}
+
+// ตรวจฟิลด์ห้องก่อนเขียน (ใช้ร่วม addRoom/updateRoom) — คืนข้อความไทยเมื่อไม่ผ่าน, null = ผ่าน
+// ค่าที่ผิดรูปจะพังตอนคำนวณราคา/ความจุ และตาราง rooms มี NOT NULL/UNIQUE รออยู่
+function validateRoomInput(r: RoomInput): string | null {
+  if (!r.number.trim()) return 'กรุณาระบุเลขห้อง'
+  if (!Number.isFinite(r.pricePerNight) || r.pricePerNight <= 0) return 'ราคาต่อคืนต้องมากกว่า 0'
+  if (!Number.isInteger(r.maxGuests) || r.maxGuests <= 0) return 'จำนวนผู้เข้าพักสูงสุดต้องเป็นจำนวนเต็มมากกว่า 0'
+  if (!Number.isInteger(r.floor) || r.floor <= 0) return 'ชั้นต้องเป็นจำนวนเต็มมากกว่า 0'
+  return null
 }
 
 // dual-write helper สำหรับ housekeeping_tasks (Tier C kickoff) — mutable + soft-delete (แพทเทิร์น guests/staff)
@@ -450,6 +460,9 @@ interface HotelStore {
 
   // Room actions
   updateRoomStatus: (roomId: string, status: RoomStatus) => void
+  addRoom: (room: RoomInput) => { ok: boolean; error?: string; id?: string }
+  updateRoom: (roomId: string, updates: Partial<RoomInput>) => { ok: boolean; error?: string }
+  deleteRoom: (roomId: string) => { ok: boolean; error?: string }
 
   // Booking actions
   createBooking: (booking: Omit<Booking, 'id' | 'createdAt'>) => { ok: boolean; error?: string }
@@ -462,7 +475,6 @@ interface HotelStore {
 
   // Data backup / restore
   exportData: () => Record<string, unknown>
-  importData: (data: Record<string, unknown>) => void
 
   // Guest actions
   addGuest: (guest: Omit<Guest, 'id'>) => string
@@ -571,6 +583,83 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     }))
     // dual-write status ห้องที่เปลี่ยน (Tier B) — อ่านจาก state ล่าสุดหลัง set()
     pushRooms(get().rooms.filter((r) => r.id === roomId))
+  },
+
+  // ── Room CRUD (go-live) ──────────────────────────────────────────────
+  // เดิม rooms เป็นชุดคงที่จาก seed (แก้ผังห้องต้องยิง SQL เอง) — ใช้งานจริงต้องเพิ่ม/แก้/ปิดห้องได้เอง
+  // status + occupancy pointers ยังคุมโดย lifecycle เท่านั้น (ไม่ให้แก้มือผ่านฟอร์มนี้)
+  addRoom: (roomData) => {
+    if (!hasPerm('canManageRooms')) { console.warn('[security] addRoom ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageRooms'); return { ok: false, error: 'ไม่มีสิทธิ์จัดการห้องพัก' } }
+    const number = roomData.number.trim()
+    const invalid = validateRoomInput({ ...roomData, number })
+    if (invalid) return { ok: false, error: invalid }
+    // เลขห้องซ้ำไม่ได้ — ตาราง rooms มี UNIQUE(number); กันที่ client ก่อน ไม่งั้น 23505 จะถูกกลืนเป็น idempotent echo
+    if (get().rooms.some((r) => r.number.trim().toLowerCase() === number.toLowerCase())) {
+      return { ok: false, error: `มีห้อง "${number}" อยู่แล้ว` }
+    }
+    const newRoom: Room = { ...roomData, number, id: `r${newId()}`, status: 'available' }
+    set((state) => ({ rooms: [...state.rooms, newRoom] }))
+    void supabase.from('rooms').insert(roomToRow(newRoom)).then(reportRoomError)
+    get().logAudit({
+      category: 'room', action: 'add-room',
+      summary: `เพิ่มห้อง ${number} (${getRoomTypeLabel(newRoom.type)} ${formatCurrency(newRoom.pricePerNight)}/คืน)`,
+      entityId: newRoom.id,
+    })
+    return { ok: true, id: newRoom.id }
+  },
+
+  updateRoom: (roomId, updates) => {
+    if (!hasPerm('canManageRooms')) { console.warn('[security] updateRoom ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageRooms'); return { ok: false, error: 'ไม่มีสิทธิ์จัดการห้องพัก' } }
+    const prev = get().rooms.find((r) => r.id === roomId)
+    if (!prev) return { ok: false, error: 'ไม่พบห้องนี้' }
+    const next: RoomInput = { ...prev, ...updates, number: (updates.number ?? prev.number).trim() }
+    const invalid = validateRoomInput(next)
+    if (invalid) return { ok: false, error: invalid }
+    if (get().rooms.some((r) => r.id !== roomId && r.number.trim().toLowerCase() === next.number.toLowerCase())) {
+      return { ok: false, error: `มีห้อง "${next.number}" อยู่แล้ว` }
+    }
+    set((state) => ({ rooms: state.rooms.map((r) => (r.id === roomId ? { ...r, ...next } : r)) }))
+    // dual-write: patch เฉพาะ static fields (status/pointers เป็นหน้าที่ pushRooms ผ่าน lifecycle)
+    void supabase.from('rooms').update({
+      number: next.number, type: next.type, floor: next.floor, wing: next.wing,
+      price_per_night: next.pricePerNight, max_guests: next.maxGuests,
+      amenities: next.amenities, description: next.description,
+      writer_id: CLIENT_ID,
+    }).eq('id', roomId).then(reportRoomError)
+    // ราคา/ประเภทกระทบรายได้ → เขียน audit ให้เห็นว่าใครเปลี่ยนอะไร (booking เก่าใช้ราคา/ประเภทที่ snapshot ไว้แล้ว)
+    const detail = [
+      next.number !== prev.number ? `เลขห้อง ${prev.number}→${next.number}` : null,
+      next.type !== prev.type ? `ประเภท ${getRoomTypeLabel(prev.type)}→${getRoomTypeLabel(next.type)}` : null,
+      next.pricePerNight !== prev.pricePerNight ? `ราคา ${formatCurrency(prev.pricePerNight)}→${formatCurrency(next.pricePerNight)}` : null,
+      next.maxGuests !== prev.maxGuests ? `รองรับ ${prev.maxGuests}→${next.maxGuests}` : null,
+    ].filter(Boolean).join(', ')
+    get().logAudit({
+      category: 'room', action: 'update-room',
+      summary: `แก้ข้อมูลห้อง ${prev.number}${detail ? ` (${detail})` : ''}`, entityId: roomId,
+    })
+    return { ok: true }
+  },
+
+  deleteRoom: (roomId) => {
+    if (!hasPerm('canManageRooms')) { console.warn('[security] deleteRoom ถูกปฏิเสธ: ไม่มีสิทธิ์ canManageRooms'); return { ok: false, error: 'ไม่มีสิทธิ์จัดการห้องพัก' } }
+    const target = get().rooms.find((r) => r.id === roomId)
+    if (!target) return { ok: false, error: 'ไม่พบห้องนี้' }
+    if (target.status === 'occupied') return { ok: false, error: `ห้อง ${target.number} มีผู้เข้าพักอยู่ — เช็คเอาต์ก่อนจึงลบได้` }
+    // การจองที่ยังไม่จบ (pending/confirmed/checked_in) ผูกห้องนี้อยู่ → ลบแล้วการจองจะชี้ห้องที่หายไป
+    const activeBookings = get().bookings.filter((b) => b.roomId === roomId && isActiveReservation(b.status))
+    if (activeBookings.length > 0) {
+      return { ok: false, error: `ห้อง ${target.number} มีการจองค้างอยู่ ${activeBookings.length} รายการ — ยกเลิก/ย้ายห้องก่อน` }
+    }
+    set((state) => ({ rooms: state.rooms.filter((r) => r.id !== roomId) }))
+    // soft-delete: ประวัติการจอง/งานแม่บ้าน/ซ่อมบำรุงเก่ายังอ้าง room_id นี้อยู่ (FK) — ลบแถวจริงไม่ได้
+    void supabase.from('rooms')
+      .update({ deleted_at: new Date().toISOString(), writer_id: CLIENT_ID })
+      .eq('id', roomId).then(reportRoomError)
+    get().logAudit({
+      category: 'room', action: 'delete-room',
+      summary: `ลบห้อง ${target.number} (${getRoomTypeLabel(target.type)})`, entityId: roomId,
+    })
+    return { ok: true }
   },
 
   createBooking: (bookingData) => {
@@ -1774,19 +1863,9 @@ export const useHotelStore = create<HotelStore>()(persist((set, get) => ({
     }
     return data
   },
-  // กู้คืนข้อมูล: เขียนทับ state ด้วยข้อมูลจากไฟล์ (เก็บ function เดิมไว้)
-  // users ในไฟล์ไม่มี password (ถูกตัดตอน export) → คงรหัสเดิมของ id ที่ตรงกันไว้
-  // (restore บนเครื่องเดิม login ต่อได้; ถ้า restore ขึ้น env ใหม่ admin ต้องตั้งรหัสใหม่)
-  importData: (data) =>
-    set((state) => {
-      const incoming = data as Partial<HotelStore>
-      if (Array.isArray(incoming.users)) {
-        incoming.users = incoming.users.map((u) =>
-          u.password ? u : { ...u, password: state.users.find((c) => c.id === u.id)?.password ?? '' }
-        )
-      }
-      return { ...incoming }
-    }),
+  // หมายเหตุ: เดิมมี importData (กู้คืนจากไฟล์ backup) — ถอดออกหลัง retire blob
+  // เพราะเขียนแค่ state ในหน่วยความจำ ไม่ลงตาราง relational → หายทันทีที่ refresh
+  // การกู้คืนจริงต้องทำระดับฐานข้อมูล (Supabase backup / PITR)
 
   recordPayment: (bookingId, amount, method, staffId, notes) => {
     if (amount <= 0) return { ok: false, error: 'จำนวนเงินต้องมากกว่า 0' }

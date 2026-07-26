@@ -35,6 +35,9 @@ export interface Room {
   currentBookingId?: string
 }
 
+// ฟิลด์ห้องที่ผู้ดูแลแก้ได้เองผ่าน UI — ตัด status/occupancy pointers ที่ระบบคุมผ่าน booking lifecycle
+export type RoomInput = Omit<Room, 'id' | 'status' | 'currentGuestId' | 'currentBookingId'>
+
 export interface Guest {
   id: string
   name: string
