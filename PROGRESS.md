@@ -461,8 +461,18 @@
 - **`scripts/restore-backup.mjs` (ใหม่) — ตัวที่ทำให้ backup มีค่าจริง:** `--list` / dry-run (ตารางไหนจะเปลี่ยนจากกี่แถวเป็นกี่แถว) / `--yes` ลงมือจริง. อ่านได้ทั้งจากคลาวด์ (`latest` หรือชื่อไฟล์) และไฟล์ในเครื่อง (เผื่อกรณีคลาวด์เองมีปัญหา). **ก่อนทับจะสำรองสถานะปัจจุบันเป็น `pre-restore-*.json` ให้เสมอ** (กู้ผิดไฟล์ยังถอยกลับได้) แล้วลบย้อนลำดับ → insert ตามลำดับ ทีละ 500 แถว
   - ⚠️ **ไม่ครอบคลุมบัญชีล็อกอิน** — ตาราง `users` กู้กลับ แต่ตัวบัญชี Supabase Auth + รหัสผ่านอยู่คนละที่ (PostgREST อ่าน schema `auth` ไม่ได้); ถ้า DB ถูกล้างจริงต้องสร้างบัญชีใหม่ผ่านหน้า "พนักงาน" หรือ `022_supabase_auth_seed.sql` ก่อน
 - `.gitignore` +`hotel-pms-*.json` +`pre-restore-*.json` (ไฟล์สำเนามีข้อมูลจริงทั้งระบบ ห้ามขึ้น git)
-- **⏳ ต้องตั้ง env 2 ตัวบน Vercel Production ก่อนใช้งานได้:** `SUPABASE_SERVICE_ROLE_KEY` (ตัวเดียวกับที่ /api/accounts รอ) + `CRON_SECRET` (สุ่มเอง อะไรก็ได้ยาว ๆ). ก่อนตั้ง → หน้า `/backup` ขึ้น 503 พร้อมข้อความบอกเหตุ
-- **⚠️ MCP Supabase เข้า DB ไม่ได้ตั้งแต่รอบนี้** — ทั้ง `execute_sql` และ `list_tables` คืน `FATAL: 28P01 password authentication failed` (ทั้ง user `postgres` และ `supabase_read_only_user`); `list_projects` ยังใช้ได้ (ACTIVE_HEALTHY) → เป็นปัญหา credential ฝั่ง MCP ไม่ใช่ตัวโปรเจกต์. ยังไม่ได้ไล่หาสาเหตุ
+- **✅ ตั้งค่าครบแล้ว (2026-08-05 ช่วงบ่าย):**
+  - `SUPABASE_SERVICE_ROLE_KEY` — user ให้คีย์มาแล้ว (รูปแบบใหม่ `sb_secret_…`) ใส่ทั้ง `.env.local` และ **Vercel Production**
+  - `CRON_SECRET` — สุ่มเอง ใส่ทั้ง 2 ที่ (user หาหน้า Vercel ไม่เจอ → **`npx vercel` บนเครื่องนี้ล็อกอินอยู่แล้ว** (omezom1, team `wasin-s-projects`, plan **hobby**) → `vercel link --yes --project hotel-pms` + `vercel env add … production` ทำได้เลย. ⚠️ แก้ความเชื่อเดิมใน memory ที่ว่า Vercel CLI ล็อกอินไม่ได้ — ล็อกอินได้)
+  - **migration 026 ไม่ต้องรัน SQL** — bucket สร้างผ่าน Storage API ได้ตรง ๆ ด้วย service_role: `POST $URL/storage/v1/bucket -d '{"id":"backups","public":false}'` → ยืนยันแล้ว `public=false`
+- **✅ เทสต์ผ่านครบ (ยิง API จริงผ่าน dev server + DB จริง):**
+  - `run` → ไฟล์ 118 KB ครบ 17 ตาราง (rooms 40 · bookings 16 · invoices 6 · guests 6 · staff 6 · audit_logs 92 …) · `list` · `download` (signed URL) ผ่าน
+  - **ด่านสิทธิ์:** ไม่มี token→401 · token ปลอม→401 · **reception (ไม่มี canManageStaff)→403** · `name: "../receipts/x.png"`→ปฏิเสธ · **reception เปิด bucket ตรง ๆ ด้วย anon key→400 (RLS กัน)**
+  - **cron:** ไม่มี secret→401 · ผิด→401 · ถูก→สำรองสำเร็จ
+  - **dry-run กู้คืน:** ดาวน์โหลดจากคลาวด์ + เทียบจำนวนแถวตรงทุกตาราง (ต่างแค่ `audit_logs` 92 vs 91 = การสำรองเองถูกบันทึกลง audit หลังก๊อปเสร็จ — ถูกต้อง)
+  - 🐞 แก้ระหว่างเทสต์: `bytes` รายงาน `String.length` ไม่ใช่ไบต์จริง (ไทย 1 ตัว = 3 ไบต์ → บอก 103012 แต่ไฟล์จริง 117282) → `Buffer.byteLength`
+- **⏳ ค้างอยู่จุดเดียว — ยังไม่ได้ทดสอบกู้คืนจริง (`--yes`)**: user อนุมัติแล้ว แต่ **Claude Code auto-mode classifier บล็อกคำสั่ง** (เห็นเป็นคำสั่งลบข้อมูลทั้งฐาน). ทางออก = ให้ user รันเองด้วย `! cd "…/hotel-pms" && node scripts/restore-backup.mjs latest --yes` (prefix `!` = รันในเซสชัน ผลเข้ามาให้ Claude อ่านต่อ). **จังหวะเหมาะสุดคือตอนนี้** เพราะยังเป็นข้อมูลเดโม (ยังไม่รัน 025)
+- **⚠️ MCP Supabase เข้า DB ไม่ได้ตั้งแต่รอบนี้** — ทั้ง `execute_sql` และ `list_tables` คืน `FATAL: 28P01 password authentication failed` (ทั้ง user `postgres` และ `supabase_read_only_user`); `list_projects` ยังใช้ได้ (ACTIVE_HEALTHY) → เป็นปัญหา credential ฝั่ง MCP ไม่ใช่ตัวโปรเจกต์. ยังไม่ได้ไล่หาสาเหตุ. **เลี่ยงได้:** ตอนนี้มี service_role แล้ว → ยิง PostgREST/Storage API ตรง ๆ ด้วย `curl` แทนได้ (DDL จริง ๆ ยังต้อง SQL Editor)
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
