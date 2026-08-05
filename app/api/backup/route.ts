@@ -60,7 +60,8 @@ async function runBackup(admin: SupabaseClient): Promise<BackupResult> {
   })
   if (upErr) throw new Error(`อัปโหลดไฟล์สำเนาไม่สำเร็จ: ${upErr.message}`)
 
-  return { fileName, bytes: body.length, counts, pruned: await pruneOldBackups(admin) }
+  // byteLength ไม่ใช่ .length — ข้อความไทย 1 ตัวอักษร = 3 ไบต์ใน UTF-8 (ตัวเลขจะต่ำกว่าจริงมาก)
+  return { fileName, bytes: Buffer.byteLength(body), counts, pruned: await pruneOldBackups(admin) }
 }
 
 // ลบสำเนาที่เกินอายุเก็บ — ไม่งั้นพื้นที่ storage ฟรี (1GB) จะเต็มเงียบ ๆ แล้วสำรองล้มทั้งระบบ
