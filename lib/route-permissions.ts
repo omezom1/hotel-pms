@@ -19,6 +19,7 @@ export const routePermissions: Array<{ href: string; permission: keyof StaffPerm
   { href: '/daily-report', permission: 'canViewReports' },
   { href: '/invoice',      permission: 'canViewFinance' },
   { href: '/audit-log',    permission: 'canManageStaff' },
+  { href: '/backup',       permission: 'canManageStaff' },
 ]
 
 // คืน permission ที่ pathname นี้ต้องมี (longest prefix match)

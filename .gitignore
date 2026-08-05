@@ -35,6 +35,10 @@ yarn-error.log*
 # vercel
 .vercel
 
+# ไฟล์สำเนาข้อมูล (มีข้อมูลแขก/การเงินทั้งระบบ — ห้ามขึ้น git)
+hotel-pms-*.json
+pre-restore-*.json
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

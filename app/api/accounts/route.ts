@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
-import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { hashPassword } from '@/lib/auth-utils'
+import { adminClient, bad, logServerAudit, requireStaffPermission } from '@/lib/api-auth'
 
 // จัดการบัญชีล็อกอิน (Supabase Auth) — ต้องใช้ service_role key ซึ่งห้ามอยู่ฝั่งเบราว์เซอร์
 // จึงทำเป็น route handler: client ส่ง access token ของตัวเองมา → ตรวจว่าเป็นผู้มีสิทธิ์ canManageStaff
@@ -13,77 +13,9 @@ const EMAIL_DOMAIN = '@pruksatara.local'
 const MIN_PASSWORD_LENGTH = 8
 const USERNAME_RE = /^[a-z0-9_.-]{3,32}$/
 
-// client สิทธิ์สูง (service_role) — ใช้เฉพาะตอนลงมือเขียนจริง (auth.admin.* + ตาราง users)
-function adminClient(): SupabaseClient | null {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!url || !serviceKey) return null
-  return createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } })
-}
-
-// client ที่สวมสิทธิ์ของผู้เรียก (anon key + token ของเขา) — ใช้ตรวจว่าใครเรียกและมีสิทธิ์ไหม
-// แยกจาก service_role โดยตั้งใจ: ด่านตรวจสิทธิ์ต้องทำงานได้แม้ยังไม่ได้ตั้งคีย์ service_role
-// (คนที่ไม่มีสิทธิ์จึงโดนปฏิเสธเสมอ ไม่ใช่ได้ข้อความว่าระบบยังไม่ได้ตั้งค่า)
-function callerClient(token: string): SupabaseClient | null {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  if (!url || !anonKey) return null
-  return createClient(url, anonKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  })
-}
-
-function bad(status: number, error: string) {
-  return NextResponse.json({ ok: false, error }, { status })
-}
-
-// ตรวจสิทธิ์ผู้เรียก: token → auth user → users row → staff → ต้อง canManageStaff และยัง active
-// (ตรวจฝั่ง server — role gate ที่ client อย่างเดียวเลี่ยงได้ด้วยการยิง API ตรง)
-async function requireAdmin(req: Request) {
-  const token = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
-  if (!token) return { error: bad(401, 'ไม่พบสิทธิ์การเข้าใช้งาน — กรุณาเข้าสู่ระบบใหม่') }
-  const caller = callerClient(token)
-  if (!caller) return { error: bad(503, 'ระบบยังไม่ได้ตั้งค่าการเชื่อมต่อฐานข้อมูล') }
-  const { data: authData, error: authErr } = await caller.auth.getUser(token)
-  if (authErr || !authData.user) return { error: bad(401, 'เซสชันหมดอายุ — กรุณาเข้าสู่ระบบใหม่') }
-  const { data: urow } = await caller
-    .from('users').select('id, staff_id').eq('auth_id', authData.user.id).is('deleted_at', null).maybeSingle()
-  if (!urow) return { error: bad(403, 'บัญชีนี้ไม่ได้ผูกกับพนักงาน') }
-  const { data: srow } = await caller
-    .from('staff').select('id, name, permissions, is_active').eq('id', urow.staff_id).is('deleted_at', null).maybeSingle()
-  const perms = (srow?.permissions ?? {}) as Record<string, boolean>
-  if (!srow || srow.is_active !== true || perms.canManageStaff !== true) {
-    return { error: bad(403, 'ไม่มีสิทธิ์จัดการบัญชีผู้ใช้') }
-  }
-  return { callerUserId: String(urow.id), caller: { staffId: String(srow.id), staffName: String(srow.name) } }
-}
-
-// เขียน audit ฝั่ง server (ตารางเดียวกับในแอป) — การแตะบัญชีล็อกอินต้องมีร่องรอยเสมอ
-async function logServerAudit(
-  admin: SupabaseClient,
-  caller: { staffId: string; staffName: string },
-  action: string, summary: string, entityId: string,
-) {
-  const now = new Date().toISOString()
-  const { error } = await admin.from('audit_logs').insert({
-    id: `a${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    timestamp: now,
-    staff_id: caller.staffId,
-    staff_name: caller.staffName,
-    category: 'auth',
-    action,
-    summary,
-    entity_id: entityId,
-    created_at: now,
-  })
-  // audit เขียนไม่ผ่านไม่ควรทำให้คำสั่งที่สำเร็จแล้วดูเหมือนล้มเหลว — log ไว้ที่ server แทน
-  if (error) console.error('[accounts] audit insert:', error.message)
-}
-
 export async function POST(req: Request) {
   // ตรวจสิทธิ์ก่อนเสมอ แล้วค่อยดูว่าตั้งคีย์ service_role ไว้หรือยัง
-  const gate = await requireAdmin(req)
+  const gate = await requireStaffPermission(req, 'canManageStaff', 'ไม่มีสิทธิ์จัดการบัญชีผู้ใช้')
   if ('error' in gate) return gate.error
 
   const admin = adminClient()
