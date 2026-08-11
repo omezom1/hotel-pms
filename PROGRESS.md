@@ -439,7 +439,40 @@
 - **🔒 แก้ลำดับใน `app/api/accounts/route.ts`:** เดิมเช็ค `SUPABASE_SERVICE_ROLE_KEY` **ก่อน** ตรวจสิทธิ์ → ถ้ายังไม่ตั้งคีย์ ทุกคำขอได้ 503 เหมือนกันหมด (คนนอกรู้สถานะการตั้งค่าระบบ + ทดสอบด่านตรวจสิทธิ์ไม่ได้เลย). **ตอนนี้ตรวจสิทธิ์ก่อน แล้วค่อยเช็คคีย์** โดยแยก client 2 ตัว: `callerClient` (anon key + token ของผู้เรียก, ใช้ตรวจ users→staff→`canManageStaff` ผ่าน RLS ปกติ) และ `adminClient` (service_role, ใช้เฉพาะตอนเขียนจริง)
 - **✅ เทสต์ด่านตรวจสิทธิ์ผ่านครบ** (curl เข้า API ตรง ๆ ด้วย token จริงจาก `/auth/v1/token`): ไม่มี token → **401** · token ปลอม → **401** · token ของ reception (ไม่มี canManageStaff) → **403** · token ของ admin → **ผ่านด่าน** แล้วได้ 503 เพราะยังไม่มีคีย์. เหลือ 3 คำสั่งจริง (create/reset-password/delete) ที่ต้องมีคีย์ถึงจะเทสต์ end-to-end ได้
 - **⏳ `SUPABASE_SERVICE_ROLE_KEY` ยังไม่มีทั้ง 2 ที่** (ตรวจแล้ว: `.env.local` มีแค่ URL+anon; prod ยิงจริงได้ 503) — **ผู้ใช้เข้าใจว่าเคยให้แล้ว แต่ที่เคยให้คือ anon key**; service_role เป็นคีย์ใหม่ที่เพิ่งจำเป็นตอนทำหน้าจัดการบัญชี. หาได้ที่ Supabase Dashboard → Project Settings → API Keys → แถว `service_role` (secret) → Reveal. ทางเลือกถ้าไม่อยากใส่คีย์: ให้ Claude สร้าง/รีเซ็ตบัญชีผ่าน MCP execute_sql แทน (เหมือนตอน seed 022) แลกกับที่ผู้ใช้ทำเองไม่ได้
-- **⚠️ commit `17794f9` (hardening นี้) ยัง local ไม่ได้ push** — ครั้งหน้าเปิด PR ต่อได้เลย (เจ้าของสั่งพักงานก่อน)
+- **⚠️ commit `17794f9` (hardening นี้) ยัง local ไม่ได้ push** — ครั้งหน้าเปิด PR ต่อได้เลย (เจ้าของสั่งพักงานก่อน) → ✅ push แล้ว 2026-08-05 เป็น **PR #26** (branch `fix/accounts-authz-order`)
+
+### 2026-08-05 (สำรองข้อมูลอัตโนมัติ — แทน daily backup ของ Supabase Pro)
+- **ตัดสินใจ: ไม่อัป Supabase Pro** (ทบทวนจากที่เคยเขียนไว้ว่า "ใช้งานจริงต้องอัป" — แรงเกินจริง)
+  - เหตุผลข้อ *project โดน pause* **ตกไป** — free tier หยุดเฉพาะโปรเจกต์ที่ไม่มีทราฟฟิก ~7 วัน; ใช้งานจริงทุกวันไม่มีทางเข้าเกณฑ์ (ที่โดนรอบ 07-27 เพราะเว้นช่วงพัฒนา)
+  - เหตุผลข้อ *ไม่มี daily backup* **เป็นข้อจริง** → ทำเองแทน (งานก้อนนี้). โควตาอื่นไม่ใกล้เพดาน (DB 500MB / egress 5GB / 50k MAU vs 40 ห้อง 6 บัญชี)
+  - ทบทวนใหม่เมื่อ: ข้อมูลเคยหายจริง / egress เริ่มชน
+- **ปุ่ม "ดาวน์โหลดข้อมูล (.json)" เดิมใช้แทน backup ไม่ได้** — ดาวน์โหลดได้แต่ **ใส่กลับไม่ได้** (`importData` ถูกถอดตอน retire blob) = มีสำเนาไว้เปิดดู แต่กู้คืนไม่ได้. ยังคงปุ่มไว้ตามเดิม (snapshot ไว้ตรวจสอบ)
+- **`lib/api-auth.ts` (ใหม่ — refactor):** ยก `adminClient` / `callerClient` / `bad` / `requireStaffPermission` / `logServerAudit` ออกจาก `app/api/accounts/route.ts` มาไว้ที่เดียว (route handler ทุกตัวใช้ร่วม — ด่านตรวจสิทธิ์ห้ามเขียนต่างกันคนละแบบ). `requireAdmin` เดิม → `requireStaffPermission(req, permission, deniedMessage)` (permission ส่งเข้ามาได้แล้ว); `logServerAudit` เพิ่มพารามิเตอร์ `category` (ดีฟอลต์ `auth`)
+- **`lib/backup-tables.ts` (ใหม่):** `BACKUP_TABLES` = 17 ตาราง เรียง FK-safe (พ่อแม่ก่อนลูก) + ค่าคงที่ bucket/retention/รูปแบบชื่อไฟล์. **ไม่รวม `app_state`** โดยตั้งใจ (หลัง retire blob = ซองเปล่า `{}` เก็บแค่ version ให้ hydration-gate/CAS — เขียน version เก่าทับจะทำให้แท็บที่เปิดอยู่สับสน). ชื่อไฟล์ใช้ **วันที่ไทย (UTC+7)** ไม่ใช่ UTC — cron รันตี 3 ไทย ซึ่งยังเป็นเมื่อวานตาม UTC
+- **`app/api/backup/route.ts` (ใหม่):** ดัมพ์ทุกตารางเป็น JSON ไฟล์เดียว → Supabase Storage bucket `backups`
+  - `GET` = Vercel Cron (ยืนยันด้วย `CRON_SECRET` ที่ Vercel แนบมาเป็น Bearer ให้เอง) · `POST` = แอดมินในแอป (`list` / `run` / `download`) ผ่าน `requireStaffPermission('canManageStaff')`
+  - **แบ่งหน้าอ่านทีละ 1000 แถว + `order('id')`** — PostgREST คืนสูงสุด 1000 แถว/คำขอ ถ้าไม่ไล่หน้าสำเนาจะขาดแบบเงียบ ๆ (audit_logs เกินแน่)
+  - ไฟล์พก `_order` (ลำดับ insert) ติดไปด้วย → สคริปต์กู้คืนไม่ต้องถือลิสต์ตารางซ้ำอีกชุด และไฟล์เก่ากู้ได้แม้ลำดับในโค้ดเปลี่ยนไปแล้ว
+  - `upsert: true` (รันซ้ำวันเดียวกัน = ทับไฟล์ของวันนั้น) + prune ไฟล์เกิน **30 วัน** ทุกครั้งที่รัน (กัน storage ฟรี 1GB เต็มเงียบ ๆ แล้วสำรองล้มทั้งระบบ)
+  - `maxDuration = 60` (17 ตาราง + แบ่งหน้า อาจเกิน 10 วิ ดีฟอลต์)
+- **`supabase/migrations/026_backups_storage.sql` (ใหม่, ⏳ ยังไม่รัน):** bucket `backups` = **private และไม่มี policy ใด ๆ โดยตั้งใจ** — ไฟล์เดียวมีข้อมูลแขก/การเงินทั้งระบบ ใครล็อกอินได้ไม่ควรโหลดได้ทุกคน; ทางเข้าเดียวคือ `/api/backup` (service_role ข้าม RLS หลังตรวจสิทธิ์) แล้วคืน signed URL อายุ 60 วินาที
+- **`vercel.json` (ใหม่):** cron `0 20 * * *` (= ตี 3 ไทย) → `/api/backup`
+- **หน้า `/backup` (ใหม่) + เมนู "สำรองข้อมูล"** (`canManageStaff`, ลง `route-permissions.ts` + Sidebar): รายการสำเนา (วันที่/สร้างเมื่อ/ขนาด) · ปุ่ม "สำรองเดี๋ยวนี้" · ดาวน์โหลดเก็บลงเครื่อง · แบนเนอร์เตือนเมื่อยังไม่ได้ตั้ง `CRON_SECRET`
+- **`scripts/restore-backup.mjs` (ใหม่) — ตัวที่ทำให้ backup มีค่าจริง:** `--list` / dry-run (ตารางไหนจะเปลี่ยนจากกี่แถวเป็นกี่แถว) / `--yes` ลงมือจริง. อ่านได้ทั้งจากคลาวด์ (`latest` หรือชื่อไฟล์) และไฟล์ในเครื่อง (เผื่อกรณีคลาวด์เองมีปัญหา). **ก่อนทับจะสำรองสถานะปัจจุบันเป็น `pre-restore-*.json` ให้เสมอ** (กู้ผิดไฟล์ยังถอยกลับได้) แล้วลบย้อนลำดับ → insert ตามลำดับ ทีละ 500 แถว
+  - ⚠️ **ไม่ครอบคลุมบัญชีล็อกอิน** — ตาราง `users` กู้กลับ แต่ตัวบัญชี Supabase Auth + รหัสผ่านอยู่คนละที่ (PostgREST อ่าน schema `auth` ไม่ได้); ถ้า DB ถูกล้างจริงต้องสร้างบัญชีใหม่ผ่านหน้า "พนักงาน" หรือ `022_supabase_auth_seed.sql` ก่อน
+- `.gitignore` +`hotel-pms-*.json` +`pre-restore-*.json` (ไฟล์สำเนามีข้อมูลจริงทั้งระบบ ห้ามขึ้น git)
+- **✅ ตั้งค่าครบแล้ว (2026-08-05 ช่วงบ่าย):**
+  - `SUPABASE_SERVICE_ROLE_KEY` — user ให้คีย์มาแล้ว (รูปแบบใหม่ `sb_secret_…`) ใส่ทั้ง `.env.local` และ **Vercel Production**
+  - `CRON_SECRET` — สุ่มเอง ใส่ทั้ง 2 ที่ (user หาหน้า Vercel ไม่เจอ → **`npx vercel` บนเครื่องนี้ล็อกอินอยู่แล้ว** (omezom1, team `wasin-s-projects`, plan **hobby**) → `vercel link --yes --project hotel-pms` + `vercel env add … production` ทำได้เลย. ⚠️ แก้ความเชื่อเดิมใน memory ที่ว่า Vercel CLI ล็อกอินไม่ได้ — ล็อกอินได้)
+  - **migration 026 ไม่ต้องรัน SQL** — bucket สร้างผ่าน Storage API ได้ตรง ๆ ด้วย service_role: `POST $URL/storage/v1/bucket -d '{"id":"backups","public":false}'` → ยืนยันแล้ว `public=false`
+- **✅ เทสต์ผ่านครบ (ยิง API จริงผ่าน dev server + DB จริง):**
+  - `run` → ไฟล์ 118 KB ครบ 17 ตาราง (rooms 40 · bookings 16 · invoices 6 · guests 6 · staff 6 · audit_logs 92 …) · `list` · `download` (signed URL) ผ่าน
+  - **ด่านสิทธิ์:** ไม่มี token→401 · token ปลอม→401 · **reception (ไม่มี canManageStaff)→403** · `name: "../receipts/x.png"`→ปฏิเสธ · **reception เปิด bucket ตรง ๆ ด้วย anon key→400 (RLS กัน)**
+  - **cron:** ไม่มี secret→401 · ผิด→401 · ถูก→สำรองสำเร็จ
+  - **dry-run กู้คืน:** ดาวน์โหลดจากคลาวด์ + เทียบจำนวนแถวตรงทุกตาราง (ต่างแค่ `audit_logs` 92 vs 91 = การสำรองเองถูกบันทึกลง audit หลังก๊อปเสร็จ — ถูกต้อง)
+  - 🐞 แก้ระหว่างเทสต์: `bytes` รายงาน `String.length` ไม่ใช่ไบต์จริง (ไทย 1 ตัว = 3 ไบต์ → บอก 103012 แต่ไฟล์จริง 117282) → `Buffer.byteLength`
+- **⏳ ค้างอยู่จุดเดียว — ยังไม่ได้ทดสอบกู้คืนจริง (`--yes`)**: user อนุมัติแล้ว แต่ **Claude Code auto-mode classifier บล็อกคำสั่ง** (เห็นเป็นคำสั่งลบข้อมูลทั้งฐาน). ทางออก = ให้ user รันเองด้วย `! cd "…/hotel-pms" && node scripts/restore-backup.mjs latest --yes` (prefix `!` = รันในเซสชัน ผลเข้ามาให้ Claude อ่านต่อ). **จังหวะเหมาะสุดคือตอนนี้** เพราะยังเป็นข้อมูลเดโม (ยังไม่รัน 025)
+- **⚠️ MCP Supabase เข้า DB ไม่ได้ตั้งแต่รอบนี้** — ทั้ง `execute_sql` และ `list_tables` คืน `FATAL: 28P01 password authentication failed` (ทั้ง user `postgres` และ `supabase_read_only_user`); `list_projects` ยังใช้ได้ (ACTIVE_HEALTHY) → เป็นปัญหา credential ฝั่ง MCP ไม่ใช่ตัวโปรเจกต์. ยังไม่ได้ไล่หาสาเหตุ. **เลี่ยงได้:** ตอนนี้มี service_role แล้ว → ยิง PostgREST/Storage API ตรง ๆ ด้วย `curl` แทนได้ (DDL จริง ๆ ยังต้อง SQL Editor)
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)

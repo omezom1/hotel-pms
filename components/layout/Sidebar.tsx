@@ -38,6 +38,7 @@ const navItems: NavItem[] = [
   { href: '/reports',      label: 'รายงาน & วิเคราะห์',     icon: BarChart3,       permission: 'canViewReports' },
   { href: '/daily-report', label: 'รายงานประจำวัน',         icon: ClipboardList,   permission: 'canViewReports' },
   { href: '/audit-log',    label: 'บันทึกการใช้งาน',         icon: History,         permission: 'canManageStaff' },
+  { href: '/backup',       label: 'สำรองข้อมูล',             icon: DatabaseBackup,  permission: 'canManageStaff' },
 ]
 
 export default function Sidebar() {
