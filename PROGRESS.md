@@ -433,6 +433,13 @@
 - **ถอดปุ่ม "กู้คืนข้อมูล" + "รีเซ็ตข้อมูลตัวอย่าง" ออกจาก Sidebar** (พังเงียบหลัง retire blob): restore เขียนแค่ state ในหน่วยความจำ ไม่ลงตาราง → หายตอน refresh; reset ลบแค่แถว app_state ที่ว่างอยู่แล้ว. เหลือปุ่ม "ดาวน์โหลดข้อมูล (.json)" (snapshot ไว้ตรวจสอบ) + ลบ `importData` ออกจาก store
 - **`supabase/migrations/025_go_live_reset.sql` (ใหม่, ⏳ ยังไม่รัน):** สคริปต์ล้างข้อมูลเดโมก่อนเริ่มใช้จริง — ลบ bookings/invoices/addons/HK/maintenance/guests/expenses/inventory_tx/corporate/audit + คืนทุกห้องเป็น "ว่าง"; **เก็บ** rooms/staff/users/add_on_items/inventory_items/dynamic_pricing. รันครั้งเดียวตอนตัดสินใจ go-live เท่านั้น
 - tsc 0 / build 23 routes (เพิ่ม `/api/accounts`)
+- **✅ merged + deployed:** PR #25 → main `966f263` → Vercel production deploy success (prod ตอบ 200)
+
+### 2026-07-27 (รอบ 2 — hardening ด่านตรวจสิทธิ์ของ /api/accounts + เทสต์เท่าที่ทำได้โดยไม่มีคีย์)
+- **🔒 แก้ลำดับใน `app/api/accounts/route.ts`:** เดิมเช็ค `SUPABASE_SERVICE_ROLE_KEY` **ก่อน** ตรวจสิทธิ์ → ถ้ายังไม่ตั้งคีย์ ทุกคำขอได้ 503 เหมือนกันหมด (คนนอกรู้สถานะการตั้งค่าระบบ + ทดสอบด่านตรวจสิทธิ์ไม่ได้เลย). **ตอนนี้ตรวจสิทธิ์ก่อน แล้วค่อยเช็คคีย์** โดยแยก client 2 ตัว: `callerClient` (anon key + token ของผู้เรียก, ใช้ตรวจ users→staff→`canManageStaff` ผ่าน RLS ปกติ) และ `adminClient` (service_role, ใช้เฉพาะตอนเขียนจริง)
+- **✅ เทสต์ด่านตรวจสิทธิ์ผ่านครบ** (curl เข้า API ตรง ๆ ด้วย token จริงจาก `/auth/v1/token`): ไม่มี token → **401** · token ปลอม → **401** · token ของ reception (ไม่มี canManageStaff) → **403** · token ของ admin → **ผ่านด่าน** แล้วได้ 503 เพราะยังไม่มีคีย์. เหลือ 3 คำสั่งจริง (create/reset-password/delete) ที่ต้องมีคีย์ถึงจะเทสต์ end-to-end ได้
+- **⏳ `SUPABASE_SERVICE_ROLE_KEY` ยังไม่มีทั้ง 2 ที่** (ตรวจแล้ว: `.env.local` มีแค่ URL+anon; prod ยิงจริงได้ 503) — **ผู้ใช้เข้าใจว่าเคยให้แล้ว แต่ที่เคยให้คือ anon key**; service_role เป็นคีย์ใหม่ที่เพิ่งจำเป็นตอนทำหน้าจัดการบัญชี. หาได้ที่ Supabase Dashboard → Project Settings → API Keys → แถว `service_role` (secret) → Reveal. ทางเลือกถ้าไม่อยากใส่คีย์: ให้ Claude สร้าง/รีเซ็ตบัญชีผ่าน MCP execute_sql แทน (เหมือนตอน seed 022) แลกกับที่ผู้ใช้ทำเองไม่ได้
+- **⚠️ commit `17794f9` (hardening นี้) ยัง local ไม่ได้ push** — ครั้งหน้าเปิด PR ต่อได้เลย (เจ้าของสั่งพักงานก่อน)
 
 ## 6. ⏳ งานค้าง / Backlog
 1. ~~`lib/auth-store.ts` ยังใช้ localStorage~~ → ✅ บัญชีย้ายขึ้น cloud แล้ว (session คงไว้ที่ localStorage โดยตั้งใจ)
